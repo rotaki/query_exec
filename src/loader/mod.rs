@@ -1,9 +1,5 @@
+use crate::catalog::SchemaRef;
 use txn_storage::prelude::*;
-
-use crate::{
-    schema::{DataType, SchemaRef},
-    tuple::{Field, Tuple},
-};
 
 pub trait DataLoader {
     fn load_data(

@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Rule {
@@ -45,4 +45,4 @@ impl Default for Rules {
     }
 }
 
-pub type RulesRef = Rc<Rules>;
+pub type RulesRef = Arc<Rules>;

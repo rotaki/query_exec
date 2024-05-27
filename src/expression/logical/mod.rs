@@ -15,9 +15,11 @@ use std::collections::{HashMap, HashSet};
 use super::prelude::*;
 use crate::{ColumnId, ContainerId};
 
+pub use rules::{Rule, Rules, RulesRef};
+
 pub mod prelude {
     pub use super::super::prelude::*;
-    pub use super::rules::{Rule, RulesRef};
+    pub use super::{Rule, Rules, RulesRef};
 }
 
 #[derive(Debug, Clone)]

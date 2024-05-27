@@ -1,7 +1,7 @@
 // Reference: https://github.com/rotaki/decorrelator
 
 use super::prelude::*;
-use crate::catalog::ColIdGeneratorRef;
+use crate::catalog::ColIdGenRef;
 use crate::Field;
 use std::collections::HashSet;
 
@@ -11,7 +11,7 @@ impl LogicalRelExpr {
         self,
         optimize: bool,
         enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGeneratorRef,
+        col_id_gen: &ColIdGenRef,
         func: LogicalRelExpr,
     ) -> LogicalRelExpr {
         if optimize && enabled_rules.is_enabled(&Rule::Decorrelate) {
@@ -38,7 +38,6 @@ impl LogicalRelExpr {
                     enabled_rules,
                     col_id_gen,
                     cols,
-                    true,
                 );
             }
 
@@ -130,7 +129,7 @@ impl LogicalRelExpr {
                     // TODO: `is_wildcard` is set to False here to project specific columns.
                     // Check if this is the correct behavior.
                     return plan
-                        .project(true, enabled_rules, col_id_gen, project_att, false)
+                        .project(true, enabled_rules, col_id_gen, project_att)
                         .map(
                             true,
                             enabled_rules,
@@ -139,7 +138,7 @@ impl LogicalRelExpr {
                                 (
                                     id,
                                     Expression::Case {
-                                        expr: Box::new(Expression::col_ref(id)),
+                                        expr: Some(Box::new(Expression::col_ref(id))),
                                         whens: [(
                                             Expression::Field {
                                                 val: Field::Int(None),

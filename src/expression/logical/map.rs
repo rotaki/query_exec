@@ -2,7 +2,7 @@
 
 use super::super::prelude::*;
 use super::prelude::*;
-use crate::catalog::ColIdGeneratorRef;
+use crate::catalog::ColIdGenRef;
 
 impl LogicalRelExpr {
     /// Apply map to the current logical relational expression.
@@ -10,7 +10,7 @@ impl LogicalRelExpr {
         self,
         optimize: bool,
         enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGeneratorRef,
+        col_id_gen: &ColIdGenRef,
         exprs: impl IntoIterator<Item = (usize, Expression<LogicalRelExpr>)>,
     ) -> LogicalRelExpr {
         let mut exprs: Vec<(usize, Expression<LogicalRelExpr>)> = exprs.into_iter().collect();

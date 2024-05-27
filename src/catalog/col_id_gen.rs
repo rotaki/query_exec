@@ -1,6 +1,9 @@
 use crate::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 const STARTING_COL_ID: ColumnId = 10000;
 
@@ -23,23 +26,20 @@ const STARTING_COL_ID: ColumnId = 10000;
 /// These IDs will be useful for self-joins, and other queries that contain temporary
 /// columns (e.g., SELECT a+b FROM t1).
 #[derive(Serialize, Deserialize)]
-pub struct ColIdGenerator {
-    current_id: Mutex<ColumnId>,
+pub struct ColIdGen {
+    current_id: AtomicUsize,
 }
 
-impl ColIdGenerator {
-    pub fn new() -> ColIdGeneratorRef {
-        Arc::new(ColIdGenerator {
-            current_id: Mutex::new(STARTING_COL_ID),
+impl ColIdGen {
+    pub fn new() -> ColIdGenRef {
+        Arc::new(ColIdGen {
+            current_id: AtomicUsize::new(STARTING_COL_ID),
         })
     }
 
     pub fn next(&self) -> ColumnId {
-        let mut id = self.current_id.lock().unwrap();
-        let next_id = *id;
-        *id += 1;
-        next_id
+        self.current_id.fetch_add(1, Ordering::AcqRel)
     }
 }
 
-pub type ColIdGeneratorRef = Arc<ColIdGenerator>;
+pub type ColIdGenRef = Arc<ColIdGen>;

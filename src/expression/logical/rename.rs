@@ -1,7 +1,7 @@
 // Reference: https://github.com/rotaki/decorrelator
 
 use super::prelude::*;
-use crate::catalog::ColIdGeneratorRef;
+use crate::catalog::ColIdGenRef;
 use std::collections::HashMap;
 
 impl LogicalRelExpr {
@@ -10,7 +10,7 @@ impl LogicalRelExpr {
     pub fn rename(
         self,
         _enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGeneratorRef,
+        col_id_gen: &ColIdGenRef,
     ) -> (LogicalRelExpr, HashMap<usize, usize>) {
         let atts = self.att();
         let cols: HashMap<usize, usize> = atts

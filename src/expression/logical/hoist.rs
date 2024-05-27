@@ -1,7 +1,7 @@
 // Reference: https://github.com/rotaki/decorrelator
 
 use super::prelude::*;
-use crate::catalog::ColIdGeneratorRef;
+use crate::catalog::ColIdGenRef;
 
 impl LogicalRelExpr {
     // Make subquery into a FlatMap
@@ -52,7 +52,7 @@ impl LogicalRelExpr {
     pub(crate) fn hoist(
         self,
         enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGeneratorRef,
+        col_id_gen: &ColIdGenRef,
         id: usize,
         expr: Expression<LogicalRelExpr>,
     ) -> LogicalRelExpr {
@@ -98,11 +98,32 @@ impl LogicalRelExpr {
                         enabled_rules,
                         col_id_gen,
                         att.into_iter().chain([id].into_iter()).collect(),
-                        false, // TODO: Check if `is_wildcard` should be set to False
                     )
             }
             Expression::Field { .. } | Expression::ColRef { .. } => {
                 self.map(true, enabled_rules, col_id_gen, vec![(id, expr)])
+            }
+            Expression::IsNull { expr } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                self.hoist(enabled_rules, col_id_gen, expr_id, *expr)
+                    .map(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        [(
+                            id,
+                            Expression::IsNull {
+                                expr: Box::new(Expression::col_ref(expr_id)),
+                            },
+                        )],
+                    )
+                    .project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    )
             }
             Expression::Case { .. } => {
                 panic!("Case expression is not supported in hoist")

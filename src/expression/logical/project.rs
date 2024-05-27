@@ -2,7 +2,7 @@
 
 use super::super::prelude::*;
 use super::prelude::*;
-use crate::catalog::ColIdGeneratorRef;
+use crate::catalog::ColIdGenRef;
 use std::collections::{HashMap, HashSet};
 
 /// Union of free variables and columns. The order of the columns is preserved.
@@ -45,14 +45,9 @@ impl LogicalRelExpr {
         self,
         optimize: bool,
         enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGeneratorRef,
+        col_id_gen: &ColIdGenRef,
         cols: Vec<usize>,
-        is_wildcard: bool,
     ) -> LogicalRelExpr {
-        if is_wildcard {
-            return self;
-        }
-
         let outer_refs = self.free();
 
         if optimize && enabled_rules.is_enabled(&Rule::ProjectionPushdown) {
@@ -60,7 +55,7 @@ impl LogicalRelExpr {
                 LogicalRelExpr::Project {
                     src,
                     cols: _no_need_cols,
-                } => src.project(true, enabled_rules, col_id_gen, cols, false),
+                } => src.project(true, enabled_rules, col_id_gen, cols),
                 LogicalRelExpr::Map {
                     input,
                     exprs: mut existing_exprs,
@@ -86,18 +81,18 @@ impl LogicalRelExpr {
                         .collect();
 
                     input
-                        .project(true, enabled_rules, col_id_gen, new_cols, false)
+                        .project(true, enabled_rules, col_id_gen, new_cols)
                         .map(true, enabled_rules, col_id_gen, existing_exprs)
-                        .project(false, enabled_rules, col_id_gen, cols, false)
+                        .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::Select { src, predicates } => {
                     // The necessary columns are the free variables of the predicates and the projection columns
                     let free: HashSet<usize> =
                         predicates.iter().flat_map(|pred| pred.free()).collect();
                     let new_cols = union(&free, cols.clone());
-                    src.project(true, enabled_rules, col_id_gen, new_cols, false)
+                    src.project(true, enabled_rules, col_id_gen, new_cols)
                         .select(true, enabled_rules, col_id_gen, predicates)
-                        .project(false, enabled_rules, col_id_gen, cols, false)
+                        .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::Join {
                     join_type,
@@ -111,16 +106,16 @@ impl LogicalRelExpr {
                     let new_cols = union(&free, cols.clone());
                     let left_proj = intersect(&left.att(), &new_cols);
                     let right_proj = intersect(&right.att(), &new_cols);
-                    left.project(true, enabled_rules, col_id_gen, left_proj, false)
+                    left.project(true, enabled_rules, col_id_gen, left_proj)
                         .join(
                             true,
                             enabled_rules,
                             col_id_gen,
                             join_type,
-                            right.project(true, enabled_rules, col_id_gen, right_proj, false),
+                            right.project(true, enabled_rules, col_id_gen, right_proj),
                             predicates,
                         )
-                        .project(false, enabled_rules, col_id_gen, cols, false)
+                        .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::Rename {
                     src,
@@ -141,7 +136,7 @@ impl LogicalRelExpr {
 
                     // Notice that we do not apply a projection node on the `rename` operator
                     // since it is not necessary. But can be added for clarity.
-                    src.project(true, enabled_rules, &col_id_gen, new_cols, false)
+                    src.project(true, enabled_rules, &col_id_gen, new_cols)
                         .rename_to(existing_rename)
                 }
                 LogicalRelExpr::Scan {
@@ -152,7 +147,7 @@ impl LogicalRelExpr {
                     column_names.retain(|col| cols.contains(col));
                     LogicalRelExpr::scan(cid, table_name, column_names)
                 }
-                _ => self.project(false, enabled_rules, col_id_gen, cols, false),
+                _ => self.project(false, enabled_rules, col_id_gen, cols),
             }
         } else {
             LogicalRelExpr::Project {

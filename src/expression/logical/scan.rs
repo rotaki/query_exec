@@ -7,7 +7,7 @@ impl LogicalRelExpr {
     /// Create a new scan node
     pub fn scan(
         cid: ContainerId,
-        table_name: String,
+        table_name: String, // Redundant Info
         column_names: Vec<ColumnId>,
     ) -> LogicalRelExpr {
         LogicalRelExpr::Scan {

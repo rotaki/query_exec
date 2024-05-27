@@ -1,7 +1,7 @@
 // Reference: https://github.com/rotaki/decorrelator
 
 use super::prelude::*;
-use crate::catalog::ColIdGeneratorRef;
+use crate::catalog::ColIdGenRef;
 use std::collections::HashSet;
 
 impl LogicalRelExpr {
@@ -10,7 +10,7 @@ impl LogicalRelExpr {
         self,
         optimize: bool,
         enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGeneratorRef,
+        col_id_gen: &ColIdGenRef,
         join_type: JoinType,
         other: LogicalRelExpr,
         mut predicates: Vec<Expression<LogicalRelExpr>>,

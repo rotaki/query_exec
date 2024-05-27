@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 pub use crate::ColumnId;
 
 pub mod prelude {
-    pub use super::logical::LogicalRelExpr;
+    pub use super::logical::{LogicalRelExpr, Rule, Rules, RulesRef};
     pub use super::{AggOp, BinaryOp, ColumnId, Expression, JoinType, PlanTrait};
 }
 
@@ -119,13 +119,16 @@ pub enum Expression<P: PlanTrait> {
     Field {
         val: Field,
     },
+    IsNull {
+        expr: Box<Expression<P>>,
+    },
     Binary {
         op: BinaryOp,
         left: Box<Expression<P>>,
         right: Box<Expression<P>>,
     },
     Case {
-        expr: Box<Expression<P>>,
+        expr: Option<Box<Expression<P>>>,
         whens: Vec<(Expression<P>, Expression<P>)>,
         else_expr: Box<Expression<P>>,
     },
@@ -142,6 +145,18 @@ impl<P: PlanTrait> Expression<P> {
     pub fn int(val: i64) -> Expression<P> {
         Expression::Field {
             val: Field::Int(Some(val)),
+        }
+    }
+
+    pub fn bool(val: bool) -> Expression<P> {
+        Expression::Field {
+            val: Field::Boolean(Some(val)),
+        }
+    }
+
+    pub fn is_null(self) -> Expression<P> {
+        Expression::IsNull {
+            expr: Box::new(self),
         }
     }
 
@@ -179,6 +194,7 @@ impl<P: PlanTrait> Expression<P> {
         match self {
             Expression::ColRef { id: _ } => false,
             Expression::Field { val: _ } => false,
+            Expression::IsNull { expr } => expr.has_subquery(),
             Expression::Binary { left, right, .. } => left.has_subquery() || right.has_subquery(),
             Expression::Case { .. } => {
                 // Currently, we don't support subqueries in the case expression
@@ -216,6 +232,9 @@ impl<P: PlanTrait> Expression<P> {
                 }
             }
             Expression::Field { val } => Expression::Field { val },
+            Expression::IsNull { expr } => Expression::IsNull {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+            },
             Expression::Binary { op, left, right } => Expression::Binary {
                 op,
                 left: Box::new(left.replace_variables(src_to_dest)),
@@ -226,7 +245,7 @@ impl<P: PlanTrait> Expression<P> {
                 whens,
                 else_expr,
             } => Expression::Case {
-                expr: Box::new(expr.replace_variables(src_to_dest)),
+                expr: expr.map(|expr| Box::new(expr.replace_variables(src_to_dest))),
                 whens: whens
                     .into_iter()
                     .map(|(when, then)| {
@@ -259,6 +278,9 @@ impl<P: PlanTrait> Expression<P> {
                 }
             }
             Expression::Field { val } => Expression::Field { val },
+            Expression::IsNull { expr } => Expression::IsNull {
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+            },
             Expression::Binary { op, left, right } => Expression::Binary {
                 op,
                 left: Box::new(left.replace_variables_with_exprs(src_to_dest)),
@@ -269,7 +291,7 @@ impl<P: PlanTrait> Expression<P> {
                 whens,
                 else_expr,
             } => Expression::Case {
-                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+                expr: expr.map(|expr| Box::new(expr.replace_variables_with_exprs(src_to_dest))),
                 whens: whens
                     .into_iter()
                     .map(|(when, then)| {
@@ -306,6 +328,11 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Field { val } => {
                 out.push_str(&format!("{}", val));
             }
+            Expression::IsNull { expr } => {
+                out.push_str("is_null(");
+                expr.print_inner(indent, out);
+                out.push_str(")");
+            }
             Expression::Binary { op, left, right } => {
                 left.print_inner(indent, out);
                 out.push_str(&format!("{}", op));
@@ -317,7 +344,7 @@ impl<P: PlanTrait> Expression<P> {
                 else_expr,
             } => {
                 out.push_str("case ");
-                expr.print_inner(indent, out);
+                expr.as_ref().map(|expr| expr.print_inner(indent, out));
                 for (when, then) in whens {
                     out.push_str(" when ");
                     when.print_inner(indent, out);
@@ -361,6 +388,7 @@ impl<P: PlanTrait> Expression<P> {
                 set
             }
             Expression::Field { val: _ } => HashSet::new(),
+            Expression::IsNull { expr } => expr.free(),
             Expression::Binary { left, right, .. } => {
                 let mut set = left.free();
                 set.extend(right.free());
@@ -371,7 +399,7 @@ impl<P: PlanTrait> Expression<P> {
                 whens,
                 else_expr,
             } => {
-                let mut set = expr.free();
+                let mut set = expr.as_ref().map_or(HashSet::new(), |expr| expr.free());
                 for (when, then) in whens {
                     set.extend(when.free());
                     set.extend(then.free());

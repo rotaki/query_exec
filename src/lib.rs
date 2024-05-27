@@ -2,6 +2,8 @@ mod catalog;
 mod error;
 mod executor;
 mod expression;
+mod loader;
+mod parser;
 mod tuple;
 
 use serde::{Deserialize, Serialize};
