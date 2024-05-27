@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use txn_storage::prelude::*;
 
@@ -9,15 +6,6 @@ use crate::{
     schema::{DataType, SchemaRef},
     tuple::{Field, Tuple},
 };
-
-pub trait DataLoader {
-    fn load_data(
-        &mut self,
-        schema_ref: SchemaRef,
-        db_id: DatabaseId,
-        c_id: ContainerId,
-    ) -> Result<(), String>;
-}
 
 pub struct SimpleCsvDataLoader<R: std::io::Read, T: TxnStorageTrait> {
     rdr: csv::Reader<R>,
@@ -128,6 +116,7 @@ mod tests {
         let data = "name,age,city\nAlice,23,New York\nBob,25,Los Angeles\nAlice,18,San Francisco\n";
         let rdr = ReaderBuilder::new()
             .delimiter(b',')
+            .has_headers(true)
             .from_reader(data.as_bytes());
         let mut loader = SimpleCsvDataLoader::new(rdr, storage.clone());
         loader.load_data(schema_ref, db_id, c_id).unwrap();

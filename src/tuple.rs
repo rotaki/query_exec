@@ -1,34 +1,43 @@
+use std::ops::{Add, Div, Mul, Sub};
+
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{ColumnDef, DataType};
+use crate::{
+    error::ExecError,
+    schema::{ColumnDef, DataType},
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct Tuple {
-    bytes: Vec<Field>,
+    fields: Vec<Field>,
 }
 
 impl Tuple {
     pub fn with_capacity(capacity: usize) -> Self {
         Tuple {
-            bytes: Vec::with_capacity(capacity),
+            fields: Vec::with_capacity(capacity),
         }
     }
 
+    pub fn fields(&self) -> &Vec<Field> {
+        &self.fields
+    }
+
     pub fn get(&self, field_idx: usize) -> &Field {
-        &self.bytes[field_idx]
+        &self.fields[field_idx]
     }
 
     pub fn push(&mut self, field: Field) {
-        self.bytes.push(field);
+        self.fields.push(field);
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(&self.bytes).unwrap()
+        bincode::serialize(&self.fields).unwrap()
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Tuple {
-            bytes: bincode::deserialize(bytes).unwrap(),
+            fields: bincode::deserialize(bytes).unwrap(),
         }
     }
 
@@ -37,7 +46,7 @@ impl Tuple {
     pub fn to_primary_key_bytes(&self, primary_key_indicies: &Vec<usize>) -> Vec<u8> {
         let mut key = Vec::new();
         for idx in primary_key_indicies {
-            match &self.bytes[*idx] {
+            match &self.fields[*idx] {
                 Field::Boolean(val) => key.push(val.unwrap() as u8),
                 Field::Int(val) => {
                     key.extend(&val.unwrap().to_be_bytes());
@@ -65,7 +74,7 @@ impl Tuple {
         for (idx, null_first) in key_indicies.iter().zip(nulls_first) {
             let null_prefix = if *null_first { 0 } else { 1 };
             let non_null_prefix = if *null_first { 1 } else { 0 };
-            match &self.bytes[*idx] {
+            match &self.fields[*idx] {
                 Field::Boolean(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
@@ -118,7 +127,7 @@ impl std::fmt::Display for Tuple {
         // If the field is larger than 10 characters, truncate it with '...'.
         let mut res = String::new();
         let width = 10;
-        for field in &self.bytes {
+        for field in &self.fields {
             let field_str = format!("{}", field);
             if field_str.len() > width {
                 res.push_str(&field_str[..width - 3]);
@@ -135,7 +144,7 @@ impl std::fmt::Display for Tuple {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub enum Field {
     Boolean(Option<bool>),
     Int(Option<i64>),
@@ -217,6 +226,156 @@ impl std::fmt::Display for Field {
                 Some(val) => write!(f, "{}", val),
                 None => write!(f, "NULL"),
             },
+        }
+    }
+}
+
+impl Add for Field {
+    type Output = Result<Field, ExecError>;
+
+    fn add(self, other: Self) -> Self::Output {
+        match (self, other) {
+            (Field::Int(val1), Field::Int(val2)) => {
+                Ok(Field::Int(val1.and_then(|v1| val2.map(|v2| v1 + v2))))
+            }
+            (Field::Float(val1), Field::Int(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 + v2 as f64)),
+            )),
+            (Field::Int(val1), Field::Float(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 as f64 + v2)),
+            )),
+            (Field::Float(val1), Field::Float(val2)) => {
+                Ok(Field::Float(val1.and_then(|v1| val2.map(|v2| v1 + v2))))
+            }
+            (Field::String(val1), Field::String(val2)) => {
+                Ok(Field::String(val1.and_then(|v1| val2.map(|v2| v1 + &v2))))
+            }
+            (x, y) => Err(ExecError::FieldOp(format!(
+                "Cannot add {:?} and {:?}",
+                x, y
+            ))),
+        }
+    }
+}
+
+impl Sub for Field {
+    type Output = Result<Field, ExecError>;
+
+    fn sub(self, other: Self) -> Self::Output {
+        match (self, other) {
+            (Field::Int(val1), Field::Int(val2)) => {
+                Ok(Field::Int(val1.and_then(|v1| val2.map(|v2| v1 - v2))))
+            }
+            (Field::Float(val1), Field::Int(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 - v2 as f64)),
+            )),
+            (Field::Int(val1), Field::Float(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 as f64 - v2)),
+            )),
+            (Field::Float(val1), Field::Float(val2)) => {
+                Ok(Field::Float(val1.and_then(|v1| val2.map(|v2| v1 - v2))))
+            }
+            (x, y) => Err(ExecError::FieldOp(format!(
+                "Cannot subtract {:?} and {:?}",
+                x, y
+            ))),
+        }
+    }
+}
+
+impl Mul for Field {
+    type Output = Result<Field, ExecError>;
+
+    fn mul(self, other: Self) -> Self::Output {
+        match (self, other) {
+            (Field::Int(val1), Field::Int(val2)) => {
+                Ok(Field::Int(val1.and_then(|v1| val2.map(|v2| v1 * v2))))
+            }
+            (Field::Float(val1), Field::Int(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 * v2 as f64)),
+            )),
+            (Field::Int(val1), Field::Float(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 as f64 * v2)),
+            )),
+            (Field::Float(val1), Field::Float(val2)) => {
+                Ok(Field::Float(val1.and_then(|v1| val2.map(|v2| v1 * v2))))
+            }
+            (x, y) => Err(ExecError::FieldOp(format!(
+                "Cannot multiply {:?} and {:?}",
+                x, y
+            ))),
+        }
+    }
+}
+
+impl Div for Field {
+    type Output = Result<Field, ExecError>;
+
+    fn div(self, other: Self) -> Self::Output {
+        match (self, other) {
+            (Field::Int(val1), Field::Int(val2)) => {
+                Ok(Field::Int(val1.and_then(|v1| val2.map(|v2| v1 / v2))))
+            }
+            (Field::Float(val1), Field::Int(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 / v2 as f64)),
+            )),
+            (Field::Int(val1), Field::Float(val2)) => Ok(Field::Float(
+                val1.and_then(|v1| val2.map(|v2| v1 as f64 / v2)),
+            )),
+            (Field::Float(val1), Field::Float(val2)) => {
+                Ok(Field::Float(val1.and_then(|v1| val2.map(|v2| v1 / v2))))
+            }
+            (x, y) => Err(ExecError::FieldOp(format!(
+                "Cannot divide {:?} and {:?}",
+                x, y
+            ))),
+        }
+    }
+}
+
+pub trait FromBool {
+    fn from_bool(b: bool) -> Self;
+}
+
+impl FromBool for Field {
+    fn from_bool(val: bool) -> Self {
+        Field::Boolean(Some(val))
+    }
+}
+
+pub trait And {
+    fn and(&self, other: &Self) -> Result<Self, ExecError>
+    where
+        Self: Sized;
+}
+
+impl And for Field {
+    fn and(&self, other: &Self) -> Result<Self, ExecError> {
+        match (self, other) {
+            (Field::Boolean(val1), Field::Boolean(val2)) => {
+                Ok(Field::Boolean(val1.and_then(|v1| val2.map(|v2| v1 && v2))))
+            }
+            (x, y) => Err(ExecError::FieldOp(format!(
+                "Cannot AND {:?} and {:?}",
+                x, y
+            ))),
+        }
+    }
+}
+
+pub trait Or {
+    fn or(&self, other: &Self) -> Result<Self, ExecError>
+    where
+        Self: Sized;
+}
+
+impl Or for Field {
+    fn or(&self, other: &Self) -> Result<Self, ExecError> {
+        match (self, other) {
+            (Field::Boolean(val1), Field::Boolean(val2)) => {
+                Ok(Field::Boolean(val1.and_then(|v1| val2.map(|v2| v1 || v2))))
+            }
+            (x, y) => Err(ExecError::FieldOp(format!("Cannot OR {:?} and {:?}", x, y))),
         }
     }
 }

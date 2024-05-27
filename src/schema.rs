@@ -38,6 +38,10 @@ pub struct ColumnDef {
 }
 
 impl ColumnDef {
+    /// Create a new column definition.
+    /// name: Name of the column.
+    /// data_type: Data type of the column.
+    /// is_nullable: Whether the column is nullable.
     pub fn new(name: &str, data_type: DataType, is_nullable: bool) -> Self {
         ColumnDef {
             name: name.to_string(),
