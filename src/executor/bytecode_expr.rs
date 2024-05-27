@@ -1,7 +1,7 @@
 use crate::expression::prelude::*;
 use crate::{
+    catalog::Schema,
     error::ExecError,
-    schema::Schema,
     tuple::{And, Field, FromBool, Or, Tuple},
     ColumnId,
 };

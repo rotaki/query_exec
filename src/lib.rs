@@ -1,8 +1,7 @@
-mod col_id_generator;
+mod catalog;
 mod error;
 mod executor;
 mod expression;
-mod schema;
 mod tuple;
 
 use serde::{Deserialize, Serialize};

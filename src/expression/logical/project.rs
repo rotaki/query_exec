@@ -2,7 +2,7 @@
 
 use super::super::prelude::*;
 use super::prelude::*;
-use crate::col_id_generator::ColIdGeneratorRef;
+use crate::catalog::ColIdGeneratorRef;
 use std::collections::{HashMap, HashSet};
 
 /// Union of free variables and columns. The order of the columns is preserved.

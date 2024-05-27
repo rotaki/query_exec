@@ -1,7 +1,7 @@
 // Reference: https://github.com/rotaki/decorrelator
 
 use super::prelude::*;
-use crate::col_id_generator::ColIdGeneratorRef;
+use crate::catalog::ColIdGeneratorRef;
 use std::collections::HashMap;
 
 impl LogicalRelExpr {

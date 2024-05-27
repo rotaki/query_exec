@@ -3,8 +3,8 @@ use std::ops::{Add, Div, Mul, Sub};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    catalog::{ColumnDef, DataType},
     error::ExecError,
-    schema::{ColumnDef, DataType},
 };
 
 #[derive(Serialize, Deserialize)]

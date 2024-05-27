@@ -2,7 +2,7 @@
 
 use super::super::prelude::*;
 use super::prelude::*;
-use crate::col_id_generator::ColIdGeneratorRef;
+use crate::catalog::ColIdGeneratorRef;
 
 impl LogicalRelExpr {
     /// Apply map to the current logical relational expression.
