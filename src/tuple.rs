@@ -1,4 +1,7 @@
-use std::ops::{Add, Div, Mul, Sub};
+use std::{
+    hash::Hash,
+    ops::{Add, Div, Mul, Sub},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +10,21 @@ use crate::{
     error::ExecError,
 };
 
-#[derive(Serialize, Deserialize)]
+fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
+    let mut val_bits = val.to_bits();
+    let sign = (val_bits >> 63) as u8;
+    if sign == 1 {
+        // Negative number so flip all the bits including the sign bit
+        val_bits = !val_bits;
+    } else {
+        // Positive number. To distinguish between positive and negative numbers,
+        // we flip the sign bit.
+        val_bits ^= 1 << 63;
+    }
+    val_bits.to_be_bytes()
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tuple {
     fields: Vec<Field>,
 }
@@ -19,12 +36,30 @@ impl Tuple {
         }
     }
 
+    pub fn from_fields(fields: Vec<Field>) -> Self {
+        Tuple { fields }
+    }
+
+    pub fn merge(&self, other: &Tuple) -> Tuple {
+        let mut fields = Vec::with_capacity(self.fields.len() + other.fields.len());
+        fields.extend_from_slice(&self.fields);
+        fields.extend_from_slice(&other.fields);
+        Tuple { fields }
+    }
+
     pub fn fields(&self) -> &Vec<Field> {
         &self.fields
     }
 
     pub fn get(&self, field_idx: usize) -> &Field {
         &self.fields[field_idx]
+    }
+
+    pub fn get_cols(&self, col_ids: &Vec<usize>) -> Vec<Field> {
+        col_ids
+            .iter()
+            .map(|&col_id| self.fields[col_id].clone())
+            .collect()
     }
 
     pub fn push(&mut self, field: Field) {
@@ -39,6 +74,14 @@ impl Tuple {
         Tuple {
             fields: bincode::deserialize(bytes).unwrap(),
         }
+    }
+
+    pub fn project(mut self, col_ids: &Vec<usize>) -> Tuple {
+        let mut new_fields = Vec::with_capacity(col_ids.len());
+        for &col_id in col_ids {
+            new_fields.push(self.fields[col_id].take());
+        }
+        Tuple { fields: new_fields }
     }
 
     /// Convert the tuple to a primary key bytes.
@@ -67,18 +110,22 @@ impl Tuple {
 
     pub fn to_normalized_key_bytes(
         &self,
-        key_indicies: &Vec<usize>,
-        nulls_first: &Vec<bool>,
+        key_indicies: &Vec<(usize, bool, bool)>, // (idx, asc, nulls_first)
     ) -> Vec<u8> {
         let mut key = Vec::new();
-        for (idx, null_first) in key_indicies.iter().zip(nulls_first) {
-            let null_prefix = if *null_first { 0 } else { 1 };
-            let non_null_prefix = if *null_first { 1 } else { 0 };
+        for (idx, asc, null_first) in key_indicies.iter() {
+            let null_prefix = if *null_first { 0 } else { 255 };
+            let non_null_prefix = if *null_first { 255 } else { 0 };
             match &self.fields[*idx] {
                 Field::Boolean(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
-                        key.push(*val as u8);
+                        let val_in_bytes = if *val { 1 } else { 0 };
+                        if *asc {
+                            key.push(val_in_bytes);
+                        } else {
+                            key.push(!val_in_bytes);
+                        }
                     } else {
                         key.push(null_prefix);
                     }
@@ -86,7 +133,14 @@ impl Tuple {
                 Field::Int(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
-                        key.extend(&val.to_be_bytes());
+                        let val_in_bytes = val.to_be_bytes();
+                        for byte in &val_in_bytes {
+                            if *asc {
+                                key.push(*byte);
+                            } else {
+                                key.push(!byte);
+                            }
+                        }
                     } else {
                         key.push(null_prefix);
                     }
@@ -94,7 +148,14 @@ impl Tuple {
                 Field::Float(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
-                        key.extend(&val.to_be_bytes());
+                        let val_in_bytes = f64_to_order_preserving_bytes(*val);
+                        for byte in &val_in_bytes {
+                            if *asc {
+                                key.push(*byte);
+                            } else {
+                                key.push(!byte);
+                            }
+                        }
                     } else {
                         key.push(null_prefix);
                     }
@@ -102,7 +163,14 @@ impl Tuple {
                 Field::String(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
-                        key.extend(val.as_bytes());
+                        let val_in_bytes = val.as_bytes();
+                        for byte in val_in_bytes {
+                            if *asc {
+                                key.push(*byte);
+                            } else {
+                                key.push(!byte);
+                            }
+                        }
                     } else {
                         key.push(null_prefix);
                     }
@@ -110,7 +178,14 @@ impl Tuple {
                 Field::Date(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
-                        key.extend(&val.to_be_bytes());
+                        let val_in_bytes = val.to_be_bytes();
+                        for byte in &val_in_bytes {
+                            if *asc {
+                                key.push(*byte);
+                            } else {
+                                key.push(!byte);
+                            }
+                        }
                     } else {
                         key.push(null_prefix);
                     }
@@ -148,12 +223,64 @@ impl std::fmt::Display for Tuple {
 pub enum Field {
     Boolean(Option<bool>),
     Int(Option<i64>),
-    Float(Option<f64>),
+    Float(Option<f64>), // f64 should not contain f64::NAN.
     String(Option<String>),
     Date(Option<i64>),
 }
 
+impl Eq for Field {}
+impl Ord for Field {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Field::Boolean(val1), Field::Boolean(val2)) => val1.cmp(val2),
+            (Field::Int(val1), Field::Int(val2)) => val1.cmp(val2),
+            (Field::Float(val1), Field::Float(val2)) => val1.partial_cmp(val2).unwrap(),
+            (Field::String(val1), Field::String(val2)) => val1.cmp(val2),
+            (Field::Date(val1), Field::Date(val2)) => val1.cmp(val2),
+            _ => panic!("Cannot compare different types"),
+        }
+    }
+}
+
+impl Hash for Field {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Field::Boolean(val) => val.hash(state),
+            Field::Int(val) => val.hash(state),
+            Field::Float(val) => {
+                if let Some(val) = val {
+                    val.to_bits().hash(state)
+                } else {
+                    f64::NAN.to_bits().hash(state)
+                }
+            }
+            Field::String(val) => val.hash(state),
+            Field::Date(val) => val.hash(state),
+        }
+    }
+}
+
 impl Field {
+    pub fn take(&mut self) -> Field {
+        match self {
+            Field::Boolean(val) => Field::Boolean(val.take()),
+            Field::Int(val) => Field::Int(val.take()),
+            Field::Float(val) => Field::Float(val.take()),
+            Field::String(val) => Field::String(val.take()),
+            Field::Date(val) => Field::Date(val.take()),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        match self {
+            Field::Boolean(val) => val.is_none(),
+            Field::Int(val) => val.is_none(),
+            Field::Float(val) => val.is_none(),
+            Field::String(val) => val.is_none(),
+            Field::Date(val) => val.is_none(),
+        }
+    }
+
     pub fn from_str(column_def: &ColumnDef, field: &str) -> Result<Self, String> {
         let data_type = column_def.data_type();
         let is_nullable = column_def.is_nullable();
@@ -258,6 +385,14 @@ impl Add for Field {
     }
 }
 
+impl Add for &Field {
+    type Output = Result<Field, ExecError>;
+
+    fn add(self, other: Self) -> Self::Output {
+        self.clone().add(other.clone())
+    }
+}
+
 impl Sub for Field {
     type Output = Result<Field, ExecError>;
 
@@ -280,6 +415,14 @@ impl Sub for Field {
                 x, y
             ))),
         }
+    }
+}
+
+impl Sub for &Field {
+    type Output = Result<Field, ExecError>;
+
+    fn sub(self, other: Self) -> Self::Output {
+        self.clone().sub(other.clone())
     }
 }
 
@@ -308,6 +451,14 @@ impl Mul for Field {
     }
 }
 
+impl Mul for &Field {
+    type Output = Result<Field, ExecError>;
+
+    fn mul(self, other: Self) -> Self::Output {
+        self.clone().mul(other.clone())
+    }
+}
+
 impl Div for Field {
     type Output = Result<Field, ExecError>;
 
@@ -333,6 +484,14 @@ impl Div for Field {
     }
 }
 
+impl Div for &Field {
+    type Output = Result<Field, ExecError>;
+
+    fn div(self, other: Self) -> Self::Output {
+        self.clone().div(other.clone())
+    }
+}
+
 pub trait FromBool {
     fn from_bool(b: bool) -> Self;
 }
@@ -343,14 +502,16 @@ impl FromBool for Field {
     }
 }
 
-pub trait And {
-    fn and(&self, other: &Self) -> Result<Self, ExecError>
-    where
-        Self: Sized;
+pub trait And<Rhs = Self> {
+    type Output;
+
+    fn and(self, other: Rhs) -> Self::Output;
 }
 
 impl And for Field {
-    fn and(&self, other: &Self) -> Result<Self, ExecError> {
+    type Output = Result<Field, ExecError>;
+
+    fn and(self, other: Self) -> Self::Output {
         match (self, other) {
             (Field::Boolean(val1), Field::Boolean(val2)) => {
                 Ok(Field::Boolean(val1.and_then(|v1| val2.map(|v2| v1 && v2))))
@@ -363,19 +524,64 @@ impl And for Field {
     }
 }
 
-pub trait Or {
-    fn or(&self, other: &Self) -> Result<Self, ExecError>
-    where
-        Self: Sized;
+impl And for &Field {
+    type Output = Result<Field, ExecError>;
+
+    fn and(self, other: Self) -> Self::Output {
+        self.clone().and(other.clone())
+    }
+}
+
+pub trait Or<Rhs = Self> {
+    type Output;
+    fn or(self, other: Rhs) -> Self::Output;
 }
 
 impl Or for Field {
-    fn or(&self, other: &Self) -> Result<Self, ExecError> {
+    type Output = Result<Field, ExecError>;
+    fn or(self, other: Self) -> Self::Output {
         match (self, other) {
             (Field::Boolean(val1), Field::Boolean(val2)) => {
                 Ok(Field::Boolean(val1.and_then(|v1| val2.map(|v2| v1 || v2))))
             }
             (x, y) => Err(ExecError::FieldOp(format!("Cannot OR {:?} and {:?}", x, y))),
         }
+    }
+}
+
+impl Or for &Field {
+    type Output = Result<Field, ExecError>;
+    fn or(self, other: Self) -> Self::Output {
+        self.clone().or(other.clone())
+    }
+}
+
+impl From<i64> for Field {
+    fn from(val: i64) -> Self {
+        Field::Int(Some(val))
+    }
+}
+
+impl From<f64> for Field {
+    fn from(val: f64) -> Self {
+        Field::Float(Some(val))
+    }
+}
+
+impl From<bool> for Field {
+    fn from(val: bool) -> Self {
+        Field::Boolean(Some(val))
+    }
+}
+
+impl From<String> for Field {
+    fn from(val: String) -> Self {
+        Field::String(Some(val))
+    }
+}
+
+impl From<&str> for Field {
+    fn from(val: &str) -> Self {
+        Field::String(Some(val.to_string()))
     }
 }

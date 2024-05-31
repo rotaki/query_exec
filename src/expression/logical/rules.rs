@@ -1,48 +1,48 @@
 use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Rule {
+pub enum HeuristicRule {
     Hoist,
     Decorrelate,
     SelectionPushdown,
     ProjectionPushdown,
 }
 
-pub struct Rules {
-    rules: RefCell<HashSet<Rule>>,
+pub struct HeuristicRules {
+    rules: RefCell<HashSet<HeuristicRule>>,
 }
 
-impl Rules {
-    pub fn new() -> Rules {
-        Rules {
+impl HeuristicRules {
+    pub fn new() -> HeuristicRules {
+        HeuristicRules {
             rules: RefCell::new(HashSet::new()),
         }
     }
 
-    pub fn enable(&self, rule: Rule) {
+    pub fn enable(&self, rule: HeuristicRule) {
         self.rules.borrow_mut().insert(rule);
     }
 
-    pub fn disable(&self, rule: Rule) {
+    pub fn disable(&self, rule: HeuristicRule) {
         self.rules.borrow_mut().remove(&rule);
     }
 
-    pub fn is_enabled(&self, rule: &Rule) -> bool {
+    pub fn is_enabled(&self, rule: &HeuristicRule) -> bool {
         self.rules.borrow().contains(rule)
     }
 }
 
-impl Default for Rules {
+impl Default for HeuristicRules {
     fn default() -> Self {
         let mut rules = HashSet::new();
-        rules.insert(Rule::Hoist);
-        rules.insert(Rule::Decorrelate);
-        rules.insert(Rule::SelectionPushdown);
-        rules.insert(Rule::ProjectionPushdown);
-        Rules {
+        rules.insert(HeuristicRule::Hoist);
+        rules.insert(HeuristicRule::Decorrelate);
+        rules.insert(HeuristicRule::SelectionPushdown);
+        rules.insert(HeuristicRule::ProjectionPushdown);
+        HeuristicRules {
             rules: RefCell::new(rules),
         }
     }
 }
 
-pub type RulesRef = Arc<Rules>;
+pub type HeuristicRulesRef = Arc<HeuristicRules>;

@@ -1,19 +1,23 @@
 // Reference: https://github.com/rotaki/decorrelator
 
+use txn_storage::DatabaseId;
+
 use super::LogicalRelExpr;
 use crate::prelude::{ColumnId, ContainerId};
 
 impl LogicalRelExpr {
     /// Create a new scan node
     pub fn scan(
-        cid: ContainerId,
+        db_id: DatabaseId,
+        c_id: ContainerId,
         table_name: String, // Redundant Info
         column_names: Vec<ColumnId>,
     ) -> LogicalRelExpr {
         LogicalRelExpr::Scan {
-            cid,
+            db_id,
+            c_id,
             table_name,
-            column_names,
+            column_indices: column_names,
         }
     }
 }

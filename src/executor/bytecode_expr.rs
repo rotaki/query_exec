@@ -7,6 +7,7 @@ use crate::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::{
     collections::HashMap,
     ops::{Add, Div, Mul, Sub},
@@ -105,6 +106,13 @@ impl ByteCodeExpr {
             STATIC_DISPATCHER[opcode](bytecodes, &mut i, &mut stack, literals, record)?;
         }
         Ok(stack.pop().unwrap())
+    }
+
+    pub fn from_ast<P: PlanTrait>(
+        expr: Expression<P>,
+        col_id_to_idx: &HashMap<ColumnId, ColumnId>,
+    ) -> Result<Self, ExecError> {
+        AstToByteCode::<P>::to_bytecode(expr, col_id_to_idx)
     }
 }
 
@@ -322,11 +330,11 @@ fn and<T>(
     _record: &[T],
 ) -> Result<(), ExecError>
 where
-    T: PartialEq + Clone + And,
+    T: PartialEq + Clone + And<Output = Result<T, ExecError>>,
 {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(l.and(&r)?);
+    stack.push(l.and(r)?);
     Ok(())
 }
 
@@ -338,39 +346,39 @@ fn or<T>(
     _record: &[T],
 ) -> Result<(), ExecError>
 where
-    T: PartialEq + Clone + Or,
+    T: PartialEq + Clone + Or<Output = Result<T, ExecError>>,
 {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(l.or(&r)?);
+    stack.push(l.or(r)?);
     Ok(())
 }
 
-/// Convert a physical expression to a bytecode expression.
-/// This function may take in `col_id_to_idx` (mapping from the unique column ID to the
-/// index of the column in the schema) to replace the column references in the physical
-/// expression with the corresponding index in the schema.
-///
-/// # Arguments
-///
-/// * `expr` - The physical expression to convert.
-///
-/// * `col_id_to_idx` - The mapping from the unique column ID to the index of the column
-///
-/// # Returns
-///
-/// * `Result<ByteCodeExpr, CrustyError>` - The converted bytecode expression.
-pub fn convert_expr_to_bytecode<P: PlanTrait>(
-    expr: Expression<P>,
-    col_id_to_idx: Option<&HashMap<ColumnId, ColumnId>>,
-) -> Result<ByteCodeExpr, ExecError> {
-    let mut bound_expr = expr;
-    if let Some(col_id_to_idx) = col_id_to_idx {
-        bound_expr = bound_expr.replace_variables(col_id_to_idx);
+pub struct AstToByteCode<P: PlanTrait> {
+    phantom: PhantomData<P>,
+}
+
+impl<P: PlanTrait> AstToByteCode<P> {
+    /// Convert a physical expression to a bytecode expression.
+    /// This function may take in `col_id_to_idx` (mapping from the unique column ID to the
+    /// index of the column in the schema) to replace the column references in the physical
+    /// expression with the corresponding index in the schema.
+    ///
+    /// # Arguments
+    ///
+    /// * `expr` - The physical expression to convert.
+    ///
+    /// * `col_id_to_idx` - The mapping from the unique column ID to the index of the column
+    ///
+    pub fn to_bytecode(
+        expr: Expression<P>,
+        col_id_to_idx: &HashMap<ColumnId, ColumnId>,
+    ) -> Result<ByteCodeExpr, ExecError> {
+        let expr = expr.replace_variables(&col_id_to_idx);
+        let mut bytecode_expr = ByteCodeExpr::new();
+        convert_expr_to_bytecode(&expr, &mut bytecode_expr)?;
+        Ok(bytecode_expr)
     }
-    let mut bytecode_expr = ByteCodeExpr::new();
-    convert_expr_to_bytecode_inner(&bound_expr, &mut bytecode_expr)?;
-    Ok(bytecode_expr)
 }
 
 /// Helper function called by `convert_ast_to_bytecode` to recursively convert the
@@ -388,7 +396,7 @@ pub fn convert_expr_to_bytecode<P: PlanTrait>(
 /// # Returns
 ///
 /// * `Result<(), CrustyError>` - Ok(()) if the conversion is successful
-fn convert_expr_to_bytecode_inner<P: PlanTrait>(
+fn convert_expr_to_bytecode<P: PlanTrait>(
     expr: &Expression<P>,
     bytecode_expr: &mut ByteCodeExpr,
 ) -> Result<(), ExecError> {
@@ -408,8 +416,8 @@ fn convert_expr_to_bytecode_inner<P: PlanTrait>(
             // 4, [a+b][c][d]
             // 5, [a+b][c+d]
             // 6, [a+b-c-d]
-            convert_expr_to_bytecode_inner(left, bytecode_expr)?;
-            convert_expr_to_bytecode_inner(right, bytecode_expr)?;
+            convert_expr_to_bytecode(left, bytecode_expr)?;
+            convert_expr_to_bytecode(right, bytecode_expr)?;
             match op {
                 BinaryOp::Add => bytecode_expr.add_code(ByteCodes::Add as usize),
                 BinaryOp::Sub => bytecode_expr.add_code(ByteCodes::Sub as usize),

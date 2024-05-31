@@ -1,8 +1,10 @@
 mod catalog;
+mod conductor;
 mod error;
 mod executor;
 mod expression;
 mod loader;
+mod optimizer;
 mod parser;
 mod tuple;
 

@@ -51,7 +51,7 @@ impl LogicalRelExpr {
     /// Try to make a subquery into a flatmap
     pub(crate) fn hoist(
         self,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         id: usize,
         expr: Expression<LogicalRelExpr>,

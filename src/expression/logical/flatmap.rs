@@ -10,11 +10,11 @@ impl LogicalRelExpr {
     pub fn flatmap(
         self,
         optimize: bool,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         func: LogicalRelExpr,
     ) -> LogicalRelExpr {
-        if optimize && enabled_rules.is_enabled(&Rule::Decorrelate) {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::Decorrelate) {
             // Not correlated!
             if func.free().is_empty() {
                 return self.join(

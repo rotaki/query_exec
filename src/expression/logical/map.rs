@@ -9,7 +9,7 @@ impl LogicalRelExpr {
     pub fn map(
         self,
         optimize: bool,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         exprs: impl IntoIterator<Item = (usize, Expression<LogicalRelExpr>)>,
     ) -> LogicalRelExpr {
@@ -20,7 +20,7 @@ impl LogicalRelExpr {
         }
 
         if optimize {
-            if enabled_rules.is_enabled(&Rule::Hoist) {
+            if enabled_rules.is_enabled(&HeuristicRule::Hoist) {
                 for i in 0..exprs.len() {
                     // Only hoist expressions with subqueries
                     if exprs[i].1.has_subquery() {

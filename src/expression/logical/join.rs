@@ -9,7 +9,7 @@ impl LogicalRelExpr {
     pub fn join(
         self,
         optimize: bool,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         join_type: JoinType,
         other: LogicalRelExpr,

@@ -2,12 +2,17 @@ use std::{
     cell::{Ref, RefCell},
     collections::{HashMap, HashSet},
     rc::Rc,
+    sync::Arc,
 };
 
+use txn_storage::DatabaseId;
+
 use crate::{
-    catalog::{self, Catalog, CatalogRef, ColIdGenRef},
+    catalog::{self, Catalog, CatalogRef, ColIdGen, ColIdGenRef},
     expression::{
-        prelude::{BinaryOp, JoinType, LogicalRelExpr, PlanTrait, Rule, RulesRef},
+        prelude::{
+            BinaryOp, HeuristicRule, HeuristicRulesRef, JoinType, LogicalRelExpr, PlanTrait,
+        },
         AggOp, Expression,
     },
     tuple::Field,
@@ -79,16 +84,17 @@ impl Environment {
     }
 }
 
-struct Translator {
+pub struct Translator {
+    db_id: DatabaseId,
     catalog_ref: CatalogRef,
-    enabled_rules: RulesRef,
+    enabled_rules: HeuristicRulesRef,
     col_id_gen: ColIdGenRef,
     env: EnvironmentRef, // Variables in the current scope
 }
 
-struct Query {
-    env: EnvironmentRef,
-    plan: LogicalRelExpr,
+pub struct Query {
+    pub env: EnvironmentRef,
+    pub plan: LogicalRelExpr,
 }
 
 #[derive(Debug)]
@@ -116,25 +122,28 @@ macro_rules! translation_err {
 
 impl Translator {
     pub fn new(
-        catalog: &CatalogRef,
-        enabled_rules: &RulesRef,
-        col_id_gen: &ColIdGenRef,
+        db_id: DatabaseId,
+        catalog: &CatalogRef, // Per DB catalog
+        enabled_rules: &HeuristicRulesRef,
     ) -> Translator {
         Translator {
+            db_id,
             catalog_ref: catalog.clone(),
             enabled_rules: enabled_rules.clone(),
-            col_id_gen: col_id_gen.clone(),
+            col_id_gen: ColIdGen::new(),
             env: Rc::new(Environment::new()),
         }
     }
 
     fn new_with_outer(
+        db_id: DatabaseId,
         catalog: &CatalogRef,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         outer: &EnvironmentRef,
     ) -> Translator {
         Translator {
+            db_id,
             col_id_gen: col_id_gen.clone(),
             enabled_rules: enabled_rules.clone(),
             catalog_ref: catalog.clone(),
@@ -289,8 +298,12 @@ impl Translator {
                     let (c_id, table) = self.catalog_ref.get_table(&table_name).unwrap();
                     let schema = table.schema();
                     let cols = schema.columns();
-                    let plan =
-                        LogicalRelExpr::scan(c_id, table_name.clone(), (0..cols.len()).collect());
+                    let plan = LogicalRelExpr::scan(
+                        self.db_id,
+                        c_id,
+                        table_name.clone(),
+                        (0..cols.len()).collect(),
+                    );
                     let (plan, mut new_col_ids) =
                         plan.rename(&self.enabled_rules, &self.col_id_gen);
 
@@ -325,6 +338,7 @@ impl Translator {
                 subquery, alias, ..
             } => {
                 let mut translator = Translator::new_with_outer(
+                    self.db_id,
                     &self.catalog_ref,
                     &self.enabled_rules,
                     &self.col_id_gen,
@@ -847,6 +861,7 @@ impl Translator {
             },
             sqlparser::ast::Expr::Exists { subquery, negated } => {
                 let mut translator = Translator::new_with_outer(
+                    self.db_id,
                     &self.catalog_ref,
                     &self.enabled_rules,
                     &self.col_id_gen,
@@ -1028,6 +1043,7 @@ impl Translator {
             }
             sqlparser::ast::Expr::Subquery(query) => {
                 let mut translator = Translator::new_with_outer(
+                    self.db_id,
                     &self.catalog_ref,
                     &self.enabled_rules,
                     &self.col_id_gen,
@@ -1086,7 +1102,7 @@ mod tests {
     use super::Translator;
     use crate::{
         catalog::{Catalog, ColIdGen, ColIdGenRef, ColumnDef, DataType, Schema, Table},
-        expression::prelude::Rules,
+        expression::prelude::HeuristicRules,
     };
     use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
     use std::sync::Arc;
@@ -1162,13 +1178,13 @@ mod tests {
     }
 
     fn get_translator() -> Translator {
+        let db_id = 0;
         let catalog = Arc::new(get_test_catalog());
-        let enabled_rules = Arc::new(Rules::default());
+        let enabled_rules = Arc::new(HeuristicRules::default());
         // enabled_rules.disable(Rule::Decorrelate);
         // enabled_rules.disable(Rule::Hoist);
         // enabled_rules.disable(Rule::ProjectionPushdown);
-        let col_id_gen = Arc::new(ColIdGen::new());
-        Translator::new(&catalog, &enabled_rules, &col_id_gen)
+        Translator::new(db_id, &catalog, &enabled_rules)
     }
 
     fn get_plan(sql: &str) -> String {

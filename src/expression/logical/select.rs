@@ -9,7 +9,7 @@ impl LogicalRelExpr {
     pub fn select(
         self,
         optimize: bool,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         predicates: Vec<Expression<LogicalRelExpr>>,
     ) -> LogicalRelExpr {
@@ -21,7 +21,7 @@ impl LogicalRelExpr {
             .flat_map(|expr| expr.split_conjunction())
             .collect();
 
-        if optimize && enabled_rules.is_enabled(&Rule::SelectionPushdown) {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::SelectionPushdown) {
             match self {
                 LogicalRelExpr::Select {
                     src,

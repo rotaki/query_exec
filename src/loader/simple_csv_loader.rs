@@ -2,23 +2,25 @@ use std::sync::Arc;
 
 use txn_storage::prelude::*;
 
+use super::DataLoader;
+
 use crate::{
-    schema::{DataType, SchemaRef},
+    catalog::{DataType, SchemaRef},
     tuple::{Field, Tuple},
 };
 
-pub struct SimpleCsvDataLoader<R: std::io::Read, T: TxnStorageTrait> {
+pub struct SimpleCsvLoader<R: std::io::Read, T: TxnStorageTrait> {
     rdr: csv::Reader<R>,
     storage: Arc<T>,
 }
 
-impl<R: std::io::Read, T: TxnStorageTrait> SimpleCsvDataLoader<R, T> {
+impl<R: std::io::Read, T: TxnStorageTrait> SimpleCsvLoader<R, T> {
     pub fn new(rdr: csv::Reader<R>, storage: Arc<T>) -> Self {
         Self { rdr, storage }
     }
 }
 
-impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvDataLoader<R, T> {
+impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> {
     fn load_data(
         &mut self,
         schema_ref: SchemaRef,
@@ -68,13 +70,13 @@ mod tests {
     use std::sync::Arc;
 
     use crate::{
-        schema::{ColumnDef, DataType, Schema, SchemaRef},
+        catalog::{ColumnDef, DataType, Schema, SchemaRef},
         tuple::Tuple,
     };
     use csv::ReaderBuilder;
     use txn_storage::prelude::*;
 
-    use super::{DataLoader, SimpleCsvDataLoader};
+    use super::{DataLoader, SimpleCsvLoader};
 
     fn get_in_mem_storage() -> Arc<txn_storage::InMemStorage> {
         Arc::new(txn_storage::InMemStorage::new())
@@ -118,7 +120,7 @@ mod tests {
             .delimiter(b',')
             .has_headers(true)
             .from_reader(data.as_bytes());
-        let mut loader = SimpleCsvDataLoader::new(rdr, storage.clone());
+        let mut loader = SimpleCsvLoader::new(rdr, storage.clone());
         loader.load_data(schema_ref, db_id, c_id).unwrap();
 
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();

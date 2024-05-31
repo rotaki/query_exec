@@ -6,9 +6,10 @@ use crate::prelude::*;
 #[derive(Debug, Clone)]
 pub enum PhysicalRelExpr {
     Scan {
-        cid: ContainerId,
+        db_id: DatabaseId,
+        c_id: ContainerId,
         table_name: String,
-        column_names: Vec<ColumnId>,
+        column_indices: Vec<ColumnId>,
     },
     Select {
         // Evaluate the predicate for each row in the source
@@ -25,32 +26,21 @@ pub enum PhysicalRelExpr {
         right: Box<PhysicalRelExpr>,
         predicates: Vec<Expression<Self>>,
     },
-    NestedLoopJoin {
-        join_type: JoinType,
-        left: Box<PhysicalRelExpr>,
-        right: Box<PhysicalRelExpr>,
-        predicates: Vec<Expression<Self>>,
-    },
     HashJoin {
         join_type: JoinType,
         left: Box<PhysicalRelExpr>,
         right: Box<PhysicalRelExpr>,
-        predicates: Vec<Expression<Self>>,
-    },
-    SortMergeJoin {
-        join_type: JoinType,
-        left: Box<PhysicalRelExpr>,
-        right: Box<PhysicalRelExpr>,
-        predicates: Vec<Expression<Self>>,
+        equalities: Vec<(Expression<Self>, Expression<Self>)>, // Left and right expressions
+        filter: Vec<Expression<Self>>,
     },
     Project {
         // Reduces the number of columns in the result
         src: Box<PhysicalRelExpr>,
-        cols: Vec<ColumnId>,
+        column_names: Vec<ColumnId>,
     },
     Sort {
         src: Box<PhysicalRelExpr>,
-        cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
+        column_names: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
     },
     HashAggregate {
         src: Box<PhysicalRelExpr>,
@@ -81,18 +71,20 @@ impl PlanTrait for PhysicalRelExpr {
     fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> PhysicalRelExpr {
         match self {
             PhysicalRelExpr::Scan {
-                cid,
+                db_id,
+                c_id,
                 table_name,
-                column_names,
+                column_indices: column_names,
             } => {
                 let column_names = column_names
                     .into_iter()
                     .map(|col| *src_to_dest.get(&col).unwrap_or(&col))
                     .collect();
                 PhysicalRelExpr::Scan {
-                    cid,
+                    db_id,
+                    c_id,
                     table_name,
-                    column_names,
+                    column_indices: column_names,
                 }
             }
             PhysicalRelExpr::Select { src, predicates } => PhysicalRelExpr::Select {
@@ -116,58 +108,46 @@ impl PlanTrait for PhysicalRelExpr {
                     .map(|pred| pred.replace_variables(src_to_dest))
                     .collect(),
             },
-            PhysicalRelExpr::NestedLoopJoin {
-                join_type,
-                left,
-                right,
-                predicates,
-            } => PhysicalRelExpr::NestedLoopJoin {
-                join_type,
-                left: Box::new(left.replace_variables(src_to_dest)),
-                right: Box::new(right.replace_variables(src_to_dest)),
-                predicates: predicates
-                    .into_iter()
-                    .map(|pred| pred.replace_variables(src_to_dest))
-                    .collect(),
-            },
             PhysicalRelExpr::HashJoin {
                 join_type,
                 left,
                 right,
-                predicates,
+                equalities,
+                filter,
             } => PhysicalRelExpr::HashJoin {
                 join_type,
                 left: Box::new(left.replace_variables(src_to_dest)),
                 right: Box::new(right.replace_variables(src_to_dest)),
-                predicates: predicates
+                equalities: equalities
+                    .into_iter()
+                    .map(|(left, right)| {
+                        (
+                            left.replace_variables(src_to_dest),
+                            right.replace_variables(src_to_dest),
+                        )
+                    })
+                    .collect(),
+                filter: filter
                     .into_iter()
                     .map(|pred| pred.replace_variables(src_to_dest))
                     .collect(),
             },
-            PhysicalRelExpr::SortMergeJoin {
-                join_type,
-                left,
-                right,
-                predicates,
-            } => PhysicalRelExpr::SortMergeJoin {
-                join_type,
-                left: Box::new(left.replace_variables(src_to_dest)),
-                right: Box::new(right.replace_variables(src_to_dest)),
-                predicates: predicates
-                    .into_iter()
-                    .map(|pred| pred.replace_variables(src_to_dest))
-                    .collect(),
-            },
-            PhysicalRelExpr::Project { src, cols } => PhysicalRelExpr::Project {
+            PhysicalRelExpr::Project {
+                src,
+                column_names: cols,
+            } => PhysicalRelExpr::Project {
                 src: Box::new(src.replace_variables(src_to_dest)),
-                cols: cols
+                column_names: cols
                     .into_iter()
                     .map(|col| *src_to_dest.get(&col).unwrap_or(&col))
                     .collect(),
             },
-            PhysicalRelExpr::Sort { src, cols } => PhysicalRelExpr::Sort {
+            PhysicalRelExpr::Sort {
+                src,
+                column_names: cols,
+            } => PhysicalRelExpr::Sort {
                 src: Box::new(src.replace_variables(src_to_dest)),
-                cols: cols
+                column_names: cols
                     .into_iter()
                     .map(|(id, asc, nulls_first)| {
                         (*src_to_dest.get(&id).unwrap_or(&id), asc, nulls_first)
@@ -231,9 +211,10 @@ impl PlanTrait for PhysicalRelExpr {
     fn print_inner(&self, indent: usize, out: &mut String) {
         match self {
             PhysicalRelExpr::Scan {
-                cid: _,
+                db_id: _,
+                c_id: _,
                 table_name,
-                column_names,
+                column_indices: column_names,
             } => {
                 out.push_str(&format!("{}-> scan({:?}, ", " ".repeat(indent), table_name,));
                 let mut split = "";
@@ -277,40 +258,27 @@ impl PlanTrait for PhysicalRelExpr {
                 left.print_inner(indent + 2, out);
                 right.print_inner(indent + 2, out);
             }
-            PhysicalRelExpr::NestedLoopJoin {
-                join_type,
-                left,
-                right,
-                predicates,
-            } => {
-                out.push_str(&format!(
-                    "{}-> Nested loop {}_join(",
-                    " ".repeat(indent),
-                    join_type
-                ));
-                let mut split = "";
-                for pred in predicates {
-                    out.push_str(split);
-                    pred.print_inner(0, out);
-                    split = " && ";
-                }
-                out.push_str(")\n");
-                left.print_inner(indent + 2, out);
-                right.print_inner(indent + 2, out);
-            }
             PhysicalRelExpr::HashJoin {
                 join_type,
                 left,
                 right,
-                predicates,
+                equalities,
+                filter,
             } => {
                 out.push_str(&format!(
-                    "{}-> Hash {}_join(",
+                    "{}-> hash {}_join(",
                     " ".repeat(indent),
                     join_type
                 ));
                 let mut split = "";
-                for pred in predicates {
+                for (left, right) in equalities {
+                    out.push_str(split);
+                    left.print_inner(0, out);
+                    out.push_str(" = ");
+                    right.print_inner(0, out);
+                    split = " && ";
+                }
+                for pred in filter {
                     out.push_str(split);
                     pred.print_inner(0, out);
                     split = " && ";
@@ -319,28 +287,10 @@ impl PlanTrait for PhysicalRelExpr {
                 left.print_inner(indent + 2, out);
                 right.print_inner(indent + 2, out);
             }
-            PhysicalRelExpr::SortMergeJoin {
-                join_type,
-                left,
-                right,
-                predicates,
+            PhysicalRelExpr::Project {
+                src,
+                column_names: cols,
             } => {
-                out.push_str(&format!(
-                    "{}-> Sort merge {}_join(",
-                    " ".repeat(indent),
-                    join_type
-                ));
-                let mut split = "";
-                for pred in predicates {
-                    out.push_str(split);
-                    pred.print_inner(0, out);
-                    split = " && ";
-                }
-                out.push_str(")\n");
-                left.print_inner(indent + 2, out);
-                right.print_inner(indent + 2, out);
-            }
-            PhysicalRelExpr::Project { src, cols } => {
                 out.push_str(&format!("{}-> project(", " ".repeat(indent)));
                 let mut split = "";
                 for col in cols {
@@ -351,7 +301,10 @@ impl PlanTrait for PhysicalRelExpr {
                 out.push_str(")\n");
                 src.print_inner(indent + 2, out);
             }
-            PhysicalRelExpr::Sort { src, cols } => {
+            PhysicalRelExpr::Sort {
+                src,
+                column_names: cols,
+            } => {
                 out.push_str(&format!("{}-> order_by({:?})\n", " ".repeat(indent), cols));
                 src.print_inner(indent + 2, out);
             }
@@ -440,24 +393,6 @@ impl PlanTrait for PhysicalRelExpr {
                 right,
                 predicates,
                 ..
-            }
-            | PhysicalRelExpr::NestedLoopJoin {
-                left,
-                right,
-                predicates,
-                ..
-            }
-            | PhysicalRelExpr::HashJoin {
-                left,
-                right,
-                predicates,
-                ..
-            }
-            | PhysicalRelExpr::SortMergeJoin {
-                left,
-                right,
-                predicates,
-                ..
             } => {
                 let mut set = left.free();
                 set.extend(right.free());
@@ -468,14 +403,40 @@ impl PlanTrait for PhysicalRelExpr {
                     .cloned()
                     .collect()
             }
-            PhysicalRelExpr::Project { src, cols } => {
+            PhysicalRelExpr::HashJoin {
+                join_type: _,
+                left,
+                right,
+                equalities,
+                filter,
+            } => {
+                let mut set = left.free();
+                set.extend(right.free());
+                for (left, right) in equalities {
+                    set.extend(left.free());
+                    set.extend(right.free());
+                }
+                for pred in filter {
+                    set.extend(pred.free());
+                }
+                set.difference(&left.att().union(&right.att()).cloned().collect())
+                    .cloned()
+                    .collect()
+            }
+            PhysicalRelExpr::Project {
+                src,
+                column_names: cols,
+            } => {
                 let mut set = src.free();
                 for col in cols {
                     set.insert(*col);
                 }
                 set.difference(&src.att()).cloned().collect()
             }
-            PhysicalRelExpr::Sort { src, cols } => {
+            PhysicalRelExpr::Sort {
+                src,
+                column_names: cols,
+            } => {
                 let mut set = src.free();
                 for (id, _, _) in cols {
                     set.insert(*id);
@@ -523,20 +484,21 @@ impl PlanTrait for PhysicalRelExpr {
     fn att(&self) -> HashSet<ColumnId> {
         match self {
             PhysicalRelExpr::Scan {
-                cid: _,
+                db_id: _,
+                c_id: _,
                 table_name: _,
-                column_names,
+                column_indices: column_names,
             } => column_names.iter().cloned().collect(),
             PhysicalRelExpr::Select { src, .. } => src.att(),
             PhysicalRelExpr::CrossJoin { left, right, .. }
-            | PhysicalRelExpr::NestedLoopJoin { left, right, .. }
-            | PhysicalRelExpr::HashJoin { left, right, .. }
-            | PhysicalRelExpr::SortMergeJoin { left, right, .. } => {
+            | PhysicalRelExpr::HashJoin { left, right, .. } => {
                 let mut set = left.att();
                 set.extend(right.att());
                 set
             }
-            PhysicalRelExpr::Project { cols, .. } => cols.iter().cloned().collect(),
+            PhysicalRelExpr::Project {
+                column_names: cols, ..
+            } => cols.iter().cloned().collect(),
             PhysicalRelExpr::Sort { src, .. } => src.att(),
             PhysicalRelExpr::HashAggregate {
                 group_by, aggrs, ..
@@ -579,5 +541,213 @@ impl PhysicalRelExpr {
         let mut out = String::new();
         self.print_inner(0, &mut out);
         out
+    }
+
+    pub fn pre_post_visit<V>(&self, visitor: &mut V)
+    where
+        V: PrePostVisitor<PhysicalRelExpr>,
+    {
+        match &self {
+            PhysicalRelExpr::Scan { .. } => {
+                visitor.visit_pre(&self);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::Select { src, .. } => {
+                visitor.visit_pre(&self);
+                src.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::CrossJoin { left, right, .. }
+            | PhysicalRelExpr::HashJoin { left, right, .. } => {
+                visitor.visit_pre(&self);
+                left.pre_post_visit(visitor);
+                right.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::Project { src, .. } => {
+                visitor.visit_pre(&self);
+                src.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::Sort { src, .. } => {
+                visitor.visit_pre(&self);
+                src.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::HashAggregate { src, .. } => {
+                visitor.visit_pre(&self);
+                src.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::Map { input, .. } => {
+                visitor.visit_pre(&self);
+                input.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::FlatMap { input, func } => {
+                visitor.visit_pre(&self);
+                input.pre_post_visit(visitor);
+                func.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+            PhysicalRelExpr::Rename { src, .. } => {
+                visitor.visit_pre(&self);
+                src.pre_post_visit(visitor);
+                visitor.visit_post(&self);
+            }
+        }
+    }
+}
+
+pub struct LogicalToPhysicalRelExpr;
+
+impl LogicalToPhysicalRelExpr {
+    pub fn to_physical(&mut self, expr: LogicalRelExpr) -> PhysicalRelExpr {
+        match expr {
+            LogicalRelExpr::Scan {
+                db_id,
+                c_id,
+                table_name,
+                column_indices: column_names,
+            } => PhysicalRelExpr::Scan {
+                db_id,
+                c_id,
+                table_name,
+                column_indices: column_names,
+            },
+            LogicalRelExpr::Select { src, predicates } => PhysicalRelExpr::Select {
+                src: Box::new(self.to_physical(*src)),
+                predicates: predicates
+                    .iter()
+                    .map(|pred| LogicalToPhysicalExpression.to_physical(pred))
+                    .collect(),
+            },
+            LogicalRelExpr::Project { src, cols } => PhysicalRelExpr::Project {
+                src: Box::new(self.to_physical(*src)),
+                column_names: cols,
+            },
+            LogicalRelExpr::Join {
+                join_type,
+                left,
+                right,
+                predicates,
+            } => {
+                let left = Box::new(self.to_physical(*left));
+                let right = Box::new(self.to_physical(*right));
+                let predicates = predicates
+                    .iter()
+                    .map(|pred| LogicalToPhysicalExpression.to_physical(pred))
+                    .collect();
+                match join_type {
+                    // If join_type is CrossJoin, we use the CrossJoin variant
+                    // Otherwise, we use hash join
+                    JoinType::CrossJoin => PhysicalRelExpr::CrossJoin {
+                        join_type: JoinType::CrossJoin,
+                        left,
+                        right,
+                        predicates,
+                    },
+                    _ => {
+                        // Determine the equality predicates and left, right filter conditions
+                        let mut equalities = Vec::new();
+                        let mut filter = Vec::new();
+                        for pred in predicates {
+                            match pred {
+                                Expression::Binary {
+                                    op: BinaryOp::Eq,
+                                    left: left_expr,
+                                    right: right_expr,
+                                } if left_expr.bound_by(&left) && right_expr.bound_by(&right) => {
+                                    equalities.push((*left_expr, *right_expr));
+                                }
+                                Expression::Binary {
+                                    op: BinaryOp::Eq,
+                                    left: left_expr,
+                                    right: right_expr,
+                                } if left_expr.bound_by(&right) && right_expr.bound_by(&left) => {
+                                    equalities.push((*right_expr, *left_expr));
+                                }
+                                _ => {
+                                    filter.push(pred);
+                                }
+                            }
+                        }
+                        PhysicalRelExpr::HashJoin {
+                            join_type,
+                            left,
+                            right,
+                            equalities,
+                            filter,
+                        }
+                    }
+                }
+            }
+            // TODO: The current translator does not support ORDER BY
+            LogicalRelExpr::OrderBy { src, cols } => PhysicalRelExpr::Sort {
+                src: Box::new(self.to_physical(*src)),
+                column_names: cols,
+            },
+            LogicalRelExpr::Aggregate {
+                src,
+                group_by,
+                aggrs,
+            } => PhysicalRelExpr::HashAggregate {
+                src: Box::new(self.to_physical(*src)),
+                group_by,
+                aggrs,
+            },
+            LogicalRelExpr::Map { input, exprs } => PhysicalRelExpr::Map {
+                input: Box::new(self.to_physical(*input)),
+                exprs: exprs
+                    .iter()
+                    .map(|(id, expr)| (*id, LogicalToPhysicalExpression.to_physical(expr)))
+                    .collect(),
+            },
+            LogicalRelExpr::FlatMap { input, func } => PhysicalRelExpr::FlatMap {
+                input: Box::new(self.to_physical(*input)),
+                func: Box::new(self.to_physical(*func)),
+            },
+            LogicalRelExpr::Rename { src, src_to_dest } => PhysicalRelExpr::Rename {
+                src: Box::new(self.to_physical(*src)),
+                src_to_dest,
+            },
+        }
+    }
+}
+
+pub struct LogicalToPhysicalExpression;
+
+impl LogicalToPhysicalExpression {
+    pub fn to_physical(
+        &mut self,
+        expr: &Expression<LogicalRelExpr>,
+    ) -> Expression<PhysicalRelExpr> {
+        match expr {
+            Expression::ColRef { id } => Expression::ColRef { id: *id },
+            Expression::Field { val } => Expression::Field { val: val.clone() },
+            Expression::IsNull { expr } => Expression::IsNull {
+                expr: Box::new(self.to_physical(expr)),
+            },
+            Expression::Binary { op, left, right } => Expression::Binary {
+                op: *op,
+                left: Box::new(self.to_physical(left)),
+                right: Box::new(self.to_physical(right)),
+            },
+            Expression::Case {
+                expr,
+                whens,
+                else_expr,
+            } => Expression::Case {
+                expr: expr.as_ref().map(|expr| Box::new(self.to_physical(expr))),
+                whens: whens
+                    .iter()
+                    .map(|(when, then)| (self.to_physical(when), self.to_physical(then)))
+                    .collect(),
+                else_expr: Box::new(self.to_physical(else_expr)),
+            },
+            Expression::Subquery { expr } => Expression::Subquery {
+                expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
+            },
+        }
     }
 }

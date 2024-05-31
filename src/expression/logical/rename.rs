@@ -9,7 +9,7 @@ impl LogicalRelExpr {
     /// Output: RelExpr, HashMap<old_col_id, new_col_id>
     pub fn rename(
         self,
-        _enabled_rules: &RulesRef,
+        _enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
     ) -> (LogicalRelExpr, HashMap<usize, usize>) {
         let atts = self.att();

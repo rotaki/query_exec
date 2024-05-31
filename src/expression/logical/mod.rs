@@ -15,19 +15,21 @@ use std::collections::{HashMap, HashSet};
 use super::prelude::*;
 use crate::{ColumnId, ContainerId};
 
-pub use rules::{Rule, Rules, RulesRef};
+pub use rules::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
+use txn_storage::DatabaseId;
 
 pub mod prelude {
     pub use super::super::prelude::*;
-    pub use super::{Rule, Rules, RulesRef};
+    pub use super::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
 }
 
 #[derive(Debug, Clone)]
 pub enum LogicalRelExpr {
     Scan {
-        cid: ContainerId,
+        db_id: DatabaseId,
+        c_id: ContainerId,
         table_name: String,
-        column_names: Vec<ColumnId>,
+        column_indices: Vec<ColumnId>,
     },
     Select {
         // Evaluate the predicate for each row in the source
@@ -79,18 +81,20 @@ impl PlanTrait for LogicalRelExpr {
     fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> LogicalRelExpr {
         match self {
             LogicalRelExpr::Scan {
-                cid,
+                db_id,
+                c_id,
                 table_name,
-                column_names,
+                column_indices: column_names,
             } => {
                 let column_names = column_names
                     .into_iter()
                     .map(|col| *src_to_dest.get(&col).unwrap_or(&col))
                     .collect();
                 LogicalRelExpr::Scan {
-                    cid,
+                    db_id,
+                    c_id,
                     table_name,
-                    column_names,
+                    column_indices: column_names,
                 }
             }
             LogicalRelExpr::Select { src, predicates } => LogicalRelExpr::Select {
@@ -187,9 +191,10 @@ impl PlanTrait for LogicalRelExpr {
     fn print_inner(&self, indent: usize, out: &mut String) {
         match self {
             LogicalRelExpr::Scan {
-                cid: _,
+                db_id: _,
+                c_id: _,
                 table_name,
-                column_names,
+                column_indices: column_names,
             } => {
                 out.push_str(&format!("{}-> scan({:?}, ", " ".repeat(indent), table_name,));
                 let mut split = "";
@@ -394,9 +399,10 @@ impl PlanTrait for LogicalRelExpr {
     fn att(&self) -> HashSet<ColumnId> {
         match self {
             LogicalRelExpr::Scan {
-                cid: _,
+                db_id: _,
+                c_id: _,
                 table_name: _,
-                column_names,
+                column_indices: column_names,
             } => column_names.iter().cloned().collect(),
             LogicalRelExpr::Select { src, .. } => src.att(),
             LogicalRelExpr::Join { left, right, .. } => {
@@ -447,5 +453,56 @@ impl LogicalRelExpr {
         let mut out = String::new();
         self.print_inner(0, &mut out);
         out
+    }
+
+    pub fn visit(&self, visitor: &mut impl PrePostVisitor<Self>) {
+        match self {
+            LogicalRelExpr::Scan { .. } => {
+                visitor.visit_pre(self);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::Select { src, .. } => {
+                visitor.visit_pre(self);
+                src.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::Join { left, right, .. } => {
+                visitor.visit_pre(self);
+                left.visit(visitor);
+                right.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::Project { src, .. } => {
+                visitor.visit_pre(self);
+                src.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::OrderBy { src, .. } => {
+                visitor.visit_pre(self);
+                src.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::Aggregate { src, .. } => {
+                visitor.visit_pre(self);
+                src.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::Map { input, .. } => {
+                visitor.visit_pre(self);
+                input.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::FlatMap { input, func } => {
+                visitor.visit_pre(self);
+                input.visit(visitor);
+                func.visit(visitor);
+                visitor.visit_post(self);
+            }
+            LogicalRelExpr::Rename { src, .. } => {
+                visitor.visit_pre(self);
+                src.visit(visitor);
+                visitor.visit_post(self);
+            }
+        }
     }
 }

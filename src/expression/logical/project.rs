@@ -44,13 +44,13 @@ impl LogicalRelExpr {
     pub fn project(
         self,
         optimize: bool,
-        enabled_rules: &RulesRef,
+        enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         cols: Vec<usize>,
     ) -> LogicalRelExpr {
         let outer_refs = self.free();
 
-        if optimize && enabled_rules.is_enabled(&Rule::ProjectionPushdown) {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::ProjectionPushdown) {
             match self {
                 LogicalRelExpr::Project {
                     src,
@@ -140,12 +140,13 @@ impl LogicalRelExpr {
                         .rename_to(existing_rename)
                 }
                 LogicalRelExpr::Scan {
-                    cid,
+                    db_id,
+                    c_id,
                     table_name,
-                    mut column_names,
+                    column_indices: mut column_names,
                 } => {
                     column_names.retain(|col| cols.contains(col));
-                    LogicalRelExpr::scan(cid, table_name, column_names)
+                    LogicalRelExpr::scan(db_id, c_id, table_name, column_names)
                 }
                 _ => self.project(false, enabled_rules, col_id_gen, cols),
             }

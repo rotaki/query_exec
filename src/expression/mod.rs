@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 pub use crate::ColumnId;
 
 pub mod prelude {
-    pub use super::logical::{LogicalRelExpr, Rule, Rules, RulesRef};
+    pub use super::logical::{HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr};
+    pub use super::physical::{LogicalToPhysicalRelExpr, PhysicalRelExpr};
+    pub use super::PrePostVisitor;
     pub use super::{AggOp, BinaryOp, ColumnId, Expression, JoinType, PlanTrait};
 }
 
@@ -220,9 +222,23 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn merge_conjunction(exprs: Vec<Expression<P>>) -> Expression<P> {
+        if exprs.is_empty() {
+            panic!("Cannot merge an empty list of expressions");
+        }
+        let mut iter = exprs.into_iter();
+        let first = iter.next().unwrap();
+        iter.fold(first, |acc, expr| {
+            Expression::binary(BinaryOp::And, acc, expr)
+        })
+    }
+
     /// Replace the variables in the expression with the new column IDs as specified in the
     /// `src_to_dest` mapping.
     pub fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Expression<P> {
+        if src_to_dest.is_empty() {
+            return self;
+        }
         match self {
             Expression::ColRef { id } => {
                 if let Some(dest) = src_to_dest.get(&id) {
@@ -269,6 +285,9 @@ impl<P: PlanTrait> Expression<P> {
         self,
         src_to_dest: &HashMap<ColumnId, Expression<P>>,
     ) -> Expression<P> {
+        if src_to_dest.is_empty() {
+            return self;
+        }
         match self {
             Expression::ColRef { id } => {
                 if let Some(expr) = src_to_dest.get(&id) {
@@ -423,4 +442,9 @@ impl<P: PlanTrait> Expression<P> {
     pub fn intersect_with(&self, rel: &P) -> bool {
         !self.free().is_disjoint(&rel.att())
     }
+}
+
+pub trait PrePostVisitor<T> {
+    fn visit_pre(&mut self, node: &T);
+    fn visit_post(&mut self, node: &T);
 }
