@@ -1,4 +1,5 @@
 use crate::expression::prelude::*;
+use crate::tuple::{AsBool, IsNull};
 use crate::{
     catalog::Schema,
     error::ExecError,
@@ -17,6 +18,12 @@ pub enum ByteCodes {
     // CONTROL FLOW
     PushLit,
     PushField,
+    // JUMP
+    Jump,
+    JumpIfTrue,
+    JumpIfFalse,
+    // COPY
+    Duplicate,
     // MATH OPERATIONS
     Add,
     Sub,
@@ -32,12 +39,20 @@ pub enum ByteCodes {
     // LOGICAL OPERATIONS
     And,
     Or,
+    // IS_NULL
+    IsNull,
 }
 
-const STATIC_DISPATCHER: [DispatchFn<Field>; 14] = [
+const STATIC_DISPATCHER: [DispatchFn<Field>; 19] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
+    // JUMP
+    JUMP_FN,
+    JUMP_IF_TRUE_FN,
+    JUMP_IF_FALSE_FN,
+    // COPY
+    DUPLICATE_FN,
     // MATH OPERATIONS
     ADD_FN,
     SUB_FN,
@@ -53,6 +68,8 @@ const STATIC_DISPATCHER: [DispatchFn<Field>; 14] = [
     // LOGICAL OPERATIONS
     AND_FN,
     OR_FN,
+    // IS_NULL
+    IS_NULL_FN,
 ];
 
 // Utility functions
@@ -75,6 +92,12 @@ impl ByteCodeExpr {
             bytecodes: Vec::new(),
             literals: Vec::new(),
         }
+    }
+
+    pub fn add_placeholder(&mut self) -> usize {
+        let i = self.bytecodes.len();
+        self.bytecodes.push(usize::MAX);
+        i
     }
 
     pub fn add_code(&mut self, code: usize) {
@@ -119,6 +142,10 @@ impl ByteCodeExpr {
 type DispatchFn<T> = fn(&[usize], &mut usize, &mut Vec<T>, &[T], &[T]) -> Result<(), ExecError>;
 const PUSH_LIT_FN: DispatchFn<Field> = push_lit;
 const PUSH_FIELD_FN: DispatchFn<Field> = push_field;
+const JUMP_FN: DispatchFn<Field> = jump;
+const JUMP_IF_TRUE_FN: DispatchFn<Field> = jump_if_true;
+const JUMP_IF_FALSE_FN: DispatchFn<Field> = jump_if_false;
+const DUPLICATE_FN: DispatchFn<Field> = duplicate;
 const ADD_FN: DispatchFn<Field> = add;
 const SUB_FN: DispatchFn<Field> = sub;
 const MUL_FN: DispatchFn<Field> = mul;
@@ -131,6 +158,7 @@ const LTE_FN: DispatchFn<Field> = lte;
 const GTE_FN: DispatchFn<Field> = gte;
 const AND_FN: DispatchFn<Field> = and;
 const OR_FN: DispatchFn<Field> = or;
+const IS_NULL_FN: DispatchFn<Field> = is_null;
 
 fn push_field<T>(
     bytecodes: &[usize],
@@ -159,6 +187,70 @@ where
 {
     stack.push(literals[bytecodes[*i]].clone());
     *i += 1;
+    Ok(())
+}
+
+fn jump<T>(
+    bytecodes: &[usize],
+    i: &mut usize,
+    _stack: &mut Vec<T>,
+    _literals: &[T],
+    _record: &[T],
+) -> Result<(), ExecError> {
+    *i = bytecodes[*i];
+    Ok(())
+}
+
+fn jump_if_true<T>(
+    bytecodes: &[usize],
+    i: &mut usize,
+    stack: &mut Vec<T>,
+    _literals: &[T],
+    _record: &[T],
+) -> Result<(), ExecError>
+where
+    T: Clone + AsBool,
+{
+    let cond = stack.pop().unwrap();
+    if cond.as_bool()? {
+        *i = bytecodes[*i];
+    } else {
+        *i += 1;
+    }
+    Ok(())
+}
+
+fn jump_if_false<T>(
+    bytecodes: &[usize],
+    i: &mut usize,
+    stack: &mut Vec<T>,
+    _literals: &[T],
+    _record: &[T],
+) -> Result<(), ExecError>
+where
+    T: Clone + AsBool,
+{
+    let cond = stack.pop().unwrap();
+    if !cond.as_bool()? {
+        *i = bytecodes[*i];
+    } else {
+        *i += 1;
+    }
+    Ok(())
+}
+
+fn duplicate<T>(
+    _bytecodes: &[usize],
+    _i: &mut usize,
+    stack: &mut Vec<T>,
+    _literals: &[T],
+    _record: &[T],
+) -> Result<(), ExecError>
+where
+    T: Clone,
+{
+    let v = stack.last().unwrap().clone();
+    stack.push(v);
     Ok(())
 }
 
@@ -354,6 +446,21 @@ where
     Ok(())
 }
 
+fn is_null<T>(
+    bytecodes: &[usize],
+    i: &mut usize,
+    stack: &mut Vec<T>,
+    literals: &[T],
+    _record: &[T],
+) -> Result<(), ExecError>
+where
+    T: PartialEq + Clone + IsNull + FromBool,
+{
+    let field = stack.pop().unwrap();
+    stack.push(T::from_bool(field.is_null()));
+    Ok(())
+}
+
 pub struct AstToByteCode<P: PlanTrait> {
     phantom: PhantomData<P>,
 }
@@ -437,12 +544,250 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
             bytecode_expr.add_code(ByteCodes::PushField as usize);
             bytecode_expr.add_code(*i);
         }
-        // TODO: Currently does not support `Case` and `Subquery` physical expressions
-        _ => {
-            return Err(ExecError::Conversion(
-                "Unsupported physical expression".to_string(),
-            ))
+        Expression::Case {
+            expr,
+            whens,
+            else_expr,
+        } => {
+            if let Some(base) = expr {
+                // [base][dup][when1][eq][jump_if_false][when2_addr][then1][jump_to_end]
+                //       [dup][when2][eq][jump_if_false][when3_addr][then2][jump_to_end]...
+                //       [else]
+                let mut jump_end_ifs = Vec::new();
+
+                convert_expr_to_bytecode(base, bytecode_expr)?;
+                for (when, then) in whens {
+                    bytecode_expr.add_code(ByteCodes::Duplicate as usize);
+                    convert_expr_to_bytecode(when, bytecode_expr)?;
+                    bytecode_expr.add_code(ByteCodes::Eq as usize);
+                    bytecode_expr.add_code(ByteCodes::JumpIfFalse as usize);
+                    let jump_if_false_addr = bytecode_expr.add_placeholder();
+                    convert_expr_to_bytecode(then, bytecode_expr)?;
+                    bytecode_expr.add_code(ByteCodes::Jump as usize);
+                    let end_addr = bytecode_expr.add_placeholder();
+                    jump_end_ifs.push(end_addr);
+                    bytecode_expr.bytecodes[jump_if_false_addr] = end_addr + 1;
+                }
+                convert_expr_to_bytecode(else_expr, bytecode_expr)?;
+                for addr in jump_end_ifs {
+                    bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len();
+                }
+            } else {
+                // [when1][jump_if_false][when2_addr][then1][jump_to_end]
+                // [when2][jump_if_false][when3_addr][then2][jump_to_end]...
+                // [else]
+                let mut jump_end_ifs = Vec::new();
+
+                for (when, then) in whens {
+                    convert_expr_to_bytecode(when, bytecode_expr)?;
+                    bytecode_expr.add_code(ByteCodes::JumpIfFalse as usize);
+                    let jump_if_false_addr = bytecode_expr.add_placeholder();
+                    convert_expr_to_bytecode(then, bytecode_expr)?;
+                    bytecode_expr.add_code(ByteCodes::Jump as usize);
+                    let end_addr = bytecode_expr.add_placeholder();
+                    jump_end_ifs.push(end_addr);
+                    bytecode_expr.bytecodes[jump_if_false_addr] = end_addr + 1;
+                }
+
+                convert_expr_to_bytecode(else_expr, bytecode_expr)?;
+                for addr in jump_end_ifs {
+                    bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len();
+                }
+            }
+        }
+        Expression::IsNull { expr } => {
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            bytecode_expr.add_code(ByteCodes::IsNull as usize);
+        }
+        Expression::Subquery { .. } => {
+            unimplemented!("Subquery not supported in bytecode")
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expression::prelude::*;
+    use crate::expression::Expression;
+    use crate::tuple::Field;
+    use std::collections::HashMap;
+    use std::result;
+
+    #[test]
+    fn test_binary_operation() {
+        let tuple = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        // (idx0 + idx1) = idx2
+        let expr = Expression::<PhysicalRelExpr>::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expression::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expression::ColRef { id: 0 }),
+                right: Box::new(Expression::ColRef { id: 1 }),
+            }),
+            right: Box::new(Expression::ColRef { id: 2 }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // idx0 < idx1
+        let expr = Expression::<PhysicalRelExpr>::Binary {
+            op: BinaryOp::Lt,
+            left: Box::new(Expression::ColRef { id: 0 }),
+            right: Box::new(Expression::ColRef { id: 1 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // idx0 > idx1
+        let expr = Expression::<PhysicalRelExpr>::Binary {
+            op: BinaryOp::Gt,
+            left: Box::new(Expression::ColRef { id: 0 }),
+            right: Box::new(Expression::ColRef { id: 1 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+    }
+
+    #[test]
+    fn test_is_null() {
+        let tuple = Tuple::from_fields(vec![Field::Int(None), 2.into()]);
+        // idx0 is null
+        let expr = Expression::<PhysicalRelExpr>::IsNull {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // idx1 is not null
+        let expr = Expression::<PhysicalRelExpr>::IsNull {
+            expr: Box::new(Expression::ColRef { id: 1 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+    }
+
+    #[test]
+    fn test_case_whens() {
+        // Case with base
+        let tuple0 = Tuple::from_fields(vec![0.into()]);
+        let tuple1 = Tuple::from_fields(vec![1.into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into()]);
+        let tuple3 = Tuple::from_fields(vec![3.into()]);
+        let tuple4 = Tuple::from_fields(vec![4.into()]);
+        let tuple_null = Tuple::from_fields(vec![Field::Int(None)]);
+        // Case idx0
+        // when 1 then 10
+        // when 2 then 20
+        // when 3 then 30
+        // else 40
+        let expr = Expression::<PhysicalRelExpr>::Case {
+            expr: Some(Box::new(Expression::ColRef { id: 0 })),
+            whens: vec![
+                (
+                    Expression::Field { val: 1.into() },
+                    Expression::Field { val: 10.into() },
+                ),
+                (
+                    Expression::Field { val: 2.into() },
+                    Expression::Field { val: 20.into() },
+                ),
+                (
+                    Expression::Field { val: 3.into() },
+                    Expression::Field { val: 30.into() },
+                ),
+            ],
+            else_expr: Box::new(Expression::Field { val: 40.into() }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result0 = bytecode_expr.eval(&tuple0).unwrap();
+        assert_eq!(result0, Field::Int(Some(40)));
+        let result1 = bytecode_expr.eval(&tuple1).unwrap();
+        assert_eq!(result1, Field::Int(Some(10)));
+        let result2 = bytecode_expr.eval(&tuple2).unwrap();
+        assert_eq!(result2, Field::Int(Some(20)));
+        let result3 = bytecode_expr.eval(&tuple3).unwrap();
+        assert_eq!(result3, Field::Int(Some(30)));
+        let result4 = bytecode_expr.eval(&tuple4).unwrap();
+        assert_eq!(result4, Field::Int(Some(40)));
+        let result_null = bytecode_expr.eval(&tuple_null).unwrap();
+        assert_eq!(result_null, Field::Int(Some(40)));
+    }
+
+    #[test]
+    fn test_whens() {
+        // Case
+        // when idx0 = 1 then 10
+        // when idx0 = 2 then 20
+        // when idx0 = 3 then 30
+        // else 40
+        let tuple0 = Tuple::from_fields(vec![0.into()]);
+        let tuple1 = Tuple::from_fields(vec![1.into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into()]);
+        let tuple3 = Tuple::from_fields(vec![3.into()]);
+        let tuple4 = Tuple::from_fields(vec![4.into()]);
+        let tuple_null = Tuple::from_fields(vec![Field::Int(None)]);
+
+        let expr = Expression::<PhysicalRelExpr>::Case {
+            expr: None,
+            whens: vec![
+                (
+                    Expression::Binary {
+                        op: BinaryOp::Eq,
+                        left: Box::new(Expression::ColRef { id: 0 }),
+                        right: Box::new(Expression::Field { val: 1.into() }),
+                    },
+                    Expression::Field { val: 10.into() },
+                ),
+                (
+                    Expression::Binary {
+                        op: BinaryOp::Eq,
+                        left: Box::new(Expression::ColRef { id: 0 }),
+                        right: Box::new(Expression::Field { val: 2.into() }),
+                    },
+                    Expression::Field { val: 20.into() },
+                ),
+                (
+                    Expression::Binary {
+                        op: BinaryOp::Eq,
+                        left: Box::new(Expression::ColRef { id: 0 }),
+                        right: Box::new(Expression::Field { val: 3.into() }),
+                    },
+                    Expression::Field { val: 30.into() },
+                ),
+                (
+                    Expression::Binary {
+                        op: BinaryOp::Eq,
+                        left: Box::new(Expression::Field { val: 4.into() }),
+                        right: Box::new(Expression::Field { val: 4.into() }),
+                    },
+                    Expression::Field { val: 40.into() },
+                ),
+            ],
+            else_expr: Box::new(Expression::Field { val: 50.into() }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result0 = bytecode_expr.eval(&tuple0).unwrap();
+        assert_eq!(result0, Field::Int(Some(40)));
+        let result1 = bytecode_expr.eval(&tuple1).unwrap();
+        assert_eq!(result1, Field::Int(Some(10)));
+        let result2 = bytecode_expr.eval(&tuple2).unwrap();
+        assert_eq!(result2, Field::Int(Some(20)));
+        let result3 = bytecode_expr.eval(&tuple3).unwrap();
+        assert_eq!(result3, Field::Int(Some(30)));
+        let result4 = bytecode_expr.eval(&tuple4).unwrap();
+        assert_eq!(result4, Field::Int(Some(40)));
+        let result_null = bytecode_expr.eval(&tuple_null).unwrap();
+        assert_eq!(result_null, Field::Int(Some(40)));
+    }
 }

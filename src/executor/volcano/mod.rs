@@ -5,7 +5,7 @@ use txn_storage::prelude::*;
 use crate::{
     error::ExecError,
     expression::{prelude::PhysicalRelExpr, AggOp, Expression, JoinType},
-    tuple::{FromBool, Tuple},
+    tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
 };
 
@@ -679,9 +679,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
     ) -> Result<(VolcanoIterator<T>, ColIdToIdx), ExecError> {
         match expr {
             PhysicalRelExpr::Scan {
-                db_id,
+                db_id: _,
                 c_id,
-                table_name,
+                table_name: _,
                 column_indices,
             } => {
                 let col_id_to_idx = column_indices

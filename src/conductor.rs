@@ -344,4 +344,18 @@ mod tests {
         expected.sort();
         assert_eq!(result, expected);
     }
+
+    #[test]
+    fn test_where_exists() {
+        let storage = get_in_mem_storage();
+        let conductor = setup_conductor(storage.clone());
+        let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
+        let result = run_query(&conductor, sql_string);
+        let expected = vec![
+            Tuple::from_fields(vec!["HR".into()]),
+            Tuple::from_fields(vec!["Engineering".into()]),
+            Tuple::from_fields(vec!["Marketing".into()]),
+        ];
+        assert_eq!(result, expected);
+    }
 }

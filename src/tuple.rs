@@ -271,16 +271,6 @@ impl Field {
         }
     }
 
-    pub fn is_null(&self) -> bool {
-        match self {
-            Field::Boolean(val) => val.is_none(),
-            Field::Int(val) => val.is_none(),
-            Field::Float(val) => val.is_none(),
-            Field::String(val) => val.is_none(),
-            Field::Date(val) => val.is_none(),
-        }
-    }
-
     pub fn from_str(column_def: &ColumnDef, field: &str) -> Result<Self, String> {
         let data_type = column_def.data_type();
         let is_nullable = column_def.is_nullable();
@@ -502,6 +492,22 @@ impl FromBool for Field {
     }
 }
 
+pub trait AsBool {
+    fn as_bool(&self) -> Result<bool, ExecError>;
+}
+
+impl AsBool for Field {
+    fn as_bool(&self) -> Result<bool, ExecError> {
+        match self {
+            Field::Boolean(val) => val.ok_or(ExecError::FieldOp("Field is NULL".to_string())),
+            x => Err(ExecError::FieldOp(format!(
+                "Cannot convert {:?} to bool",
+                x
+            ))),
+        }
+    }
+}
+
 pub trait And<Rhs = Self> {
     type Output;
 
@@ -545,6 +551,22 @@ impl Or for Field {
                 Ok(Field::Boolean(val1.and_then(|v1| val2.map(|v2| v1 || v2))))
             }
             (x, y) => Err(ExecError::FieldOp(format!("Cannot OR {:?} and {:?}", x, y))),
+        }
+    }
+}
+
+pub trait IsNull {
+    fn is_null(&self) -> bool;
+}
+
+impl IsNull for Field {
+    fn is_null(&self) -> bool {
+        match self {
+            Field::Boolean(val) => val.is_none(),
+            Field::Int(val) => val.is_none(),
+            Field::Float(val) => val.is_none(),
+            Field::String(val) => val.is_none(),
+            Field::Date(val) => val.is_none(),
         }
     }
 }
