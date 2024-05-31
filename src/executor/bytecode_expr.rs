@@ -1,7 +1,6 @@
 use crate::expression::prelude::*;
 use crate::tuple::{AsBool, IsNull};
 use crate::{
-    catalog::Schema,
     error::ExecError,
     tuple::{And, Field, FromBool, Or, Tuple},
     ColumnId,
@@ -80,9 +79,10 @@ pub fn colidx_expr(colidx: usize) -> ByteCodeExpr {
     expr
 }
 
+type ByteCodeType = u8;
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ByteCodeExpr {
-    pub bytecodes: Vec<usize>,
+    pub bytecodes: Vec<ByteCodeType>,
     pub literals: Vec<Field>,
 }
 
@@ -96,12 +96,12 @@ impl ByteCodeExpr {
 
     pub fn add_placeholder(&mut self) -> usize {
         let i = self.bytecodes.len();
-        self.bytecodes.push(usize::MAX);
+        self.bytecodes.push(ByteCodeType::MAX);
         i
     }
 
     pub fn add_code(&mut self, code: usize) {
-        self.bytecodes.push(code);
+        self.bytecodes.push(code as ByteCodeType);
     }
 
     pub fn add_literal(&mut self, literal: Field) -> usize {
@@ -123,8 +123,8 @@ impl ByteCodeExpr {
         let record = &record.fields();
         let bytecodes = &self.bytecodes;
         let literals = &self.literals;
-        while i < bytecodes.len() {
-            let opcode = bytecodes[i];
+        while (i as usize) < bytecodes.len() {
+            let opcode = bytecodes[i as usize] as usize;
             i += 1;
             STATIC_DISPATCHER[opcode](bytecodes, &mut i, &mut stack, literals, record)?;
         }
@@ -139,7 +139,8 @@ impl ByteCodeExpr {
     }
 }
 
-type DispatchFn<T> = fn(&[usize], &mut usize, &mut Vec<T>, &[T], &[T]) -> Result<(), ExecError>;
+type DispatchFn<T> =
+    fn(&[ByteCodeType], &mut ByteCodeType, &mut Vec<T>, &[T], &[T]) -> Result<(), ExecError>;
 const PUSH_LIT_FN: DispatchFn<Field> = push_lit;
 const PUSH_FIELD_FN: DispatchFn<Field> = push_field;
 const JUMP_FN: DispatchFn<Field> = jump;
@@ -161,8 +162,8 @@ const OR_FN: DispatchFn<Field> = or;
 const IS_NULL_FN: DispatchFn<Field> = is_null;
 
 fn push_field<T>(
-    bytecodes: &[usize],
-    i: &mut usize,
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     record: &[T],
@@ -170,14 +171,14 @@ fn push_field<T>(
 where
     T: Clone,
 {
-    stack.push(record[bytecodes[*i]].clone());
+    stack.push(record[bytecodes[*i as usize] as usize].clone());
     *i += 1;
     Ok(())
 }
 
 fn push_lit<T>(
-    bytecodes: &[usize],
-    i: &mut usize,
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     literals: &[T],
     _record: &[T],
@@ -185,25 +186,25 @@ fn push_lit<T>(
 where
     T: Clone,
 {
-    stack.push(literals[bytecodes[*i]].clone());
+    stack.push(literals[bytecodes[*i as usize] as usize].clone());
     *i += 1;
     Ok(())
 }
 
 fn jump<T>(
-    bytecodes: &[usize],
-    i: &mut usize,
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
     _stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
 ) -> Result<(), ExecError> {
-    *i = bytecodes[*i];
+    *i = bytecodes[*i as usize];
     Ok(())
 }
 
 fn jump_if_true<T>(
-    bytecodes: &[usize],
-    i: &mut usize,
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -213,7 +214,7 @@ where
 {
     let cond = stack.pop().unwrap();
     if cond.as_bool()? {
-        *i = bytecodes[*i];
+        *i = bytecodes[*i as usize];
     } else {
         *i += 1;
     }
@@ -221,8 +222,8 @@ where
 }
 
 fn jump_if_false<T>(
-    bytecodes: &[usize],
-    i: &mut usize,
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -232,7 +233,7 @@ where
 {
     let cond = stack.pop().unwrap();
     if !cond.as_bool()? {
-        *i = bytecodes[*i];
+        *i = bytecodes[*i as usize];
     } else {
         *i += 1;
     }
@@ -240,8 +241,8 @@ where
 }
 
 fn duplicate<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -255,8 +256,8 @@ where
 }
 
 fn add<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -271,8 +272,8 @@ where
 }
 
 fn sub<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -287,8 +288,8 @@ where
 }
 
 fn mul<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -303,8 +304,8 @@ where
 }
 
 fn div<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -319,8 +320,8 @@ where
 }
 
 fn eq<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -335,8 +336,8 @@ where
 }
 
 fn neq<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -351,8 +352,8 @@ where
 }
 
 fn lt<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -367,8 +368,8 @@ where
 }
 
 fn gt<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -383,8 +384,8 @@ where
 }
 
 fn lte<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -399,8 +400,8 @@ where
 }
 
 fn gte<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -415,8 +416,8 @@ where
 }
 
 fn and<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -431,8 +432,8 @@ where
 }
 
 fn or<T>(
-    _bytecodes: &[usize],
-    _i: &mut usize,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     _literals: &[T],
     _record: &[T],
@@ -447,8 +448,8 @@ where
 }
 
 fn is_null<T>(
-    bytecodes: &[usize],
-    i: &mut usize,
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
     stack: &mut Vec<T>,
     literals: &[T],
     _record: &[T],
@@ -566,11 +567,11 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     bytecode_expr.add_code(ByteCodes::Jump as usize);
                     let end_addr = bytecode_expr.add_placeholder();
                     jump_end_ifs.push(end_addr);
-                    bytecode_expr.bytecodes[jump_if_false_addr] = end_addr + 1;
+                    bytecode_expr.bytecodes[jump_if_false_addr] = end_addr as ByteCodeType + 1;
                 }
                 convert_expr_to_bytecode(else_expr, bytecode_expr)?;
                 for addr in jump_end_ifs {
-                    bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len();
+                    bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
                 }
             } else {
                 // [when1][jump_if_false][when2_addr][then1][jump_to_end]
@@ -586,12 +587,12 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     bytecode_expr.add_code(ByteCodes::Jump as usize);
                     let end_addr = bytecode_expr.add_placeholder();
                     jump_end_ifs.push(end_addr);
-                    bytecode_expr.bytecodes[jump_if_false_addr] = end_addr + 1;
+                    bytecode_expr.bytecodes[jump_if_false_addr] = end_addr as ByteCodeType + 1;
                 }
 
                 convert_expr_to_bytecode(else_expr, bytecode_expr)?;
                 for addr in jump_end_ifs {
-                    bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len();
+                    bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
                 }
             }
         }
@@ -609,11 +610,9 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expression::prelude::*;
     use crate::expression::Expression;
     use crate::tuple::Field;
     use std::collections::HashMap;
-    use std::result;
 
     #[test]
     fn test_binary_operation() {

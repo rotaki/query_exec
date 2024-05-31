@@ -347,6 +347,7 @@ mod tests {
 
     #[test]
     fn test_where_exists() {
+        todo!("Currently not supported");
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
