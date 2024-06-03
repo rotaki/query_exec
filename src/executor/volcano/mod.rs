@@ -814,11 +814,24 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
     }
 
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
-        match self.join_type {
+        let tuple = match self.join_type {
             JoinType::Inner => self.inner(txn),
             JoinType::LeftOuter => self.left_outer(txn),
             JoinType::RightOuter => self.right_outer(txn),
             _ => unimplemented!(),
+        }?;
+        if let Some((k, t)) = tuple {
+            if let Some(filter) = &self.filter {
+                if filter.eval(&t)? == Field::from_bool(true) {
+                    return Ok(Some((k, t)));
+                } else {
+                    return self.next(txn);
+                }
+            } else {
+                return Ok(Some((k, t)));
+            }
+        } else {
+            Ok(None)
         }
     }
 

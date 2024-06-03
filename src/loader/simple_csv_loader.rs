@@ -37,7 +37,13 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
                     Ok(rec) => {
                         let mut tuple = Tuple::with_capacity(schema_ref.columns().len());
                         for (i, field) in rec.iter().enumerate() {
-                            let field = Field::from_str(schema_ref.get_column(i), field)?;
+                            let col_def = schema_ref.get_column(i);
+                            let field = Field::from_str(col_def, field).map_err(|e| {
+                                format!(
+                                    "Error: {} parsing field: {:?} (col: {:?}) at index: {}",
+                                    e, field, col_def, i
+                                )
+                            })?;
                             tuple.push(field);
                         }
                         tuples.push((
@@ -50,6 +56,7 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
                         }
                     }
                     Err(e) => {
+                        println!("Error!!: {:?}", e);
                         return Err(e.to_string());
                     }
                 }

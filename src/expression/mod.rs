@@ -156,6 +156,18 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn date(val: i32) -> Expression<P> {
+        Expression::Field {
+            val: Field::Date(Some(val)),
+        }
+    }
+
+    pub fn float(val: f64) -> Expression<P> {
+        Expression::Field {
+            val: Field::Float(Some(val)),
+        }
+    }
+
     pub fn is_null(self) -> Expression<P> {
         Expression::IsNull {
             expr: Box::new(self),

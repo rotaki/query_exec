@@ -48,7 +48,7 @@ impl Schema {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ColumnDef {
     name: String,
     data_type: DataType,
@@ -81,7 +81,7 @@ impl ColumnDef {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DataType {
     Boolean,
     Int,

@@ -11,6 +11,8 @@ use crate::{
     error::ExecError,
 };
 
+use chrono::{Datelike, NaiveDate};
+
 fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     let mut val_bits = val.to_bits();
     let sign = (val_bits >> 63) as u8;
@@ -246,7 +248,7 @@ pub enum Field {
     Int(Option<i64>),
     Float(Option<f64>), // f64 should not contain f64::NAN.
     String(Option<String>),
-    Date(Option<i64>),
+    Date(Option<i32>),
 }
 
 impl Eq for Field {}
@@ -334,8 +336,11 @@ impl Field {
                 }
                 DataType::String => Ok(Field::String(Some(field.to_string()))),
                 DataType::Date => {
-                    let val = field.parse::<i64>().map_err(|e| e.to_string())?;
-                    Ok(Field::Date(Some(val)))
+                    // Date is stored as yyyy-mm-dd
+                    let val = chrono::NaiveDate::parse_from_str(field, "%Y-%m-%d")
+                        .map_err(|e| e.to_string())?;
+                    let days = val.num_days_from_ce();
+                    Ok(Field::Date(Some(days)))
                 }
                 DataType::Unknown => Err("Unknown data type".to_string()),
             }

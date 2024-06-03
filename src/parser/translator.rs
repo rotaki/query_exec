@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::Datelike;
 use txn_storage::DatabaseId;
 
 use crate::{
@@ -640,6 +641,38 @@ impl Translator {
             plan = self.process_where(plan, having)?;
         }
         plan = plan.map(true, &self.enabled_rules, &self.col_id_gen, maps); // This map corresponds to the Level3 in the comment above
+
+        let mut order_by_fields = Vec::new();
+        for order_by_expr in order_by {
+            let expr = self.process_expr(&order_by_expr.expr, Some(0))?;
+            let col_id = if let Expression::ColRef { id } = expr {
+                id
+            } else {
+                let col_id = self.col_id_gen.next();
+                plan = plan.map(
+                    true,
+                    &self.enabled_rules,
+                    &self.col_id_gen,
+                    [(col_id, expr)],
+                );
+                col_id
+            };
+            let asc = order_by_expr.asc.unwrap_or(true);
+            let nulls_first = order_by_expr.nulls_first.unwrap_or(false);
+            order_by_fields.push((col_id, asc, nulls_first));
+        }
+
+        if !order_by_fields.is_empty() {
+            plan = plan.order_by(true, &self.enabled_rules, &self.col_id_gen, order_by_fields);
+        }
+
+        plan = plan.project(
+            true,
+            &self.enabled_rules,
+            &self.col_id_gen,
+            projected_cols.clone(),
+        );
+        // Add another project to run optimization rules from the top
         plan = plan.project(true, &self.enabled_rules, &self.col_id_gen, projected_cols);
         Ok(plan)
     }
@@ -741,7 +774,9 @@ impl Translator {
                                 aggs.push((agg_col_id, (col_id, agg_op)));
                                 (plan, Expression::col_ref(agg_col_id))
                             }
-                            _ => unimplemented!("Unsupported expression: {:?}", expr),
+                            other => {
+                                unimplemented!("Unsupported expression: {:?}", other)
+                            }
                         }
                     }
                     sqlparser::ast::FunctionArgExpr::QualifiedWildcard(_) => {
@@ -851,6 +886,19 @@ impl Translator {
                 };
                 Ok(Expression::binary(bin_op, left, right))
             }
+            sqlparser::ast::Expr::TypedString { data_type, value } => match data_type {
+                sqlparser::ast::DataType::Date => {
+                    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                        .map_err(|e| translation_err!(InvalidSQL, "{}", e))?;
+                    let days = date.num_days_from_ce();
+                    Ok(Expression::date(days))
+                }
+                _ => Err(translation_err!(
+                    UnsupportedSQL,
+                    "Unsupported data type: {:?}",
+                    data_type
+                )),
+            },
             sqlparser::ast::Expr::Value(value) => match value {
                 sqlparser::ast::Value::Number(num, _) => Ok(Expression::int(num.parse().unwrap())),
                 _ => Err(translation_err!(
@@ -1057,10 +1105,12 @@ impl Translator {
                 }
                 Ok(Expression::subquery(plan))
             }
-            _ => Err(translation_err!(
+            sqlparser::ast::Expr::Nested(expr) => self.process_expr(expr, distance),
+            other => Err(translation_err!(
                 UnsupportedSQL,
-                "Unsupported expression: {:?}",
-                expr
+                "Unsupported expression: {:?} matched {:?}",
+                expr,
+                other
             )),
         }
     }

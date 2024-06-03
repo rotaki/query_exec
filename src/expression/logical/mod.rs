@@ -4,6 +4,7 @@ mod flatmap;
 mod hoist;
 mod join;
 mod map;
+mod orderby;
 mod project;
 mod rename;
 mod rules;

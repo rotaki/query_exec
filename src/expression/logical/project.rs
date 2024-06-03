@@ -6,25 +6,20 @@ use crate::catalog::ColIdGenRef;
 use std::collections::{HashMap, HashSet};
 
 /// Union of free variables and columns. The order of the columns is preserved.
-fn union(free: &HashSet<usize>, cols: Vec<usize>) -> Vec<usize> {
-    let mut to_add_to_new_cols = Vec::new();
+fn union(cols: &Vec<usize>, free: &HashSet<usize>) -> Vec<usize> {
+    let mut cols = cols.clone();
     for f in free {
-        let mut found = false;
-        for c in cols.iter() {
-            if f == c {
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            to_add_to_new_cols.push(*f);
+        if cols.contains(f) {
+            continue;
+        } else {
+            cols.push(*f);
         }
     }
-    [cols, to_add_to_new_cols].concat()
+    cols
 }
 
 /// Intersection of free variables and columns. The order of the columns is preserved.
-fn intersect(att: &HashSet<usize>, cols: &Vec<usize>) -> Vec<usize> {
+fn intersect(cols: &Vec<usize>, att: &HashSet<usize>) -> Vec<usize> {
     let mut new_cols = Vec::new();
     for c in cols.iter() {
         if att.contains(c) {
@@ -49,6 +44,7 @@ impl LogicalRelExpr {
         cols: Vec<usize>,
     ) -> LogicalRelExpr {
         let outer_refs = self.free();
+        let cols_set: HashSet<usize> = cols.iter().cloned().collect();
 
         if optimize && enabled_rules.is_enabled(&HeuristicRule::ProjectionPushdown) {
             match self {
@@ -73,26 +69,29 @@ impl LogicalRelExpr {
 
                     // From the cols, remove the cols that is created by the map expressions
                     // This is like `union`, but we need to keep the order of the columns
-                    let mut new_cols = union(&free, cols.clone());
+                    let mut new_cols = union(&cols, &free);
 
                     new_cols = new_cols
                         .into_iter()
                         .filter(|col| !existing_exprs.iter().any(|(id, _)| *id == *col))
                         .collect();
-
-                    input
+                    let plan = input
                         .project(true, enabled_rules, col_id_gen, new_cols)
-                        .map(false, enabled_rules, col_id_gen, existing_exprs)
-                        .project(false, enabled_rules, col_id_gen, cols)
+                        .map(false, enabled_rules, col_id_gen, existing_exprs);
+                    if cols_set == plan.att() {
+                        plan
+                    } else {
+                        plan.project(false, enabled_rules, col_id_gen, cols)
+                    }
                 }
                 LogicalRelExpr::Select { src, predicates } => {
-                    // The necessary columns are the free variables of the predicates and the projection columns
-                    let free: HashSet<usize> =
-                        predicates.iter().flat_map(|pred| pred.free()).collect();
-                    let new_cols = union(&free, cols.clone());
-                    src.project(true, enabled_rules, col_id_gen, new_cols)
-                        .select(false, enabled_rules, col_id_gen, predicates)
-                        .project(false, enabled_rules, col_id_gen, cols)
+                    // We don't push projections through selections. Selections are prioritized.
+                    let plan = src.select(true, enabled_rules, col_id_gen, predicates);
+                    if cols_set == plan.att() {
+                        plan
+                    } else {
+                        plan.project(false, enabled_rules, col_id_gen, cols)
+                    }
                 }
                 LogicalRelExpr::Join {
                     join_type,
@@ -103,10 +102,11 @@ impl LogicalRelExpr {
                     // The necessary columns are the free variables of the predicates and the projection columns
                     let free: HashSet<usize> =
                         predicates.iter().flat_map(|pred| pred.free()).collect();
-                    let new_cols = union(&free, cols.clone());
-                    let left_proj = intersect(&left.att(), &new_cols);
-                    let right_proj = intersect(&right.att(), &new_cols);
-                    left.project(true, enabled_rules, col_id_gen, left_proj)
+                    let new_cols = union(&cols, &free);
+                    let left_proj = intersect(&new_cols, &left.att());
+                    let right_proj = intersect(&new_cols, &right.att());
+                    let plan = left
+                        .project(true, enabled_rules, col_id_gen, left_proj)
                         .join(
                             true,
                             enabled_rules,
@@ -114,8 +114,26 @@ impl LogicalRelExpr {
                             join_type,
                             right.project(true, enabled_rules, col_id_gen, right_proj),
                             predicates,
-                        )
-                        .project(false, enabled_rules, col_id_gen, cols)
+                        );
+                    if cols_set == plan.att() {
+                        plan
+                    } else {
+                        plan.project(false, enabled_rules, col_id_gen, cols)
+                    }
+                }
+                LogicalRelExpr::OrderBy { src, cols: orderby } => {
+                    // We can push down the projection through order by
+                    // if the projection columns are a subset of the order by columns
+                    let pushdown_cols =
+                        union(&cols, &orderby.iter().map(|(col, _, _)| *col).collect());
+                    let plan = src
+                        .project(true, enabled_rules, col_id_gen, pushdown_cols)
+                        .order_by(false, enabled_rules, col_id_gen, orderby);
+                    if cols_set == plan.att() {
+                        plan
+                    } else {
+                        plan.project(false, enabled_rules, col_id_gen, cols)
+                    }
                 }
                 LogicalRelExpr::Rename {
                     src,
