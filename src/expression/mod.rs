@@ -129,6 +129,11 @@ pub enum Expression<P: PlanTrait> {
         left: Box<Expression<P>>,
         right: Box<Expression<P>>,
     },
+    Between {
+        expr: Box<Expression<P>>,
+        lower: Box<Expression<P>>,
+        upper: Box<Expression<P>>,
+    },
     Case {
         expr: Option<Box<Expression<P>>>,
         whens: Vec<(Expression<P>, Expression<P>)>,
@@ -147,6 +152,12 @@ impl<P: PlanTrait> Expression<P> {
     pub fn int(val: i64) -> Expression<P> {
         Expression::Field {
             val: Field::Int(Some(val)),
+        }
+    }
+
+    pub fn string(val: String) -> Expression<P> {
+        Expression::Field {
+            val: Field::String(Some(val)),
         }
     }
 
@@ -204,15 +215,33 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn between(self, lower: Expression<P>, upper: Expression<P>) -> Expression<P> {
+        Expression::Between {
+            expr: Box::new(self),
+            lower: Box::new(lower),
+            upper: Box::new(upper),
+        }
+    }
+
     pub fn has_subquery(&self) -> bool {
         match self {
             Expression::ColRef { id: _ } => false,
             Expression::Field { val: _ } => false,
             Expression::IsNull { expr } => expr.has_subquery(),
             Expression::Binary { left, right, .. } => left.has_subquery() || right.has_subquery(),
-            Expression::Case { .. } => {
-                // Currently, we don't support subqueries in the case expression
-                false
+            Expression::Case {
+                expr,
+                whens,
+                else_expr,
+            } => {
+                expr.as_ref().map_or(false, |expr| expr.has_subquery())
+                    || whens
+                        .iter()
+                        .any(|(when, then)| when.has_subquery() || then.has_subquery())
+                    || else_expr.has_subquery()
+            }
+            Expression::Between { expr, lower, upper } => {
+                expr.has_subquery() || lower.has_subquery() || upper.has_subquery()
             }
             Expression::Subquery { expr: _ } => true,
         }
@@ -285,6 +314,11 @@ impl<P: PlanTrait> Expression<P> {
                     .collect(),
                 else_expr: Box::new(else_expr.replace_variables(src_to_dest)),
             },
+            Expression::Between { expr, lower, upper } => Expression::Between {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+                lower: Box::new(lower.replace_variables(src_to_dest)),
+                upper: Box::new(upper.replace_variables(src_to_dest)),
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
@@ -333,6 +367,11 @@ impl<P: PlanTrait> Expression<P> {
                     })
                     .collect(),
                 else_expr: Box::new(else_expr.replace_variables_with_exprs(src_to_dest)),
+            },
+            Expression::Between { expr, lower, upper } => Expression::Between {
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+                lower: Box::new(lower.replace_variables_with_exprs(src_to_dest)),
+                upper: Box::new(upper.replace_variables_with_exprs(src_to_dest)),
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 // Do nothing for subquery
@@ -386,6 +425,13 @@ impl<P: PlanTrait> Expression<P> {
                 else_expr.print_inner(indent, out);
                 out.push_str(" end");
             }
+            Expression::Between { expr, lower, upper } => {
+                expr.print_inner(indent, out);
+                out.push_str(" between ");
+                lower.print_inner(indent, out);
+                out.push_str(" and ");
+                upper.print_inner(indent, out);
+            }
             Expression::Subquery { expr } => {
                 out.push_str(&format!("λ.{:?}(\n", expr.free()));
                 expr.print_inner(indent + 6, out);
@@ -436,6 +482,12 @@ impl<P: PlanTrait> Expression<P> {
                     set.extend(then.free());
                 }
                 set.extend(else_expr.free());
+                set
+            }
+            Expression::Between { expr, lower, upper } => {
+                let mut set = expr.free();
+                set.extend(lower.free());
+                set.extend(upper.free());
                 set
             }
             Expression::Subquery { expr } => expr.free(),

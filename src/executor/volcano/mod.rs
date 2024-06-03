@@ -403,7 +403,8 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
             self.agg_result = None;
             Ok(None)
         } else {
-            Ok(Some((vec![], agg_result.pop().unwrap())))
+            let tuple = agg_result.pop().unwrap();
+            Ok(Some((vec![], tuple)))
         }
     }
 
@@ -807,7 +808,6 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             } else {
                 let current_right = self.current_right.take().unwrap();
                 let new_tuple = self.null_tuple.as_ref().unwrap().merge(&current_right);
-                println!("new_tuple: {:?}", new_tuple);
                 return Ok(Some((vec![], new_tuple)));
             }
         }
@@ -842,7 +842,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> hash_join(", " ".repeat(indent)));
         out.push_str(&format!("{}\n", self.join_type));
-        out.push_str(&format!("{}left_exprs: [", " ".repeat(indent + 2)));
+        out.push_str(&format!("{}left_exprs: [", " ".repeat(indent + 4)));
         let mut split = "";
         for expr in &self.left_exprs {
             out.push_str(split);
@@ -850,7 +850,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             split = ", ";
         }
         out.push_str("]\n");
-        out.push_str(&format!("{}right_exprs: [", " ".repeat(indent + 2)));
+        out.push_str(&format!("{}right_exprs: [", " ".repeat(indent + 4)));
         split = "";
         for expr in &self.right_exprs {
             out.push_str(split);
@@ -859,7 +859,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
         }
         out.push_str("])\n");
         split = "";
-        out.push_str(&format!("{}filter: [", " ".repeat(indent + 2)));
+        out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
             out.push_str(&format!("{:?}", filter));
         }
@@ -947,7 +947,7 @@ impl<T: TxnStorageTrait> NestedLoopJoin<T> {
 
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!(
-            "{}-> cross_join({})\n",
+            "{}-> nl_join({})\n",
             " ".repeat(indent),
             self.join_type
         ));

@@ -1,6 +1,6 @@
 use clap::Parser;
 use query_exec::{
-    prelude::{print_tuples, Catalog, DatabaseEngine, QueryExecutor, VolcanoIterator},
+    prelude::{print_tuples, Catalog, DatabaseEngine, Executor, QueryExecutor, VolcanoIterator},
     ContainerType, InMemStorage,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 #[clap(name = "TPC-H", about = "TPC-H Benchmarks.")]
 pub struct TpchOpt {
     /// Query ID. Should be in range [1, 22].
-    #[clap(short = 'q', long = "query", default_value = "1")]
+    #[clap(short = 'q', long = "query", default_value = "6")]
     pub query_id: usize,
     /// Scale factor. Should be in range [0.01, 100].
     #[clap(short = 's', long = "scale factor", default_value = "0.01")]
@@ -72,9 +72,16 @@ fn main() {
     let query_path = format!("tpch/queries/q{}.sql", opt.query_id);
     let query = std::fs::read_to_string(query_path).unwrap();
     let logical = query_executor.to_logical(&query).unwrap();
+    println!("=== Logical Plan ===");
+    logical.pretty_print();
     let physical = query_executor.to_physical(logical);
+    println!("=== Physical Plan ===");
+    physical.pretty_print();
     let exec = query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical);
+    println!("=== Exec ===");
+    println!("{}", exec.to_pretty_string());
     let result = query_executor.execute(exec).unwrap();
 
     print_tuples(&result);
+    println!("Count: {}", result.len());
 }

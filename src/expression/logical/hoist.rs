@@ -128,6 +128,34 @@ impl LogicalRelExpr {
             Expression::Case { .. } => {
                 panic!("Case expression is not supported in hoist")
             }
+            Expression::Between { expr, lower, upper } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                let lower_id = col_id_gen.next();
+                let upper_id = col_id_gen.next();
+                self.hoist(enabled_rules, col_id_gen, expr_id, *expr)
+                    .hoist(enabled_rules, col_id_gen, lower_id, *lower)
+                    .hoist(enabled_rules, col_id_gen, upper_id, *upper)
+                    .map(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        [(
+                            id,
+                            Expression::Between {
+                                expr: Box::new(Expression::col_ref(expr_id)),
+                                lower: Box::new(Expression::col_ref(lower_id)),
+                                upper: Box::new(Expression::col_ref(upper_id)),
+                            },
+                        )],
+                    )
+                    .project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    )
+            }
         }
     }
 }

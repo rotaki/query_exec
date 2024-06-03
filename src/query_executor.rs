@@ -674,13 +674,13 @@ mod tests {
         let executor = setup_executor(storage.clone());
         // For each department, count the number of employees and sum of their ages
         let sql_string = "SELECT d.name, cnt, sum_age FROM Departments d, (SELECT department_id, COUNT(*) AS cnt, SUM(age) AS sum_age FROM Employees e WHERE e.department_id = d.id)";
-        let mut result = run_query(&executor, sql_string, false);
+        let mut result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 2.into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 2.into(), 50.into()]),
             Tuple::from_fields(vec!["Marketing".into(), 0.into(), Field::Int(None)]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(&mut result, &mut expected, true);
     }
 
     #[test]
@@ -695,7 +695,7 @@ mod tests {
         ];
         result.sort();
         expected.sort();
-        check_result(&mut result, &mut expected, false);
+        check_result(&mut result, &mut expected, true);
     }
 
     #[test]

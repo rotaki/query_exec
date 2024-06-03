@@ -242,13 +242,67 @@ impl std::fmt::Display for Tuple {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Field {
     Boolean(Option<bool>),
     Int(Option<i64>),
     Float(Option<f64>), // f64 should not contain f64::NAN.
     String(Option<String>),
     Date(Option<i32>),
+}
+
+impl PartialEq for Field {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Field::Boolean(val1), Field::Boolean(val2)) => val1 == val2,
+            (Field::Int(val1), Field::Int(val2)) => val1 == val2,
+            (Field::Float(val1), Field::Float(val2)) => val1 == val2,
+            (Field::String(val1), Field::String(val2)) => val1 == val2,
+            (Field::Date(val1), Field::Date(val2)) => val1 == val2,
+            (Field::Int(val1), Field::Float(val2)) => {
+                if let (Some(val1), Some(val2)) = (val1, val2) {
+                    (*val1 as f64).eq(&val2)
+                } else {
+                    false
+                }
+            }
+            (Field::Float(val1), Field::Int(val2)) => {
+                if let (Some(val1), Some(val2)) = (val1, val2) {
+                    val1.eq(&(*val2 as f64))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+impl PartialOrd for Field {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Field::Boolean(val1), Field::Boolean(val2)) => val1.partial_cmp(val2),
+            (Field::Int(val1), Field::Int(val2)) => val1.partial_cmp(val2),
+            (Field::Float(val1), Field::Float(val2)) => val1.partial_cmp(val2),
+            (Field::String(val1), Field::String(val2)) => val1.partial_cmp(val2),
+            (Field::Date(val1), Field::Date(val2)) => val1.partial_cmp(val2),
+            (Field::Int(val1), Field::Float(val2)) => {
+                if let (Some(val1), Some(val2)) = (val1, val2) {
+                    (*val1 as f64).partial_cmp(&val2)
+                } else {
+                    None
+                }
+            }
+            (Field::Float(val1), Field::Int(val2)) => {
+                if let (Some(val1), Some(val2)) = (val1, val2) {
+                    val1.partial_cmp(&(*val2 as f64))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Eq for Field {}
@@ -382,7 +436,11 @@ impl std::fmt::Display for Field {
                 None => write!(f, "NULL"),
             },
             Field::Date(val) => match val {
-                Some(val) => write!(f, "{}", val),
+                Some(val) => {
+                    let date = NaiveDate::from_num_days_from_ce_opt(*val).unwrap();
+                    // date in the format yyyy-mm-dd
+                    write!(f, "{}", date)
+                }
                 None => write!(f, "NULL"),
             },
         }

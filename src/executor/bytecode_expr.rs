@@ -22,6 +22,7 @@ pub enum ByteCodes {
     Jump,
     JumpIfTrue,
     JumpIfFalse,
+    JumpIfFalseOrNull,
     // COPY
     Duplicate,
     // MATH OPERATIONS
@@ -41,9 +42,11 @@ pub enum ByteCodes {
     Or,
     // IS_NULL
     IsNull,
+    // IS_BETWEEN
+    IsBetween,
 }
 
-const STATIC_DISPATCHER: [DispatchFn<Field>; 20] = [
+const STATIC_DISPATCHER: [DispatchFn; 22] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
@@ -52,6 +55,7 @@ const STATIC_DISPATCHER: [DispatchFn<Field>; 20] = [
     JUMP_FN,
     JUMP_IF_TRUE_FN,
     JUMP_IF_FALSE_FN,
+    JUMP_IF_FALSE_OR_NULL_FN,
     // COPY
     DUPLICATE_FN,
     // MATH OPERATIONS
@@ -71,6 +75,8 @@ const STATIC_DISPATCHER: [DispatchFn<Field>; 20] = [
     OR_FN,
     // IS_NULL
     IS_NULL_FN,
+    // IS_BETWEEN
+    IS_BETWEEN_FN,
 ];
 
 // Utility functions
@@ -142,91 +148,89 @@ impl ByteCodeExpr {
     }
 }
 
-type DispatchFn<T> =
-    fn(&[ByteCodeType], &mut ByteCodeType, &mut Vec<T>, &[T], &[T]) -> Result<(), ExecError>;
-const PUSH_LIT_FN: DispatchFn<Field> = push_lit;
-const PUSH_FIELD_FN: DispatchFn<Field> = push_field;
-const POP_FN: DispatchFn<Field> = pop;
-const JUMP_FN: DispatchFn<Field> = jump;
-const JUMP_IF_TRUE_FN: DispatchFn<Field> = jump_if_true;
-const JUMP_IF_FALSE_FN: DispatchFn<Field> = jump_if_false;
-const DUPLICATE_FN: DispatchFn<Field> = duplicate;
-const ADD_FN: DispatchFn<Field> = add;
-const SUB_FN: DispatchFn<Field> = sub;
-const MUL_FN: DispatchFn<Field> = mul;
-const DIV_FN: DispatchFn<Field> = div;
-const EQ_FN: DispatchFn<Field> = eq;
-const NEQ_FN: DispatchFn<Field> = neq;
-const LT_FN: DispatchFn<Field> = lt;
-const GT_FN: DispatchFn<Field> = gt;
-const LTE_FN: DispatchFn<Field> = lte;
-const GTE_FN: DispatchFn<Field> = gte;
-const AND_FN: DispatchFn<Field> = and;
-const OR_FN: DispatchFn<Field> = or;
-const IS_NULL_FN: DispatchFn<Field> = is_null;
+type DispatchFn = fn(
+    &[ByteCodeType],
+    &mut ByteCodeType,
+    &mut Vec<Field>,
+    &[Field],
+    &[Field],
+) -> Result<(), ExecError>;
+const PUSH_LIT_FN: DispatchFn = push_lit;
+const PUSH_FIELD_FN: DispatchFn = push_field;
+const POP_FN: DispatchFn = pop;
+const JUMP_FN: DispatchFn = jump;
+const JUMP_IF_TRUE_FN: DispatchFn = jump_if_true;
+const JUMP_IF_FALSE_FN: DispatchFn = jump_if_false;
+const JUMP_IF_FALSE_OR_NULL_FN: DispatchFn = jump_if_false_or_null;
+const DUPLICATE_FN: DispatchFn = duplicate;
+const ADD_FN: DispatchFn = add;
+const SUB_FN: DispatchFn = sub;
+const MUL_FN: DispatchFn = mul;
+const DIV_FN: DispatchFn = div;
+const EQ_FN: DispatchFn = eq;
+const NEQ_FN: DispatchFn = neq;
+const LT_FN: DispatchFn = lt;
+const GT_FN: DispatchFn = gt;
+const LTE_FN: DispatchFn = lte;
+const GTE_FN: DispatchFn = gte;
+const AND_FN: DispatchFn = and;
+const OR_FN: DispatchFn = or;
+const IS_NULL_FN: DispatchFn = is_null;
+const IS_BETWEEN_FN: DispatchFn = is_between;
 
-fn push_field<T>(
+fn push_field(
     bytecodes: &[ByteCodeType],
     i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Clone,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    record: &[Field],
+) -> Result<(), ExecError> {
     stack.push(record[bytecodes[*i as usize] as usize].clone());
     *i += 1;
     Ok(())
 }
 
-fn push_lit<T>(
+fn push_lit(
     bytecodes: &[ByteCodeType],
     i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Clone,
-{
+    stack: &mut Vec<Field>,
+    literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     stack.push(literals[bytecodes[*i as usize] as usize].clone());
     *i += 1;
     Ok(())
 }
 
-fn pop<T>(
+fn pop(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
 ) -> Result<(), ExecError> {
     stack.pop().unwrap();
     Ok(())
 }
 
-fn jump<T>(
+fn jump(
     bytecodes: &[ByteCodeType],
     i: &mut ByteCodeType,
-    _stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
+    _stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
 ) -> Result<(), ExecError> {
     *i = bytecodes[*i as usize];
     Ok(())
 }
 
-fn jump_if_true<T>(
+fn jump_if_true(
     bytecodes: &[ByteCodeType],
     i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Clone + AsBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let cond = stack.pop().unwrap();
     if cond.as_bool()? {
         *i = bytecodes[*i as usize];
@@ -236,16 +240,13 @@ where
     Ok(())
 }
 
-fn jump_if_false<T>(
+fn jump_if_false(
     bytecodes: &[ByteCodeType],
     i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Clone + AsBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let cond = stack.pop().unwrap();
     if !cond.as_bool()? {
         *i = bytecodes[*i as usize];
@@ -255,225 +256,248 @@ where
     Ok(())
 }
 
-fn duplicate<T>(
+fn jump_if_false_or_null(
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let cond = stack.pop().unwrap();
+    if cond.is_null() || !cond.as_bool()? {
+        *i = bytecodes[*i as usize];
+    } else {
+        *i += 1;
+    }
+    Ok(())
+}
+
+fn duplicate(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Clone,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let v = stack.last().unwrap().clone();
     stack.push(v);
     Ok(())
 }
 
-fn add<T>(
+fn add(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Add<Output = Result<T, ExecError>> + Clone,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
     stack.push((l + r)?);
     Ok(())
 }
 
-fn sub<T>(
+fn sub(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Sub<Output = Result<T, ExecError>> + Clone,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
     stack.push((l - r)?);
     Ok(())
 }
 
-fn mul<T>(
+fn mul(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Mul<Output = Result<T, ExecError>> + Clone,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
     stack.push((l * r)?);
     Ok(())
 }
 
-fn div<T>(
+fn div(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: Div<Output = Result<T, ExecError>> + Clone,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
     stack.push((l / r)?);
     Ok(())
 }
 
-fn eq<T>(
+fn eq(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialEq + Clone + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(T::from_bool(l == r));
+    let result = if r.is_null() || l.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(l == r)
+    };
+    stack.push(result);
     Ok(())
 }
 
-fn neq<T>(
+fn neq(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialEq + Clone + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(T::from_bool(l != r));
+    let result = if r.is_null() || l.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(l != r)
+    };
+    stack.push(result);
     Ok(())
 }
 
-fn lt<T>(
+fn lt(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialOrd + Clone + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(T::from_bool(l < r));
+    let result = if r.is_null() || l.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(l < r)
+    };
+    stack.push(result);
     Ok(())
 }
 
-fn gt<T>(
+fn gt(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialOrd + Clone + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(T::from_bool(l > r));
+    let result = if r.is_null() || l.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(l > r)
+    };
+    stack.push(result);
     Ok(())
 }
 
-fn lte<T>(
+fn lte(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialOrd + Clone + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(T::from_bool(l <= r));
+    let result = if r.is_null() || l.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(l <= r)
+    };
+    stack.push(result);
     Ok(())
 }
 
-fn gte<T>(
+fn gte(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialOrd + Clone + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
-    stack.push(T::from_bool(l >= r));
+    let result = if r.is_null() || l.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(l >= r)
+    };
+    stack.push(result);
     Ok(())
 }
 
-fn and<T>(
+fn and(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialEq + Clone + And<Output = Result<T, ExecError>>,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
     stack.push(l.and(r)?);
     Ok(())
 }
 
-fn or<T>(
+fn or(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialEq + Clone + Or<Output = Result<T, ExecError>>,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let r = stack.pop().unwrap();
     let l = stack.pop().unwrap();
     stack.push(l.or(r)?);
     Ok(())
 }
 
-fn is_null<T>(
+fn is_null(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
-    stack: &mut Vec<T>,
-    _literals: &[T],
-    _record: &[T],
-) -> Result<(), ExecError>
-where
-    T: PartialEq + Clone + IsNull + FromBool,
-{
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
     let field = stack.pop().unwrap();
-    stack.push(T::from_bool(field.is_null()));
+    stack.push(Field::from_bool(field.is_null()));
+    Ok(())
+}
+
+fn is_between(
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let upper = stack.pop().unwrap();
+    let lower = stack.pop().unwrap();
+    let field = stack.pop().unwrap();
+    let result = if field.is_null() || lower.is_null() || upper.is_null() {
+        Field::Boolean(None)
+    } else {
+        Field::from_bool(field >= lower && field <= upper)
+    };
+    stack.push(result);
     Ok(())
 }
 
@@ -579,9 +603,18 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                 convert_expr_to_bytecode(base, bytecode_expr)?;
                 for (when, then) in whens {
                     bytecode_expr.add_code(ByteCodes::Duplicate as usize);
-                    convert_expr_to_bytecode(when, bytecode_expr)?;
-                    bytecode_expr.add_code(ByteCodes::Eq as usize);
-                    bytecode_expr.add_code(ByteCodes::JumpIfFalse as usize);
+                    if let Expression::Field { val } = when {
+                        if val.is_null() {
+                            bytecode_expr.add_code(ByteCodes::IsNull as usize);
+                        } else {
+                            convert_expr_to_bytecode(when, bytecode_expr)?;
+                            bytecode_expr.add_code(ByteCodes::Eq as usize);
+                        }
+                    } else {
+                        convert_expr_to_bytecode(when, bytecode_expr)?;
+                        bytecode_expr.add_code(ByteCodes::Eq as usize);
+                    }
+                    bytecode_expr.add_code(ByteCodes::JumpIfFalseOrNull as usize);
                     let jump_if_false_addr = bytecode_expr.add_placeholder();
                     bytecode_expr.add_code(ByteCodes::Pop as usize);
                     convert_expr_to_bytecode(then, bytecode_expr)?;
@@ -603,7 +636,7 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
 
                 for (when, then) in whens {
                     convert_expr_to_bytecode(when, bytecode_expr)?;
-                    bytecode_expr.add_code(ByteCodes::JumpIfFalse as usize);
+                    bytecode_expr.add_code(ByteCodes::JumpIfFalseOrNull as usize);
                     let jump_if_false_addr = bytecode_expr.add_placeholder();
                     convert_expr_to_bytecode(then, bytecode_expr)?;
                     bytecode_expr.add_code(ByteCodes::Jump as usize);
@@ -617,6 +650,13 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
                 }
             }
+        }
+        Expression::Between { expr, lower, upper } => {
+            // [expr][lower][upper][is_between]
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            convert_expr_to_bytecode(lower, bytecode_expr)?;
+            convert_expr_to_bytecode(upper, bytecode_expr)?;
+            bytecode_expr.add_code(ByteCodes::IsBetween as usize);
         }
         Expression::IsNull { expr } => {
             convert_expr_to_bytecode(expr, bytecode_expr)?;
@@ -810,5 +850,36 @@ mod tests {
         assert_eq!(result4, Field::Int(Some(40)));
         let result_null = bytecode_expr.eval(&tuple_null).unwrap();
         assert_eq!(result_null, Field::Int(Some(40)));
+    }
+
+    #[test]
+    fn test_between() {
+        let tuple0 = Tuple::from_fields(vec![0.into()]);
+        let tuple1 = Tuple::from_fields(vec![1.into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into()]);
+        let tuple3 = Tuple::from_fields(vec![3.into()]);
+        let tuple4 = Tuple::from_fields(vec![4.into()]);
+        let tuple_null = Tuple::from_fields(vec![Field::Int(None)]);
+
+        // idx0 between 1 and 3
+        let expr = Expression::<PhysicalRelExpr>::Between {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            lower: Box::new(Expression::Field { val: 1.into() }),
+            upper: Box::new(Expression::Field { val: 3.into() }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result0 = bytecode_expr.eval(&tuple0).unwrap();
+        assert_eq!(result0, Field::from_bool(false));
+        let result1 = bytecode_expr.eval(&tuple1).unwrap();
+        assert_eq!(result1, Field::from_bool(true));
+        let result2 = bytecode_expr.eval(&tuple2).unwrap();
+        assert_eq!(result2, Field::from_bool(true));
+        let result3 = bytecode_expr.eval(&tuple3).unwrap();
+        assert_eq!(result3, Field::from_bool(true));
+        let result4 = bytecode_expr.eval(&tuple4).unwrap();
+        assert_eq!(result4, Field::from_bool(false));
+        let result_null = bytecode_expr.eval(&tuple_null).unwrap();
+        assert_eq!(result_null, Field::Boolean(None));
     }
 }

@@ -35,27 +35,14 @@ def get_query_string(query):
 # query_string = get_query_string(1)
 query_string = """
 SELECT
-    L_ORDERKEY,
-    SUM(L_EXTENDEDPRICE * (1 - L_DISCOUNT)) AS REVENUE,
-    O_ORDERDATE,
-    O_SHIPPRIORITY
+    SUM(L_EXTENDEDPRICE * L_DISCOUNT) AS REVENUE
 FROM
-    CUSTOMER,
-    ORDERS,
     LINEITEM
 WHERE
-        C_MKTSEGMENT = 'BUILDING'
-  AND C_CUSTKEY = O_CUSTKEY
-  AND L_ORDERKEY = O_ORDERKEY
-  AND O_ORDERDATE < DATE '1995-03-15'
-  AND L_SHIPDATE > DATE '1995-03-15'
-GROUP BY
-    L_ORDERKEY,
-    O_ORDERDATE,
-    O_SHIPPRIORITY
-ORDER BY
-    REVENUE DESC,
-    O_ORDERDATE
+        L_SHIPDATE >= DATE '1994-01-01'
+  AND L_SHIPDATE < DATE '1995-01-01'
+  AND L_DISCOUNT BETWEEN 0.05 AND 0.07
+  AND L_QUANTITY < 24;
 """
 
 explain = con.execute("EXPLAIN {}".format(query_string))
@@ -65,8 +52,8 @@ for row in result:
 
 result = con.execute(query_string)
 result = result.fetchall()
-print("Number of rows: {}".format(len(result)))
 for row in result:
     print(row)
+print("Number of rows: {}".format(len(result)))
 
 con.close()

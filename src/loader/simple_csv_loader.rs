@@ -56,7 +56,6 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
                         }
                     }
                     Err(e) => {
-                        println!("Error!!: {:?}", e);
                         return Err(e.to_string());
                     }
                 }

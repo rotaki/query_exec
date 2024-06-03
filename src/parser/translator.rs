@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use chrono::Datelike;
+use chrono::{Datelike, Month};
 use txn_storage::DatabaseId;
 
 use crate::{
@@ -900,7 +900,14 @@ impl Translator {
                 )),
             },
             sqlparser::ast::Expr::Value(value) => match value {
-                sqlparser::ast::Value::Number(num, _) => Ok(Expression::int(num.parse().unwrap())),
+                sqlparser::ast::Value::Number(num, _) => {
+                    // Try to parse as integer first
+                    match num.parse::<i64>() {
+                        Ok(num) => Ok(Expression::int(num)),
+                        Err(_) => Ok(Expression::float(num.parse().unwrap())),
+                    }
+                }
+                sqlparser::ast::Value::SingleQuotedString(s) => Ok(Expression::string(s.clone())),
                 _ => Err(translation_err!(
                     UnsupportedSQL,
                     "Unsupported value: {:?}",
@@ -1106,6 +1113,64 @@ impl Translator {
                 Ok(Expression::subquery(plan))
             }
             sqlparser::ast::Expr::Nested(expr) => self.process_expr(expr, distance),
+            sqlparser::ast::Expr::Interval(interval) => match interval.leading_field {
+                Some(sqlparser::ast::DateTimeField::Month) => {
+                    let months = match &*interval.value {
+                        sqlparser::ast::Expr::Value(val) => match val {
+                            sqlparser::ast::Value::Number(s, _) => s.parse::<i32>().map_err(|e| {
+                                translation_err!(
+                                    InvalidSQL,
+                                    "Failed to parse number from string {}, error: {}",
+                                    s,
+                                    e
+                                )
+                            }),
+                            sqlparser::ast::Value::SingleQuotedString(s) => {
+                                s.parse::<i32>().map_err(|e| {
+                                    translation_err!(
+                                        InvalidSQL,
+                                        "Failed to parse number from string {}, error: {}",
+                                        s,
+                                        e
+                                    )
+                                })
+                            }
+                            _ => Err(translation_err!(
+                                InvalidSQL,
+                                "Unsupported value: {:?} for interval",
+                                val
+                            )),
+                        },
+                        other => Err(translation_err!(
+                            InvalidSQL,
+                            "Unsupported interval value: {:?}",
+                            other
+                        )),
+                    }?;
+                    Ok(Expression::date(months * 30))
+                }
+                _ => Err(translation_err!(
+                    InvalidSQL,
+                    "Unsupported interval: {:?}",
+                    interval
+                )),
+            },
+            sqlparser::ast::Expr::Between {
+                expr,
+                negated,
+                low,
+                high,
+            } => {
+                let expr = self.process_expr(expr, distance)?;
+                let low = self.process_expr(low, distance)?;
+                let high = self.process_expr(high, distance)?;
+                let between = expr.between(low, high);
+                if *negated {
+                    unimplemented!("Negated BETWEEN is not supported yet");
+                } else {
+                    Ok(between)
+                }
+            }
             other => Err(translation_err!(
                 UnsupportedSQL,
                 "Unsupported expression: {:?} matched {:?}",

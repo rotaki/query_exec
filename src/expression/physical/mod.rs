@@ -741,6 +741,11 @@ impl LogicalToPhysicalExpression {
                     .collect(),
                 else_expr: Box::new(self.to_physical(else_expr)),
             },
+            Expression::Between { expr, lower, upper } => Expression::Between {
+                expr: Box::new(self.to_physical(expr)),
+                lower: Box::new(self.to_physical(lower)),
+                upper: Box::new(self.to_physical(upper)),
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },
