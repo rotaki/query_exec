@@ -1,12 +1,9 @@
-// Reference: https://github.com/rotaki/decorrelator
-
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
 use crate::Field;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 impl LogicalRelExpr {
-    /// Apply flatmap to the current logical relational expression.
     pub fn flatmap(
         self,
         optimize: bool,
@@ -30,9 +27,6 @@ impl LogicalRelExpr {
             // Pull up Project
             if let LogicalRelExpr::Project { src, mut cols } = func {
                 cols.extend(self.att());
-
-                // TODO: `is_wildcard` is set to True here to project all columns.
-                // Check if this is the correct behavior.
                 return self.flatmap(true, enabled_rules, col_id_gen, *src).project(
                     true,
                     enabled_rules,
@@ -72,7 +66,7 @@ impl LogicalRelExpr {
                 // func.att() is group_by + aggrs
                 let counts: Vec<usize> = aggrs
                     .iter()
-                    .filter_map(|(id, (_src_id, op))| {
+                    .filter_map(|(id, (src_id, op))| {
                         if let AggOp::Count = op {
                             Some(*id)
                         } else {
@@ -96,7 +90,7 @@ impl LogicalRelExpr {
 
                     // Create a copy of the original plan and rename it. Left join the copy with the src.
                     // Need to replace the free variables in the src with the new column ids.
-                    let (mut copy, new_col_ids) = self.rename(enabled_rules, col_id_gen);
+                    let (mut copy, new_col_ids) = self.rename(&enabled_rules, &col_id_gen);
                     let copy_att = copy.att();
                     let src = src.replace_variables(&new_col_ids);
                     copy = copy
@@ -122,35 +116,64 @@ impl LogicalRelExpr {
                             })
                             .collect(),
                     );
-                    // Project the columns except the columns of the copy
-                    let att = plan.att();
-                    let project_att = att.difference(&copy_att).cloned().collect();
+                    // plan.att() contains (duplicated) join cols, group_by and aggrs.
+                    // 1. We replace the original count columns with the new column ids.
+                    // 2. We remove the duplicated join cols and convert the aggrs to a new column id
+                    // if it's a count column.
+                    // 3. We remap the count columns to the original count columns.
 
-                    // TODO: `is_wildcard` is set to False here to project specific columns.
-                    // Check if this is the correct behavior.
-                    return plan
-                        .project(true, enabled_rules, col_id_gen, project_att)
+                    // We need to replace the count columns with new column ids.
+                    // The case expression will return the value with the original count column id.
+                    // Original -> New
+                    let replace_count_cols = counts
+                        .iter()
+                        .map(|id| (*id, col_id_gen.next()))
+                        .collect::<HashMap<_, _>>();
+                    // New -> Original
+                    let replace_count_cols_rev = replace_count_cols
+                        .iter()
+                        .map(|(src, dest)| (*dest, *src))
+                        .collect::<HashMap<_, _>>();
+                    let new_plan = plan.replace_variables(&replace_count_cols);
+
+                    // Get the projected columns
+                    let project_att: Vec<_> =
+                        new_plan.att().difference(&copy_att).cloned().collect(); // Remove the duplicated join cols
+                    let new_project_att = project_att
+                        .iter()
+                        .map(|id| {
+                            // If the column is a count column, replace it with the new column id
+                            *replace_count_cols_rev.get(id).unwrap_or(id)
+                        })
+                        .collect::<Vec<_>>(); // Convert the aggrs to a new column id if it's a count column
+
+                    return new_plan
                         .map(
                             true,
                             enabled_rules,
                             col_id_gen,
-                            counts.into_iter().map(|id| {
-                                (
-                                    id,
-                                    Expression::Case {
-                                        expr: Some(Box::new(Expression::col_ref(id))),
-                                        whens: [(
-                                            Expression::Field {
-                                                val: Field::Int(None),
-                                            },
-                                            Expression::int(0),
-                                        )]
-                                        .to_vec(),
-                                        else_expr: Box::new(Expression::col_ref(id)),
-                                    },
-                                )
-                            }),
-                        );
+                            replace_count_cols_rev
+                                .into_iter()
+                                .map(|(new_id, original_id)| {
+                                    (
+                                        // Set the count to 0 if it's NULL. Create a case expression for each count column.
+                                        original_id,
+                                        Expression::Case {
+                                            expr: Some(Box::new(Expression::col_ref(new_id))),
+                                            whens: [(
+                                                Expression::Field {
+                                                    val: Field::Int(None),
+                                                },
+                                                Expression::int(0),
+                                            )]
+                                            .to_vec(),
+                                            else_expr: Box::new(Expression::col_ref(new_id)),
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .project(true, enabled_rules, col_id_gen, new_project_att);
                 }
             }
         }

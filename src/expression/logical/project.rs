@@ -82,7 +82,7 @@ impl LogicalRelExpr {
 
                     input
                         .project(true, enabled_rules, col_id_gen, new_cols)
-                        .map(true, enabled_rules, col_id_gen, existing_exprs)
+                        .map(false, enabled_rules, col_id_gen, existing_exprs)
                         .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::Select { src, predicates } => {
@@ -91,7 +91,7 @@ impl LogicalRelExpr {
                         predicates.iter().flat_map(|pred| pred.free()).collect();
                     let new_cols = union(&free, cols.clone());
                     src.project(true, enabled_rules, col_id_gen, new_cols)
-                        .select(true, enabled_rules, col_id_gen, predicates)
+                        .select(false, enabled_rules, col_id_gen, predicates)
                         .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::Join {

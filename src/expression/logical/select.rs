@@ -16,12 +16,14 @@ impl LogicalRelExpr {
         if predicates.is_empty() {
             return self;
         }
-        let mut predicates = predicates
+        let mut predicates: Vec<Expression<LogicalRelExpr>> = predicates
             .into_iter()
             .flat_map(|expr| expr.split_conjunction())
             .collect();
 
         if optimize && enabled_rules.is_enabled(&HeuristicRule::SelectionPushdown) {
+            // We don't push down predicates through projections. Projections are
+            // prioritized over selections.
             match self {
                 LogicalRelExpr::Select {
                     src,

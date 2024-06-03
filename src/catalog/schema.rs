@@ -21,6 +21,24 @@ impl Schema {
         &self.columns
     }
 
+    pub fn merge(&self, other: &Schema) -> Schema {
+        let mut columns = self.columns.clone();
+        columns.extend(other.columns.clone());
+        Schema::new(columns, Vec::new())
+    }
+
+    pub fn project(&self, indices: &Vec<usize>) -> Schema {
+        let columns = indices
+            .into_iter()
+            .map(|idx| self.columns[*idx].clone())
+            .collect();
+        Schema::new(columns, vec![])
+    }
+
+    pub fn push_column(&mut self, column: ColumnDef) {
+        self.columns.push(column);
+    }
+
     pub fn get_column(&self, idx: usize) -> &ColumnDef {
         &self.columns[idx]
     }
@@ -30,7 +48,7 @@ impl Schema {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
     name: String,
     data_type: DataType,
@@ -63,11 +81,12 @@ impl ColumnDef {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DataType {
     Boolean,
     Int,
     Float,
     String,
     Date,
+    Unknown,
 }

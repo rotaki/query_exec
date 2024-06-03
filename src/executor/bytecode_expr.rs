@@ -17,6 +17,7 @@ pub enum ByteCodes {
     // CONTROL FLOW
     PushLit,
     PushField,
+    Pop,
     // JUMP
     Jump,
     JumpIfTrue,
@@ -42,10 +43,11 @@ pub enum ByteCodes {
     IsNull,
 }
 
-const STATIC_DISPATCHER: [DispatchFn<Field>; 19] = [
+const STATIC_DISPATCHER: [DispatchFn<Field>; 20] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
+    POP_FN,
     // JUMP
     JUMP_FN,
     JUMP_IF_TRUE_FN,
@@ -128,6 +130,7 @@ impl ByteCodeExpr {
             i += 1;
             STATIC_DISPATCHER[opcode](bytecodes, &mut i, &mut stack, literals, record)?;
         }
+        debug_assert_eq!(stack.len(), 1, "{:?}", stack);
         Ok(stack.pop().unwrap())
     }
 
@@ -143,6 +146,7 @@ type DispatchFn<T> =
     fn(&[ByteCodeType], &mut ByteCodeType, &mut Vec<T>, &[T], &[T]) -> Result<(), ExecError>;
 const PUSH_LIT_FN: DispatchFn<Field> = push_lit;
 const PUSH_FIELD_FN: DispatchFn<Field> = push_field;
+const POP_FN: DispatchFn<Field> = pop;
 const JUMP_FN: DispatchFn<Field> = jump;
 const JUMP_IF_TRUE_FN: DispatchFn<Field> = jump_if_true;
 const JUMP_IF_FALSE_FN: DispatchFn<Field> = jump_if_false;
@@ -188,6 +192,17 @@ where
 {
     stack.push(literals[bytecodes[*i as usize] as usize].clone());
     *i += 1;
+    Ok(())
+}
+
+fn pop<T>(
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
+    stack: &mut Vec<T>,
+    _literals: &[T],
+    _record: &[T],
+) -> Result<(), ExecError> {
+    stack.pop().unwrap();
     Ok(())
 }
 
@@ -448,10 +463,10 @@ where
 }
 
 fn is_null<T>(
-    bytecodes: &[ByteCodeType],
-    i: &mut ByteCodeType,
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
     stack: &mut Vec<T>,
-    literals: &[T],
+    _literals: &[T],
     _record: &[T],
 ) -> Result<(), ExecError>
 where
@@ -550,11 +565,16 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
             whens,
             else_expr,
         } => {
+            if whens.is_empty() {
+                return Err(ExecError::Conversion(
+                    "Case expression must have at least one when clause".to_string(),
+                ));
+            }
             if let Some(base) = expr {
-                // [base][dup][when1][eq][jump_if_false][when2_addr][then1][jump_to_end]
-                //       [dup][when2][eq][jump_if_false][when3_addr][then2][jump_to_end]...
-                //       [else]
-                let mut jump_end_ifs = Vec::new();
+                // [base][dup][when1][eq][jump_if_false][when2_addr][pop][then1][jump_to_end]
+                //       [dup][when2][eq][jump_if_false][when3_addr][pop][then2][jump_to_end]...
+                //       [pop][else]
+                let mut jump_end_ifs = Vec::with_capacity(whens.len());
 
                 convert_expr_to_bytecode(base, bytecode_expr)?;
                 for (when, then) in whens {
@@ -563,12 +583,14 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     bytecode_expr.add_code(ByteCodes::Eq as usize);
                     bytecode_expr.add_code(ByteCodes::JumpIfFalse as usize);
                     let jump_if_false_addr = bytecode_expr.add_placeholder();
+                    bytecode_expr.add_code(ByteCodes::Pop as usize);
                     convert_expr_to_bytecode(then, bytecode_expr)?;
                     bytecode_expr.add_code(ByteCodes::Jump as usize);
                     let end_addr = bytecode_expr.add_placeholder();
                     jump_end_ifs.push(end_addr);
                     bytecode_expr.bytecodes[jump_if_false_addr] = end_addr as ByteCodeType + 1;
                 }
+                bytecode_expr.add_code(ByteCodes::Pop as usize);
                 convert_expr_to_bytecode(else_expr, bytecode_expr)?;
                 for addr in jump_end_ifs {
                     bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
@@ -577,7 +599,7 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                 // [when1][jump_if_false][when2_addr][then1][jump_to_end]
                 // [when2][jump_if_false][when3_addr][then2][jump_to_end]...
                 // [else]
-                let mut jump_end_ifs = Vec::new();
+                let mut jump_end_ifs = Vec::with_capacity(whens.len());
 
                 for (when, then) in whens {
                     convert_expr_to_bytecode(when, bytecode_expr)?;

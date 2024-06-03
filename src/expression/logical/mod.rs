@@ -47,7 +47,6 @@ pub enum LogicalRelExpr {
         src: Box<LogicalRelExpr>,
         cols: Vec<ColumnId>,
     },
-    // TODO: The current translator does not support ORDER BY
     OrderBy {
         src: Box<LogicalRelExpr>,
         cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)

@@ -14,13 +14,9 @@ pub enum PhysicalRelExpr {
     Select {
         // Evaluate the predicate for each row in the source
         src: Box<PhysicalRelExpr>,
-
-        // TODO: Should be a single expression(?) because usually we need to break up conjunctive selection predicates
-        // However, this might not be necessary as we have already pushed down the selection predicates
-        // in the translation phase (generation of logical plan from ast)
         predicates: Vec<Expression<Self>>,
     },
-    CrossJoin {
+    NestedLoopJoin {
         join_type: JoinType,
         left: Box<PhysicalRelExpr>,
         right: Box<PhysicalRelExpr>,
@@ -94,12 +90,12 @@ impl PlanTrait for PhysicalRelExpr {
                     .map(|pred| pred.replace_variables(src_to_dest))
                     .collect(),
             },
-            PhysicalRelExpr::CrossJoin {
+            PhysicalRelExpr::NestedLoopJoin {
                 join_type,
                 left,
                 right,
                 predicates,
-            } => PhysicalRelExpr::CrossJoin {
+            } => PhysicalRelExpr::NestedLoopJoin {
                 join_type,
                 left: Box::new(left.replace_variables(src_to_dest)),
                 right: Box::new(right.replace_variables(src_to_dest)),
@@ -237,14 +233,14 @@ impl PlanTrait for PhysicalRelExpr {
                 out.push_str(")\n");
                 src.print_inner(indent + 2, out);
             }
-            PhysicalRelExpr::CrossJoin {
+            PhysicalRelExpr::NestedLoopJoin {
                 join_type,
                 left,
                 right,
                 predicates,
             } => {
                 out.push_str(&format!(
-                    "{}-> Cross {}_join(",
+                    "{}-> cross {}_join(",
                     " ".repeat(indent),
                     join_type
                 ));
@@ -388,7 +384,7 @@ impl PlanTrait for PhysicalRelExpr {
                 }
                 set.difference(&src.att()).cloned().collect()
             }
-            PhysicalRelExpr::CrossJoin {
+            PhysicalRelExpr::NestedLoopJoin {
                 left,
                 right,
                 predicates,
@@ -490,7 +486,7 @@ impl PlanTrait for PhysicalRelExpr {
                 column_indices: column_names,
             } => column_names.iter().cloned().collect(),
             PhysicalRelExpr::Select { src, .. } => src.att(),
-            PhysicalRelExpr::CrossJoin { left, right, .. }
+            PhysicalRelExpr::NestedLoopJoin { left, right, .. }
             | PhysicalRelExpr::HashJoin { left, right, .. } => {
                 let mut set = left.att();
                 set.extend(right.att());
@@ -557,7 +553,7 @@ impl PhysicalRelExpr {
                 src.pre_post_visit(visitor);
                 visitor.visit_post(&self);
             }
-            PhysicalRelExpr::CrossJoin { left, right, .. }
+            PhysicalRelExpr::NestedLoopJoin { left, right, .. }
             | PhysicalRelExpr::HashJoin { left, right, .. } => {
                 visitor.visit_pre(&self);
                 left.pre_post_visit(visitor);
@@ -641,7 +637,7 @@ impl LogicalToPhysicalRelExpr {
                 match join_type {
                     // If join_type is CrossJoin, we use the CrossJoin variant
                     // Otherwise, we use hash join
-                    JoinType::CrossJoin => PhysicalRelExpr::CrossJoin {
+                    JoinType::CrossJoin => PhysicalRelExpr::NestedLoopJoin {
                         join_type: JoinType::CrossJoin,
                         left,
                         right,

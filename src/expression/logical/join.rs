@@ -34,53 +34,15 @@ impl LogicalRelExpr {
                 join_type,
                 JoinType::Inner | JoinType::LeftOuter | JoinType::CrossJoin
             ) {
-                // Notice the difference from rotaki/decorrelator. Determine which
-                // predicates can be pushed down to the left and right sides respectively.
-                let (push_down_to_left, keep): (
-                    Vec<&Expression<LogicalRelExpr>>,
-                    Vec<&Expression<LogicalRelExpr>>,
-                ) = predicates.iter().partition(|pred| pred.bound_by(&self));
-                let (push_down_to_right, keep): (
-                    Vec<&Expression<LogicalRelExpr>>,
-                    Vec<&Expression<LogicalRelExpr>>,
-                ) = keep.iter().partition(|pred| pred.bound_by(&other));
-
-                // TODO: Check if the following condition is correct. What if, for
-                // example, `push_down_to_left` is empty but `push_down_to_right` is not?
-                if !push_down_to_left.is_empty() || !push_down_to_right.is_empty() {
+                let (push_down, keep): (Vec<_>, Vec<_>) =
+                    predicates.iter().partition(|pred| pred.bound_by(&self));
+                if !push_down.is_empty() {
                     // This condition is necessary to avoid infinite recursion
-                    let push_down_to_left = push_down_to_left
-                        .into_iter()
-                        .map(|expr| expr.clone())
-                        .collect();
-                    let push_down_to_right = push_down_to_right
-                        .into_iter()
-                        .map(|expr| expr.clone())
-                        .collect();
-                    let keep: Vec<Expression<LogicalRelExpr>> =
-                        keep.into_iter().map(|expr| expr.clone()).collect();
-
-                    // Cross join can be made into an inner join if all the predicates
-                    // are bound by the left and right sides.
-                    let is_inner = keep.iter().all(|expr| expr.intersect_with(&other));
-                    let join_type = if is_inner && matches!(join_type, JoinType::CrossJoin) {
-                        JoinType::Inner
-                    } else {
-                        join_type
-                    };
-
-                    // Notice the difference from rotaki/decorrelator. Here, we
-                    // push down predicates to both sides and then join the two sides.
+                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
+                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
                     return self
-                        .select(true, enabled_rules, col_id_gen, push_down_to_left)
-                        .join(
-                            false,
-                            enabled_rules,
-                            col_id_gen,
-                            join_type,
-                            other.select(true, enabled_rules, col_id_gen, push_down_to_right),
-                            keep,
-                        );
+                        .select(true, enabled_rules, col_id_gen, push_down)
+                        .join(true, enabled_rules, col_id_gen, join_type, other, keep);
                 }
             }
 
@@ -95,7 +57,7 @@ impl LogicalRelExpr {
                     let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
                     let keep = keep.into_iter().map(|expr| expr.clone()).collect();
                     return self.join(
-                        false,
+                        true,
                         enabled_rules,
                         col_id_gen,
                         join_type,

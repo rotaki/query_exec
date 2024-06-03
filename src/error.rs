@@ -4,6 +4,7 @@ use txn_storage::Status;
 pub enum ExecError {
     FieldOp(String),
     Conversion(String),
+    Catalog(String),
     Storage(String),
 }
 

@@ -56,6 +56,14 @@ impl Catalog {
         self.tables.lock().unwrap().remove(&c_id);
     }
 
+    pub fn get_schema(&self, c_id: ContainerId) -> Option<SchemaRef> {
+        self.tables
+            .lock()
+            .unwrap()
+            .get(&c_id)
+            .map(|t| t.schema.clone())
+    }
+
     pub fn get_table(&self, table_name: &str) -> Option<(ContainerId, TableRef)> {
         self.tables
             .lock()

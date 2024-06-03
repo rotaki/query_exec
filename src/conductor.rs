@@ -82,7 +82,11 @@ impl<T: TxnStorageTrait> Conductor<T> {
     }
 
     pub fn to_executable<E: Executor<T>>(&self, physical_plan: PhysicalRelExpr) -> E {
-        E::new(self.storage.clone(), physical_plan)
+        E::new(
+            self.catalog_ref.clone(),
+            self.storage.clone(),
+            physical_plan,
+        )
     }
 }
 
@@ -119,6 +123,14 @@ mod tests {
         // Create Employees table
         // Schema: id, name, age, department_id
         // 5 tuples
+        /*
+        id,name,age,department_id
+        1,Alice,30,1
+        2,Bob,22,2
+        3,Charlie,35,1
+        4,David,28,2
+        5,Eva,40,NULL
+         */
         let c_id = storage
             .create_container(
                 &txn,
@@ -142,7 +154,7 @@ mod tests {
             Tuple::from_fields(vec![1.into(), "Alice".into(), 30.into(), 1.into()]),
             Tuple::from_fields(vec![2.into(), "Bob".into(), 22.into(), 2.into()]),
             Tuple::from_fields(vec![3.into(), "Charlie".into(), 35.into(), 1.into()]),
-            Tuple::from_fields(vec![4.into(), "David".into(), 28.into(), 3.into()]),
+            Tuple::from_fields(vec![4.into(), "David".into(), 28.into(), 2.into()]),
             Tuple::from_fields(vec![5.into(), "Eva".into(), 40.into(), Field::Int(None)]),
         ];
 
@@ -226,6 +238,28 @@ mod tests {
         c_id
     }
 
+    fn check_result(result: &[Tuple], expected: &[Tuple], verbose: bool) {
+        let result_string = result
+            .iter()
+            .map(|t| t.to_pretty_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected_string = expected
+            .iter()
+            .map(|t| t.to_pretty_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if verbose {
+            println!("--- Result ---\n{}", result_string);
+            println!("--- Expected ---\n{}", expected_string);
+        }
+        assert_eq!(
+            result, expected,
+            "\n--- Result ---\n{}\n--- Expected ---\n{}\n",
+            result_string, expected_string
+        );
+    }
+
     fn setup_conductor<T: TxnStorageTrait>(storage: Arc<T>) -> Conductor<T> {
         let catalog = Catalog::new();
         let db_id = storage.as_ref().open_db(DBOptions::new("test_db")).unwrap();
@@ -238,16 +272,27 @@ mod tests {
         Conductor::new(db_id, Arc::new(catalog), storage)
     }
 
-    fn run_query<T: TxnStorageTrait>(conductor: &Conductor<T>, sql_string: &str) -> Vec<Tuple> {
+    fn run_query<T: TxnStorageTrait>(
+        conductor: &Conductor<T>,
+        sql_string: &str,
+        verbose: bool,
+    ) -> Vec<Tuple> {
         let logical_plan = conductor.to_logical(sql_string).unwrap();
-        println!("=== Logical Plan ===");
-        logical_plan.pretty_print();
+        if verbose {
+            println!("=== Logical Plan ===");
+            logical_plan.pretty_print();
+        }
         let physical_plan = conductor.to_physical(logical_plan);
-        println!("=== Physical Plan ===");
-        physical_plan.pretty_print();
+        if verbose {
+            println!("=== Physical Plan ===");
+            physical_plan.pretty_print();
+        }
         let mut executor = conductor.to_executable::<VolcanoIterator<T>>(physical_plan);
-        println!("=== Executor ===");
-        println!("{}", executor.to_pretty_string());
+        if verbose {
+            println!("=== Executor ===");
+            println!("{}", executor.to_pretty_string());
+        }
+        // todo!("Implement pretty print for executor");
         let txn = conductor
             .storage
             .begin_txn(&conductor.db_id, TxnOptions::default())
@@ -262,7 +307,7 @@ mod tests {
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT name, age FROM Employees";
-        let result = run_query(&conductor, sql_string);
+        let result = run_query(&conductor, sql_string, false);
         let expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into()]),
@@ -270,7 +315,16 @@ mod tests {
             Tuple::from_fields(vec!["David".into(), 28.into()]),
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
         ];
-        assert_eq!(result, expected);
+        assert_eq!(
+            result,
+            expected,
+            "Result: \n{}\n",
+            result
+                .iter()
+                .map(|t| t.to_pretty_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 
     #[test]
@@ -278,7 +332,7 @@ mod tests {
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT name, age + 1 FROM Employees";
-        let result = run_query(&conductor, sql_string);
+        let result = run_query(&conductor, sql_string, false);
         let expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 31.into()]),
             Tuple::from_fields(vec!["Bob".into(), 23.into()]),
@@ -286,7 +340,7 @@ mod tests {
             Tuple::from_fields(vec!["David".into(), 29.into()]),
             Tuple::from_fields(vec!["Eva".into(), 41.into()]),
         ];
-        assert_eq!(result, expected);
+        check_result(&result, &expected, false);
     }
 
     #[test]
@@ -294,12 +348,12 @@ mod tests {
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT name, age FROM Employees WHERE age > 30";
-        let result = run_query(&conductor, sql_string);
+        let result = run_query(&conductor, sql_string, false);
         let expected = vec![
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
         ];
-        assert_eq!(result, expected);
+        check_result(&result, &expected, false);
     }
 
     #[test]
@@ -307,16 +361,77 @@ mod tests {
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT e.name, e.age, d.name AS department FROM Employees e JOIN Departments d ON e.department_id = d.id";
-        let mut result = run_query(&conductor, sql_string);
+        let mut result = run_query(&conductor, sql_string, false);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into(), "Engineering".into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into(), "HR".into()]),
-            Tuple::from_fields(vec!["David".into(), 28.into(), "Marketing".into()]),
+            Tuple::from_fields(vec!["David".into(), 28.into(), "Engineering".into()]),
         ];
         result.sort();
         expected.sort();
-        assert_eq!(result, expected);
+        check_result(&result, &expected, false);
+    }
+
+    #[test]
+    fn test_left_join() {
+        let storage = get_in_mem_storage();
+        let conductor = setup_conductor(storage.clone());
+        let sql_string = "SELECT d.name, sum(e.age) FROM Departments d LEFT JOIN Employees e ON e.department_id = d.id GROUP BY d.name";
+        let mut result = run_query(&conductor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into(), 65.into()]),
+            Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
+            Tuple::from_fields(vec!["Marketing".into(), Field::Int(None)]),
+        ];
+        result.sort();
+        expected.sort();
+        check_result(&result, &expected, true);
+    }
+
+    #[test]
+    fn test_right_join() {
+        let storage = get_in_mem_storage();
+        let conductor = setup_conductor(storage.clone());
+        let sql_string =  "SELECT d.name, sum(e.age) FROM Employees e RIGHT JOIN Departments d ON e.department_id = d.id GROUP BY d.name";
+        let mut result = run_query(&conductor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into(), 65.into()]),
+            Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
+            Tuple::from_fields(vec!["Marketing".into(), Field::Int(None)]),
+        ];
+        result.sort();
+        expected.sort();
+        check_result(&result, &expected, true);
+    }
+
+    #[test]
+    fn test_cross_join() {
+        let storage = get_in_mem_storage();
+        let conductor = setup_conductor(storage.clone());
+        let sql_string =
+            "SELECT e.name, e.age, d.name AS department FROM Employees e, Departments d";
+        let mut result = run_query(&conductor, sql_string, false);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
+            Tuple::from_fields(vec!["Alice".into(), 30.into(), "Engineering".into()]),
+            Tuple::from_fields(vec!["Alice".into(), 30.into(), "Marketing".into()]),
+            Tuple::from_fields(vec!["Bob".into(), 22.into(), "HR".into()]),
+            Tuple::from_fields(vec!["Bob".into(), 22.into(), "Engineering".into()]),
+            Tuple::from_fields(vec!["Bob".into(), 22.into(), "Marketing".into()]),
+            Tuple::from_fields(vec!["Charlie".into(), 35.into(), "HR".into()]),
+            Tuple::from_fields(vec!["Charlie".into(), 35.into(), "Engineering".into()]),
+            Tuple::from_fields(vec!["Charlie".into(), 35.into(), "Marketing".into()]),
+            Tuple::from_fields(vec!["David".into(), 28.into(), "HR".into()]),
+            Tuple::from_fields(vec!["David".into(), 28.into(), "Engineering".into()]),
+            Tuple::from_fields(vec!["David".into(), 28.into(), "Marketing".into()]),
+            Tuple::from_fields(vec!["Eva".into(), 40.into(), "HR".into()]),
+            Tuple::from_fields(vec!["Eva".into(), 40.into(), "Engineering".into()]),
+            Tuple::from_fields(vec!["Eva".into(), 40.into(), "Marketing".into()]),
+        ];
+        result.sort();
+        expected.sort();
+        check_result(&result, &expected, false);
     }
 
     #[test]
@@ -324,9 +439,9 @@ mod tests {
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT COUNT(*), AVG(age) FROM Employees";
-        let result = run_query(&conductor, sql_string);
+        let result = run_query(&conductor, sql_string, false);
         let expected = vec![Tuple::from_fields(vec![5.into(), 31.0.into()])];
-        assert_eq!(result, expected);
+        check_result(&result, &expected, false);
     }
 
     #[test]
@@ -334,29 +449,45 @@ mod tests {
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name;";
-        let mut result = run_query(&conductor, sql_string);
+        let mut result = run_query(&conductor, sql_string, false);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 32.5.into()]),
-            Tuple::from_fields(vec!["Engineering".into(), 22.0.into()]),
-            Tuple::from_fields(vec!["Marketing".into(), 28.0.into()]),
+            Tuple::from_fields(vec!["Engineering".into(), 25.0.into()]),
         ];
         result.sort();
         expected.sort();
-        assert_eq!(result, expected);
+        check_result(&result, &expected, false);
+    }
+
+    #[test]
+    fn test_subquery() {
+        let storage = get_in_mem_storage();
+        let conductor = setup_conductor(storage.clone());
+        // For each department, count the number of employees and sum of their ages
+        let sql_string = "SELECT d.name, cnt, sum_age FROM Departments d, (SELECT department_id, COUNT(*) AS cnt, SUM(age) AS sum_age FROM Employees e WHERE e.department_id = d.id)";
+        let mut result = run_query(&conductor, sql_string, false);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into(), 2.into(), 65.into()]),
+            Tuple::from_fields(vec!["Engineering".into(), 2.into(), 50.into()]),
+            Tuple::from_fields(vec!["Marketing".into(), 0.into(), Field::Int(None)]),
+        ];
+        result.sort();
+        expected.sort();
+        check_result(&result, &expected, false);
     }
 
     #[test]
     fn test_where_exists() {
-        todo!("Currently not supported");
         let storage = get_in_mem_storage();
         let conductor = setup_conductor(storage.clone());
         let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
-        let result = run_query(&conductor, sql_string);
-        let expected = vec![
+        let mut result = run_query(&conductor, sql_string, true);
+        let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
-            Tuple::from_fields(vec!["Marketing".into()]),
         ];
-        assert_eq!(result, expected);
+        result.sort();
+        expected.sort();
+        check_result(&result, &expected, false);
     }
 }

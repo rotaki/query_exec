@@ -3,6 +3,11 @@ use std::{collections::HashMap, sync::Arc};
 use txn_storage::prelude::*;
 
 use crate::{
+    catalog::{
+        self,
+        prelude::{ColumnDef, DataType},
+        CatalogRef, Schema, SchemaRef,
+    },
     error::ExecError,
     expression::{prelude::PhysicalRelExpr, AggOp, Expression, JoinType},
     tuple::{FromBool, IsNull, Tuple},
@@ -22,13 +27,13 @@ pub enum VolcanoIterator<T: TxnStorageTrait> {
     Sort(SortIter<T>),
     Limit(LimitIter<T>),
     HashJoin(HashJoinIter<T>),
-    CrossJoin(CrossJoinIter<T>),
+    NestedLoopJoin(NestedLoopJoin<T>),
 }
 
 impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
-    fn new(storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
+    fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
         let mut physical_to_op = PhysicalRelExprToOpIter::new(storage);
-        physical_to_op.to_executable(physical_plan)
+        physical_to_op.to_executable(catalog, physical_plan)
     }
 
     fn to_pretty_string(&self) -> String {
@@ -59,8 +64,23 @@ impl<T: TxnStorageTrait> VolcanoIterator<T> {
             VolcanoIterator::Sort(iter) => iter.next(txn),
             VolcanoIterator::Limit(iter) => iter.next(txn),
             VolcanoIterator::HashJoin(iter) => iter.next(txn),
-            VolcanoIterator::CrossJoin(iter) => iter.next(txn),
+            VolcanoIterator::NestedLoopJoin(iter) => iter.next(txn),
             VolcanoIterator::Map(iter) => iter.next(txn),
+        }
+    }
+
+    // Returns the output schema of the operator
+    fn schema(&self) -> SchemaRef {
+        match self {
+            VolcanoIterator::Scan(iter) => iter.schema(),
+            VolcanoIterator::Filter(iter) => iter.schema(),
+            VolcanoIterator::Project(iter) => iter.schema(),
+            VolcanoIterator::HashAggregate(iter) => iter.schema(),
+            VolcanoIterator::Sort(iter) => iter.schema(),
+            VolcanoIterator::Limit(iter) => iter.schema(),
+            VolcanoIterator::HashJoin(iter) => iter.schema(),
+            VolcanoIterator::NestedLoopJoin(iter) => iter.schema(),
+            VolcanoIterator::Map(iter) => iter.schema(),
         }
     }
 
@@ -73,13 +93,14 @@ impl<T: TxnStorageTrait> VolcanoIterator<T> {
             VolcanoIterator::Sort(iter) => iter.print_inner(indent, out),
             VolcanoIterator::Limit(iter) => iter.print_inner(indent, out),
             VolcanoIterator::HashJoin(iter) => iter.print_inner(indent, out),
-            VolcanoIterator::CrossJoin(iter) => iter.print_inner(indent, out),
+            VolcanoIterator::NestedLoopJoin(iter) => iter.print_inner(indent, out),
             VolcanoIterator::Map(iter) => iter.print_inner(indent, out),
         }
     }
 }
 
 pub struct ScanIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub storage: Arc<T>,
     pub c_id: ContainerId,
     pub column_indices: Vec<ColumnId>,
@@ -87,8 +108,14 @@ pub struct ScanIter<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> ScanIter<T> {
-    pub fn new(storage: Arc<T>, c_id: ContainerId, column_indices: Vec<ColumnId>) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        storage: Arc<T>,
+        c_id: ContainerId,
+        column_indices: Vec<ColumnId>,
+    ) -> Self {
         Self {
+            schema,
             storage,
             c_id,
             column_indices,
@@ -104,14 +131,19 @@ impl<T: TxnStorageTrait> ScanIter<T> {
                     .unwrap(),
             );
         }
-        Ok(self
-            .storage
-            .iter_next(self.iter.as_ref().unwrap())?
-            .map(|(k, v)| {
-                let tuple = Tuple::from_bytes(&v);
-                let tuple = tuple.project(&self.column_indices);
-                (k, tuple)
-            }))
+        let iter = self.iter.as_ref().unwrap();
+        if let Some((k, v)) = self.storage.iter_next(iter)? {
+            let tuple = Tuple::from_bytes(&v);
+            let tuple = tuple.project(&self.column_indices);
+            Ok(Some((k, tuple)))
+        } else {
+            self.iter = None;
+            Ok(None)
+        }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     fn print_inner(&self, indent: usize, out: &mut String) {
@@ -132,13 +164,18 @@ impl<T: TxnStorageTrait> ScanIter<T> {
 }
 
 pub struct FilterIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub input: Box<VolcanoIterator<T>>,
     pub expr: ByteCodeExpr,
 }
 
 impl<T: TxnStorageTrait> FilterIter<T> {
-    pub fn new(input: Box<VolcanoIterator<T>>, expr: ByteCodeExpr) -> Self {
-        Self { input, expr }
+    pub fn new(schema: SchemaRef, input: Box<VolcanoIterator<T>>, expr: ByteCodeExpr) -> Self {
+        Self {
+            schema,
+            input,
+            expr,
+        }
     }
 
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
@@ -154,6 +191,10 @@ impl<T: TxnStorageTrait> FilterIter<T> {
         }
     }
 
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> filter({:?})", " ".repeat(indent), self.expr));
         out.push_str("\n");
@@ -162,13 +203,19 @@ impl<T: TxnStorageTrait> FilterIter<T> {
 }
 
 pub struct ProjectIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub input: Box<VolcanoIterator<T>>,
     pub column_indices: Vec<ColumnId>,
 }
 
 impl<T: TxnStorageTrait> ProjectIter<T> {
-    pub fn new(input: Box<VolcanoIterator<T>>, column_indices: Vec<ColumnId>) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        input: Box<VolcanoIterator<T>>,
+        column_indices: Vec<ColumnId>,
+    ) -> Self {
         Self {
+            schema,
             input,
             column_indices,
         }
@@ -182,6 +229,10 @@ impl<T: TxnStorageTrait> ProjectIter<T> {
             }
             None => Ok(None),
         }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     fn print_inner(&self, indent: usize, out: &mut String) {
@@ -200,13 +251,22 @@ impl<T: TxnStorageTrait> ProjectIter<T> {
 }
 
 pub struct MapIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub input: Box<VolcanoIterator<T>>,
     pub exprs: Vec<ByteCodeExpr>,
 }
 
 impl<T: TxnStorageTrait> MapIter<T> {
-    pub fn new(input: Box<VolcanoIterator<T>>, exprs: Vec<ByteCodeExpr>) -> Self {
-        Self { input, exprs }
+    pub fn new(
+        schema: SchemaRef,
+        input: Box<VolcanoIterator<T>>,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            input,
+            exprs,
+        }
     }
 
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
@@ -219,6 +279,10 @@ impl<T: TxnStorageTrait> MapIter<T> {
             }
             None => Ok(None),
         }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     fn print_inner(&self, indent: usize, out: &mut String) {
@@ -236,13 +300,8 @@ impl<T: TxnStorageTrait> MapIter<T> {
     }
 }
 
-pub struct FlatMapIter<T: TxnStorageTrait> {
-    pub input: Box<VolcanoIterator<T>>,
-    pub func: ByteCodeExpr,
-    pub buffer: Option<Vec<Tuple>>,
-}
-
 pub struct HashAggregateIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub input: Box<VolcanoIterator<T>>,
     pub group_by: Vec<ColumnId>,
     pub agg_op: Vec<(AggOp, ColumnId)>,
@@ -251,11 +310,13 @@ pub struct HashAggregateIter<T: TxnStorageTrait> {
 
 impl<T: TxnStorageTrait> HashAggregateIter<T> {
     pub fn new(
+        schema: SchemaRef,
         input: Box<VolcanoIterator<T>>,
         group_by: Vec<ColumnId>,
         agg_op: Vec<(AggOp, ColumnId)>,
     ) -> Self {
         Self {
+            schema,
             input,
             group_by,
             agg_op,
@@ -346,6 +407,10 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
         }
     }
 
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> hash_aggregate(", " ".repeat(indent)));
         let mut split = "";
@@ -369,14 +434,20 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
 }
 
 pub struct SortIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub input: Box<VolcanoIterator<T>>,
     pub sort_cols: Vec<(ColumnId, bool, bool)>, // (col_id, asc, nulls_first)
     pub buffer: Option<Vec<(Vec<u8>, Tuple)>>,
 }
 
 impl<T: TxnStorageTrait> SortIter<T> {
-    pub fn new(input: Box<VolcanoIterator<T>>, sort_cols: Vec<(ColumnId, bool, bool)>) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        input: Box<VolcanoIterator<T>>,
+        sort_cols: Vec<(ColumnId, bool, bool)>,
+    ) -> Self {
         Self {
+            schema,
             input,
             sort_cols,
             buffer: None,
@@ -409,6 +480,10 @@ impl<T: TxnStorageTrait> SortIter<T> {
         }
     }
 
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> sort(", " ".repeat(indent)));
         let mut split = "";
@@ -429,14 +504,16 @@ impl<T: TxnStorageTrait> SortIter<T> {
 }
 
 pub struct LimitIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub input: Box<VolcanoIterator<T>>,
     pub limit: usize,
     pub current: Option<usize>,
 }
 
 impl<T: TxnStorageTrait> LimitIter<T> {
-    pub fn new(input: Box<VolcanoIterator<T>>, limit: usize) -> Self {
+    pub fn new(schema: SchemaRef, input: Box<VolcanoIterator<T>>, limit: usize) -> Self {
         Self {
+            schema,
             input,
             limit,
             current: None,
@@ -456,6 +533,10 @@ impl<T: TxnStorageTrait> LimitIter<T> {
         }
     }
 
+    fn schema(&self) -> SchemaRef {
+        self.input.schema()
+    }
+
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> limit({})", " ".repeat(indent), self.limit));
         out.push_str("\n");
@@ -464,19 +545,23 @@ impl<T: TxnStorageTrait> LimitIter<T> {
 }
 
 pub struct HashJoinIter<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub join_type: JoinType, // Currently only supports Inner join
     pub left: Box<VolcanoIterator<T>>,
     pub right: Box<VolcanoIterator<T>>,
     pub left_exprs: Vec<ByteCodeExpr>,
     pub right_exprs: Vec<ByteCodeExpr>,
     pub filter: Option<ByteCodeExpr>,
-    pub buffer: Option<HashMap<Vec<Field>, Vec<Tuple>>>,
+    pub buffer: Option<HashMap<Vec<Field>, (bool, Vec<Tuple>)>>,
     pub current_right: Option<Tuple>,
     pub current_idx: Option<usize>,
+    pub left_outer_buffer: Option<Vec<Tuple>>,
+    pub null_tuple: Option<Tuple>,
 }
 
 impl<T: TxnStorageTrait> HashJoinIter<T> {
     pub fn new(
+        schema: SchemaRef,
         join_type: JoinType,
         left: Box<VolcanoIterator<T>>,
         right: Box<VolcanoIterator<T>>,
@@ -485,6 +570,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
         filter: Option<ByteCodeExpr>,
     ) -> Self {
         Self {
+            schema,
             join_type,
             left,
             right,
@@ -494,12 +580,14 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             buffer: None,
             current_right: None,
             current_idx: None,
+            left_outer_buffer: None,
+            null_tuple: None,
         }
     }
 
-    fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
+    fn inner(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
         if self.buffer.is_none() {
-            let mut hash_table: HashMap<Vec<Field>, Vec<Tuple>> = HashMap::new();
+            let mut hash_table: HashMap<Vec<Field>, (bool, Vec<Tuple>)> = HashMap::new();
             while let Some((_, tuple)) = self.left.next(txn)? {
                 let fields = self
                     .left_exprs
@@ -508,7 +596,8 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                     .collect::<Result<Vec<_>, _>>()?;
                 hash_table
                     .entry(fields)
-                    .or_insert_with(Vec::new)
+                    .or_insert_with(|| (false, Vec::new()))
+                    .1
                     .push(tuple);
             }
             self.buffer = Some(hash_table);
@@ -536,9 +625,10 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                 .iter()
                 .map(|expr| expr.eval(current_right))
                 .collect::<Result<Vec<_>, _>>()?;
-            let hash_table = self.buffer.as_ref().unwrap();
-            if let Some(left_tuples) = hash_table.get(&right_fields) {
+            let hash_table = self.buffer.as_mut().unwrap();
+            if let Some((has_match, left_tuples)) = hash_table.get_mut(&right_fields) {
                 if current_idx < left_tuples.len() {
+                    *has_match = true; // Only used for outer joins
                     let left_tuple = &left_tuples[current_idx];
                     let new_tuple = left_tuple.merge(current_right);
                     self.current_idx = Some(current_idx + 1);
@@ -550,6 +640,190 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                 self.current_right = None;
             }
         }
+    }
+
+    fn left_outer(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
+        // Returns a tuple with NULLs if there is no match in the left table
+        if self.buffer.is_none() {
+            let mut hash_table: HashMap<Vec<Field>, (bool, Vec<Tuple>)> = HashMap::new();
+            while let Some((_, tuple)) = self.left.next(txn)? {
+                let fields = self
+                    .left_exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()?;
+                hash_table
+                    .entry(fields)
+                    .or_insert_with(|| (false, Vec::new()))
+                    .1
+                    .push(tuple);
+            }
+            self.buffer = Some(hash_table);
+        }
+
+        loop {
+            if self.current_right.is_none() {
+                match self.right.next(txn)? {
+                    Some((_, tuple)) => {
+                        self.current_right = Some(tuple);
+                        self.current_idx = Some(0);
+                    }
+                    None => {
+                        // Lastly return the left tuples that didn't have a match
+                        self.current_idx = None;
+                        if self.null_tuple.is_none() {
+                            let right_schema = self.right.schema();
+                            let right_null_tuple = Tuple::from_fields(
+                                right_schema
+                                    .columns()
+                                    .iter()
+                                    .map(|col| Field::null(col.data_type()))
+                                    .collect::<Vec<_>>(),
+                            );
+                            self.null_tuple = Some(right_null_tuple);
+                        }
+                        if self.left_outer_buffer.is_none() {
+                            self.left_outer_buffer =
+                                Some({
+                                    let hash_table = self.buffer.as_mut().unwrap();
+                                    hash_table
+                                        .drain()
+                                        .filter_map(|(_, (has_match, left_tuples))| {
+                                            if !has_match {
+                                                Some(left_tuples)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .flatten()
+                                        .collect()
+                                });
+                        }
+                        if let Some(left_outer_buffer) = self.left_outer_buffer.as_mut() {
+                            if let Some(left_tuple) = left_outer_buffer.pop() {
+                                return Ok(Some((
+                                    vec![],
+                                    left_tuple.merge(self.null_tuple.as_ref().unwrap()),
+                                )));
+                            }
+                        }
+
+                        self.null_tuple = None;
+                        self.left_outer_buffer = None;
+                        self.current_idx = None;
+                        self.buffer = None;
+                        return Ok(None);
+                    }
+                }
+            }
+
+            let current_right = self.current_right.as_ref().unwrap();
+            let current_idx = self.current_idx.unwrap();
+            let right_fields = self
+                .right_exprs
+                .iter()
+                .map(|expr| expr.eval(current_right))
+                .collect::<Result<Vec<_>, _>>()?;
+            let hash_table = self.buffer.as_mut().unwrap();
+            if let Some((has_match, left_tuples)) = hash_table.get_mut(&right_fields) {
+                if current_idx < left_tuples.len() {
+                    *has_match = true;
+                    let left_tuple = &left_tuples[current_idx];
+                    let new_tuple = left_tuple.merge(current_right);
+                    self.current_idx = Some(current_idx + 1);
+                    return Ok(Some((vec![], new_tuple)));
+                } else {
+                    self.current_right = None;
+                }
+            } else {
+                self.current_right = None;
+            }
+        }
+    }
+
+    fn right_outer(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
+        if self.buffer.is_none() {
+            let mut hash_table: HashMap<Vec<Field>, (bool, Vec<Tuple>)> = HashMap::new();
+            while let Some((_, tuple)) = self.left.next(txn)? {
+                let fields = self
+                    .left_exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()?;
+                hash_table
+                    .entry(fields)
+                    .or_insert_with(|| (false, Vec::new()))
+                    .1
+                    .push(tuple);
+            }
+            self.buffer = Some(hash_table);
+        }
+
+        if self.null_tuple.is_none() {
+            let left_schema = self.left.schema();
+            let left_null_tuple = Tuple::from_fields(
+                left_schema
+                    .columns()
+                    .iter()
+                    .map(|col| Field::null(col.data_type()))
+                    .collect::<Vec<_>>(),
+            );
+            self.null_tuple = Some(left_null_tuple);
+        }
+
+        loop {
+            if self.current_right.is_none() {
+                match self.right.next(txn)? {
+                    Some((_, tuple)) => {
+                        self.current_right = Some(tuple);
+                        self.current_idx = Some(0);
+                    }
+                    None => {
+                        self.current_idx = None;
+                        self.buffer = None;
+                        return Ok(None);
+                    }
+                }
+            }
+
+            let current_right = self.current_right.as_ref().unwrap();
+            let current_idx = self.current_idx.unwrap();
+            let right_fields = self
+                .right_exprs
+                .iter()
+                .map(|expr| expr.eval(current_right))
+                .collect::<Result<Vec<_>, _>>()?;
+            let hash_table = self.buffer.as_mut().unwrap();
+            if let Some((has_match, left_tuples)) = hash_table.get_mut(&right_fields) {
+                if current_idx < left_tuples.len() {
+                    *has_match = true; // Only used for outer joins
+                    let left_tuple = &left_tuples[current_idx];
+                    let new_tuple = left_tuple.merge(current_right);
+                    self.current_idx = Some(current_idx + 1);
+                    return Ok(Some((vec![], new_tuple)));
+                } else {
+                    self.current_right = None;
+                }
+            } else {
+                let current_right = self.current_right.take().unwrap();
+                let new_tuple = self.null_tuple.as_ref().unwrap().merge(&current_right);
+                println!("new_tuple: {:?}", new_tuple);
+                return Ok(Some((vec![], new_tuple)));
+            }
+        }
+    }
+
+    fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
+        match self.join_type {
+            JoinType::Inner => self.inner(txn),
+            JoinType::LeftOuter => self.left_outer(txn),
+            JoinType::RightOuter => self.right_outer(txn),
+            _ => unimplemented!(),
+        }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     fn print_inner(&self, indent: usize, out: &mut String) {
@@ -583,7 +857,8 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
     }
 }
 
-pub struct CrossJoinIter<T: TxnStorageTrait> {
+pub struct NestedLoopJoin<T: TxnStorageTrait> {
+    pub schema: SchemaRef,
     pub join_type: JoinType,
     pub left: Box<VolcanoIterator<T>>,
     pub right: Box<VolcanoIterator<T>>,
@@ -592,14 +867,16 @@ pub struct CrossJoinIter<T: TxnStorageTrait> {
     pub current_right: Option<Tuple>,
 }
 
-impl<T: TxnStorageTrait> CrossJoinIter<T> {
+impl<T: TxnStorageTrait> NestedLoopJoin<T> {
     pub fn new(
+        schema: SchemaRef,
         join_type: JoinType,
         left: Box<VolcanoIterator<T>>,
         right: Box<VolcanoIterator<T>>,
         filter: Option<ByteCodeExpr>,
     ) -> Self {
         Self {
+            schema,
             join_type,
             left,
             right,
@@ -641,9 +918,18 @@ impl<T: TxnStorageTrait> CrossJoinIter<T> {
                 if filter.eval(&new_tuple)? == Field::from_bool(true) {
                     self.current_right = None;
                     return Ok(Some((vec![], new_tuple)));
+                } else {
+                    self.current_right = None;
                 }
+            } else {
+                self.current_right = None;
+                return Ok(Some((vec![], new_tuple)));
             }
         }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
     fn print_inner(&self, indent: usize, out: &mut String) {
@@ -668,13 +954,18 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
         Self { storage }
     }
 
-    pub fn to_executable(&mut self, expr: PhysicalRelExpr) -> VolcanoIterator<T> {
-        let (op, _col_id_to_idx) = self.to_executable_inner(expr).unwrap();
+    pub fn to_executable(
+        &mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> VolcanoIterator<T> {
+        let (op, _col_id_to_idx) = self.to_executable_inner(catalog, expr).unwrap();
         op
     }
 
     fn to_executable_inner(
         &mut self,
+        catalog: CatalogRef,
         expr: PhysicalRelExpr,
     ) -> Result<(VolcanoIterator<T>, ColIdToIdx), ExecError> {
         match expr {
@@ -689,16 +980,15 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                     .enumerate()
                     .map(|(idx, col_id)| (*col_id, idx))
                     .collect();
-                let scan = ScanIter {
-                    storage: self.storage.clone(),
-                    c_id,
-                    column_indices,
-                    iter: None,
-                };
+                let schema = catalog
+                    .get_schema(c_id)
+                    .ok_or(ExecError::Catalog(format!("Schema not found")))?;
+                schema.project(&column_indices);
+                let scan = ScanIter::new(schema, self.storage.clone(), c_id, column_indices);
                 Ok((VolcanoIterator::Scan(scan), col_id_to_idx))
             }
             PhysicalRelExpr::Rename { src, src_to_dest } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(*src)?;
+                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
                 let col_id_to_idx = src_to_dest
                     .iter()
                     .map(|(src, dest)| (*dest, col_id_to_idx[src]))
@@ -706,51 +996,66 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 Ok((input_op, col_id_to_idx))
             }
             PhysicalRelExpr::Select { src, predicates } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(*src)?;
+                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
                 let predicate = Expression::merge_conjunction(predicates);
                 let expr: ByteCodeExpr = ByteCodeExpr::from_ast(predicate, &col_id_to_idx)?;
-                let filter = FilterIter {
-                    input: Box::new(input_op),
-                    expr,
-                };
+                let filter = FilterIter::new(input_op.schema(), Box::new(input_op), expr);
                 Ok((VolcanoIterator::Filter(filter), col_id_to_idx))
             }
             PhysicalRelExpr::Project { src, column_names } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(*src)?;
-                let column_indices = column_names
-                    .iter()
-                    .map(|col_id| col_id_to_idx[col_id])
-                    .collect();
-                let project = ProjectIter {
-                    input: Box::new(input_op),
-                    column_indices,
+                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
+                let (column_indices, new_col_id_to_idx) = {
+                    let mut new_col_id_to_idx = HashMap::new();
+                    let mut column_indices = Vec::new();
+                    for (idx, col_id) in column_names.iter().enumerate() {
+                        new_col_id_to_idx.insert(*col_id, idx);
+                        column_indices.push(col_id_to_idx[col_id]);
+                    }
+                    (column_indices, new_col_id_to_idx)
                 };
-                let col_id_to_idx = column_names
-                    .iter()
-                    .map(|col_id| (*col_id, col_id_to_idx[col_id]))
-                    .collect();
-                Ok((VolcanoIterator::Project(project), col_id_to_idx))
+                let schema = input_op.schema().project(&column_indices);
+                let project =
+                    ProjectIter::new(Arc::new(schema), Box::new(input_op), column_indices);
+                Ok((VolcanoIterator::Project(project), new_col_id_to_idx))
             }
             PhysicalRelExpr::HashAggregate {
                 src,
                 group_by,
                 aggrs,
             } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(*src)?;
+                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
                 let group_by_indices = group_by
                     .iter()
                     .map(|col_id| col_id_to_idx[col_id])
                     .collect();
-                let agg_op = aggrs
+                let agg_op_indices = aggrs
                     .iter()
                     .map(|(_dest, (src, op))| (*op, col_id_to_idx[src]))
                     .collect();
-                let hash_agg = HashAggregateIter {
-                    input: Box::new(input_op),
-                    group_by: group_by_indices,
-                    agg_op,
-                    agg_result: None,
-                };
+                // Project the group by and aggregation columns
+                let input_schema = input_op.schema();
+                let mut schema = input_schema.project(&group_by_indices);
+                for &(op, col) in &agg_op_indices {
+                    match op {
+                        AggOp::Count => {
+                            schema.push_column(ColumnDef::new("dest", DataType::Int, false))
+                        }
+                        AggOp::Sum | AggOp::Max | AggOp::Min => {
+                            let col_type = input_schema.get_column(col).data_type();
+                            schema.push_column(ColumnDef::new("dest", col_type.clone(), false))
+                        }
+                        AggOp::Avg => {
+                            // float
+                            schema.push_column(ColumnDef::new("dest", DataType::Float, false))
+                        }
+                    }
+                }
+                let hash_agg = HashAggregateIter::new(
+                    Arc::new(schema),
+                    Box::new(input_op),
+                    group_by_indices,
+                    agg_op_indices,
+                );
                 let mut new_col_id_to_idx: HashMap<usize, usize> = group_by
                     .iter()
                     .enumerate()
@@ -763,30 +1068,28 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 Ok((VolcanoIterator::HashAggregate(hash_agg), new_col_id_to_idx))
             }
             PhysicalRelExpr::Map { input, exprs } => {
-                let (input_op, mut col_id_to_idx) = self.to_executable_inner(*input)?;
+                let (input_op, mut col_id_to_idx) = self.to_executable_inner(catalog, *input)?;
                 let mut bytecode_exprs = Vec::new();
+                let input_schema = input_op.schema();
+                let mut new_cols = Vec::new();
                 for (dest, expr) in exprs {
                     let expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx)?;
                     bytecode_exprs.push(expr);
                     col_id_to_idx.insert(dest, col_id_to_idx.len());
+                    new_cols.push(ColumnDef::new("dest", DataType::Unknown, true));
                 }
-                let map = MapIter {
-                    input: Box::new(input_op),
-                    exprs: bytecode_exprs,
-                };
+                let schema = input_schema.merge(&Schema::new(new_cols, Vec::new()));
+                let map = MapIter::new(Arc::new(schema), Box::new(input_op), bytecode_exprs);
                 Ok((VolcanoIterator::Map(map), col_id_to_idx))
             }
             PhysicalRelExpr::Sort { src, column_names } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(*src)?;
+                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
                 let sort_cols = column_names
                     .iter()
                     .map(|(col_id, asc, nulls_first)| (col_id_to_idx[col_id], *asc, *nulls_first))
                     .collect();
-                let sort = SortIter {
-                    input: Box::new(input_op),
-                    sort_cols,
-                    buffer: None,
-                };
+                let schema = input_op.schema();
+                let sort = SortIter::new(schema, Box::new(input_op), sort_cols);
                 Ok((VolcanoIterator::Sort(sort), col_id_to_idx))
             }
             PhysicalRelExpr::HashJoin {
@@ -796,9 +1099,10 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 equalities,
                 filter,
             } => {
-                let (left_op, left_col_id_to_idx) = self.to_executable_inner(*left)?;
+                let (left_op, left_col_id_to_idx) =
+                    self.to_executable_inner(catalog.clone(), *left)?;
                 let left_len = left_col_id_to_idx.len();
-                let (right_op, right_col_id_to_idx) = self.to_executable_inner(*right)?;
+                let (right_op, right_col_id_to_idx) = self.to_executable_inner(catalog, *right)?;
                 let mut left_exprs = Vec::new();
                 let mut right_exprs = Vec::new();
                 for (left_expr, right_expr) in equalities {
@@ -817,7 +1121,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                         &col_id_to_idx,
                     )?)
                 };
+                let schema = left_op.schema().merge(&right_op.schema());
                 let hash_join = HashJoinIter::new(
+                    Arc::new(schema),
                     join_type,
                     Box::new(left_op),
                     Box::new(right_op),
@@ -827,15 +1133,16 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 );
                 Ok((VolcanoIterator::HashJoin(hash_join), col_id_to_idx))
             }
-            PhysicalRelExpr::CrossJoin {
+            PhysicalRelExpr::NestedLoopJoin {
                 join_type,
                 left,
                 right,
                 predicates,
             } => {
-                let (left_op, left_col_id_to_idx) = self.to_executable_inner(*left)?;
+                let (left_op, left_col_id_to_idx) =
+                    self.to_executable_inner(catalog.clone(), *left)?;
                 let left_len = left_col_id_to_idx.len();
-                let (right_op, right_col_id_to_idx) = self.to_executable_inner(*right)?;
+                let (right_op, right_col_id_to_idx) = self.to_executable_inner(catalog, *right)?;
                 let mut col_id_to_idx = left_col_id_to_idx;
                 for (col_name, col_idx) in right_col_id_to_idx {
                     col_id_to_idx.insert(col_name, col_idx + left_len);
@@ -848,9 +1155,15 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                         &col_id_to_idx,
                     )?)
                 };
-                let cross_join =
-                    CrossJoinIter::new(join_type, Box::new(left_op), Box::new(right_op), filter);
-                Ok((VolcanoIterator::CrossJoin(cross_join), col_id_to_idx))
+                let schema = left_op.schema().merge(&right_op.schema());
+                let cross_join = NestedLoopJoin::new(
+                    Arc::new(schema),
+                    join_type,
+                    Box::new(left_op),
+                    Box::new(right_op),
+                    filter,
+                );
+                Ok((VolcanoIterator::NestedLoopJoin(cross_join), col_id_to_idx))
             }
             PhysicalRelExpr::FlatMap { .. } => {
                 // FlatMap is not supported yet

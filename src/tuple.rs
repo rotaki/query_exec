@@ -1,4 +1,5 @@
 use std::{
+    fmt::Debug,
     hash::Hash,
     ops::{Add, Div, Mul, Sub},
 };
@@ -30,6 +31,26 @@ pub struct Tuple {
 }
 
 impl Tuple {
+    pub fn to_pretty_string(&self) -> String {
+        // Each field has a fixed width of 20 characters.
+        let width = 20;
+        let mut res = String::new();
+        for field in &self.fields {
+            let field_str = format!("{}", field);
+            if field_str.len() > width {
+                res.push_str(&field_str[..width - 3]);
+                res.push_str("...");
+            } else {
+                res.push_str(&field_str);
+                for _ in 0..width - field_str.len() {
+                    res.push(' ');
+                }
+            }
+            res.push_str(" | ");
+        }
+        res
+    }
+
     pub fn with_capacity(capacity: usize) -> Self {
         Tuple {
             fields: Vec::with_capacity(capacity),
@@ -261,6 +282,20 @@ impl Hash for Field {
 }
 
 impl Field {
+    pub fn null(data_type: &DataType) -> Self {
+        match data_type {
+            DataType::Boolean => Field::Boolean(None),
+            DataType::Int => Field::Int(None),
+            DataType::Float => Field::Float(None),
+            DataType::String => Field::String(None),
+            DataType::Date => Field::Date(None),
+            DataType::Unknown => {
+                println!("Unknown data type, defaulting to int");
+                Field::Int(None) // Default to int for unknown data type
+            }
+        }
+    }
+
     pub fn take(&mut self) -> Field {
         match self {
             Field::Boolean(val) => Field::Boolean(val.take()),
@@ -281,6 +316,7 @@ impl Field {
                 DataType::Float => Ok(Field::Float(None)),
                 DataType::String => Ok(Field::String(None)),
                 DataType::Date => Ok(Field::Date(None)),
+                DataType::Unknown => Err("Unknown data type".to_string()),
             }
         } else {
             match data_type {
@@ -301,6 +337,7 @@ impl Field {
                     let val = field.parse::<i64>().map_err(|e| e.to_string())?;
                     Ok(Field::Date(Some(val)))
                 }
+                DataType::Unknown => Err("Unknown data type".to_string()),
             }
         }
     }

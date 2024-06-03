@@ -1102,7 +1102,7 @@ mod tests {
     use super::Translator;
     use crate::{
         catalog::{Catalog, ColIdGen, ColIdGenRef, ColumnDef, DataType, Schema, Table},
-        expression::prelude::HeuristicRules,
+        expression::prelude::{HeuristicRule, HeuristicRules},
     };
     use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
     use std::sync::Arc;
@@ -1181,9 +1181,9 @@ mod tests {
         let db_id = 0;
         let catalog = Arc::new(get_test_catalog());
         let enabled_rules = Arc::new(HeuristicRules::default());
-        // enabled_rules.disable(Rule::Decorrelate);
-        // enabled_rules.disable(Rule::Hoist);
-        // enabled_rules.disable(Rule::ProjectionPushdown);
+        // enabled_rules.disable(HeuristicRule::Decorrelate);
+        // enabled_rules.disable(HeuristicRule::Hoist);
+        // enabled_rules.disable(HeuristicRule::ProjectionPushdown);
         Translator::new(db_id, &catalog, &enabled_rules)
     }
 
