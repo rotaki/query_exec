@@ -4,11 +4,13 @@ mod error;
 mod executor;
 mod expression;
 mod loader;
+mod logger;
 mod optimizer;
 mod parser;
 mod query_executor;
 mod tuple;
 
+use logger::log;
 use serde::{Deserialize, Serialize};
 
 pub use tuple::Field;

@@ -746,6 +746,10 @@ impl LogicalToPhysicalExpression {
                 lower: Box::new(self.to_physical(lower)),
                 upper: Box::new(self.to_physical(upper)),
             },
+            Expression::Extract { field, expr } => Expression::Extract {
+                field: field.clone(),
+                expr: Box::new(self.to_physical(expr)),
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },

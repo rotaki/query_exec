@@ -114,6 +114,13 @@ impl std::fmt::Display for JoinType {
 }
 
 #[derive(Debug, Clone)]
+pub enum DateField {
+    Year,
+    Month,
+    Day,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expression<P: PlanTrait> {
     ColRef {
         id: ColumnId,
@@ -138,6 +145,10 @@ pub enum Expression<P: PlanTrait> {
         expr: Option<Box<Expression<P>>>,
         whens: Vec<(Expression<P>, Expression<P>)>,
         else_expr: Box<Expression<P>>,
+    },
+    Extract {
+        field: DateField,
+        expr: Box<Expression<P>>,
     },
     Subquery {
         expr: Box<P>,
@@ -186,10 +197,38 @@ impl<P: PlanTrait> Expression<P> {
     }
 
     pub fn binary(op: BinaryOp, left: Expression<P>, right: Expression<P>) -> Expression<P> {
-        Expression::Binary {
-            op,
-            left: Box::new(left),
-            right: Box::new(right),
+        if matches!(op, BinaryOp::Or) {
+            // Push down the OR operator as much as possible
+            let left = left.split_conjunction();
+            let right = right.split_conjunction();
+            if left.len() == 1 && right.len() == 1 {
+                return Expression::Binary {
+                    op,
+                    left: Box::new(left[0].clone()),
+                    right: Box::new(right[0].clone()),
+                };
+            } else {
+                let mut result = Vec::with_capacity(left.len() * right.len());
+                for l in left {
+                    for r in right.iter() {
+                        result.push(Expression::binary(op, l.clone(), r.clone()));
+                    }
+                }
+                return Expression::merge_conjunction(result);
+            }
+        } else {
+            Expression::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
+    }
+
+    pub fn extract(self, field: DateField) -> Expression<P> {
+        Expression::Extract {
+            field,
+            expr: Box::new(self),
         }
     }
 
@@ -243,6 +282,7 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Between { expr, lower, upper } => {
                 expr.has_subquery() || lower.has_subquery() || upper.has_subquery()
             }
+            Expression::Extract { field: _, expr } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
         }
     }
@@ -319,6 +359,10 @@ impl<P: PlanTrait> Expression<P> {
                 lower: Box::new(lower.replace_variables(src_to_dest)),
                 upper: Box::new(upper.replace_variables(src_to_dest)),
             },
+            Expression::Extract { field, expr } => Expression::Extract {
+                field,
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
@@ -372,6 +416,10 @@ impl<P: PlanTrait> Expression<P> {
                 expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
                 lower: Box::new(lower.replace_variables_with_exprs(src_to_dest)),
                 upper: Box::new(upper.replace_variables_with_exprs(src_to_dest)),
+            },
+            Expression::Extract { field, expr } => Expression::Extract {
+                field,
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 // Do nothing for subquery
@@ -432,6 +480,11 @@ impl<P: PlanTrait> Expression<P> {
                 out.push_str(" and ");
                 upper.print_inner(indent, out);
             }
+            Expression::Extract { field, expr } => {
+                out.push_str(&format!("{:?}(", field));
+                expr.print_inner(indent, out);
+                out.push_str(")");
+            }
             Expression::Subquery { expr } => {
                 out.push_str(&format!("λ.{:?}(\n", expr.free()));
                 expr.print_inner(indent + 6, out);
@@ -490,6 +543,7 @@ impl<P: PlanTrait> Expression<P> {
                 set.extend(upper.free());
                 set
             }
+            Expression::Extract { expr, .. } => expr.free(),
             Expression::Subquery { expr } => expr.free(),
         }
     }

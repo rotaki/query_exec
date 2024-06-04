@@ -227,7 +227,7 @@ checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 [[package]]
 name = "fbtree"
 version = "0.1.0"
-source = "git+https://github.com/rotaki/FosterBtree.git#f8c60c954024a850be48900445498283a8978de9"
+source = "git+https://github.com/rotaki/FosterBtree.git#2a2648ec97bcc8ec8bb436b9030ff855d4823c9f"
 dependencies = [
  "chrono",
  "clap",
@@ -480,9 +480,9 @@ checksum = "5b40af805b3121feab8a3c29f04d8ad262fa8e0561883e7653e024ae4479e6de"
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.84"
+version = "1.0.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec96c6a92621310b51366f1e28d05ef11489516e93be030060e5fc12024a49d6"
+checksum = "22244ce15aa966053a896d1accb3a6e68469b97c7f33f284b99f0d576879fc23"
 dependencies = [
  "unicode-ident",
 ]
@@ -707,7 +707,7 @@ dependencies = [
 [[package]]
 name = "txn_storage"
 version = "0.1.0"
-source = "git+https://github.com/rotaki/txn_storage.git?branch=master#97cf47b650af2e9a09d66ef3d240a1e631aa990f"
+source = "git+https://github.com/rotaki/txn_storage.git?branch=master#4f770df60dc3d9377491a1a8a195294bf1c4abee"
 dependencies = [
  "fbtree",
  "rstest",

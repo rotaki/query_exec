@@ -70,6 +70,11 @@ impl Tuple {
         Tuple { fields }
     }
 
+    pub fn merge_mut(mut self, other: &Tuple) -> Self {
+        self.fields.extend_from_slice(&other.fields);
+        self
+    }
+
     pub fn fields(&self) -> &Vec<Field> {
         &self.fields
     }
@@ -414,6 +419,36 @@ impl Field {
             _ => panic!("Field is not an int"),
         }
     }
+
+    pub fn extract_year(&self) -> Result<Option<i32>, ExecError> {
+        match self {
+            Field::Date(val) => Ok(val.map(|days| {
+                let date = NaiveDate::from_num_days_from_ce_opt(days).unwrap();
+                date.year()
+            })),
+            _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
+        }
+    }
+
+    pub fn extract_month(&self) -> Result<Option<u32>, ExecError> {
+        match self {
+            Field::Date(val) => Ok(val.map(|days| {
+                let date = NaiveDate::from_num_days_from_ce_opt(days).unwrap();
+                date.month()
+            })),
+            _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
+        }
+    }
+
+    pub fn extract_day(&self) -> Result<Option<u32>, ExecError> {
+        match self {
+            Field::Date(val) => Ok(val.map(|days| {
+                let date = NaiveDate::from_num_days_from_ce_opt(days).unwrap();
+                date.day()
+            })),
+            _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
+        }
+    }
 }
 
 impl std::fmt::Display for Field {
@@ -705,5 +740,12 @@ impl From<String> for Field {
 impl From<&str> for Field {
     fn from(val: &str) -> Self {
         Field::String(Some(val.to_string()))
+    }
+}
+
+impl From<(i32, u32, u32)> for Field {
+    fn from(val: (i32, u32, u32)) -> Self {
+        let date = NaiveDate::from_ymd_opt(val.0, val.1, val.2);
+        Field::Date(date.map(|d| d.num_days_from_ce()))
     }
 }

@@ -1,4 +1,4 @@
-use crate::expression::prelude::*;
+use crate::expression::{prelude::*, DateField};
 use crate::tuple::{AsBool, IsNull};
 use crate::{
     error::ExecError,
@@ -44,9 +44,13 @@ pub enum ByteCodes {
     IsNull,
     // IS_BETWEEN
     IsBetween,
+    // DATE
+    ExtractYear,
+    ExtractMonth,
+    ExtractDay,
 }
 
-const STATIC_DISPATCHER: [DispatchFn; 22] = [
+const STATIC_DISPATCHER: [DispatchFn; 25] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
@@ -77,6 +81,10 @@ const STATIC_DISPATCHER: [DispatchFn; 22] = [
     IS_NULL_FN,
     // IS_BETWEEN
     IS_BETWEEN_FN,
+    // DATE
+    EXTRACT_YEAR_FN,
+    EXTRACT_MONTH_FN,
+    EXTRACT_DAY_FN,
 ];
 
 // Utility functions
@@ -177,6 +185,9 @@ const AND_FN: DispatchFn = and;
 const OR_FN: DispatchFn = or;
 const IS_NULL_FN: DispatchFn = is_null;
 const IS_BETWEEN_FN: DispatchFn = is_between;
+const EXTRACT_YEAR_FN: DispatchFn = extract_year;
+const EXTRACT_MONTH_FN: DispatchFn = extract_month;
+const EXTRACT_DAY_FN: DispatchFn = extract_day;
 
 fn push_field(
     bytecodes: &[ByteCodeType],
@@ -501,6 +512,42 @@ fn is_between(
     Ok(())
 }
 
+fn extract_year(
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let field = stack.pop().unwrap();
+    stack.push(Field::Int(field.extract_year()?.map(|x| x as i64)));
+    Ok(())
+}
+
+fn extract_month(
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let field = stack.pop().unwrap();
+    stack.push(Field::Int(field.extract_month()?.map(|x| x as i64)));
+    Ok(())
+}
+
+fn extract_day(
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let field = stack.pop().unwrap();
+    stack.push(Field::Int(field.extract_day()?.map(|x| x as i64)));
+    Ok(())
+}
+
 pub struct AstToByteCode<P: PlanTrait> {
     phantom: PhantomData<P>,
 }
@@ -662,6 +709,20 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
             convert_expr_to_bytecode(expr, bytecode_expr)?;
             bytecode_expr.add_code(ByteCodes::IsNull as usize);
         }
+        Expression::Extract { field, expr } => {
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            match field {
+                DateField::Year => {
+                    bytecode_expr.add_code(ByteCodes::ExtractYear as usize);
+                }
+                DateField::Month => {
+                    bytecode_expr.add_code(ByteCodes::ExtractMonth as usize);
+                }
+                DateField::Day => {
+                    bytecode_expr.add_code(ByteCodes::ExtractDay as usize);
+                }
+            }
+        }
         Expression::Subquery { .. } => {
             unimplemented!("Subquery not supported in bytecode")
         }
@@ -713,6 +774,31 @@ mod tests {
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(false));
+    }
+
+    #[test]
+    fn test_and_or() {
+        let tuple = Tuple::from_fields(vec![Field::from_bool(true), Field::from_bool(false)]);
+        // idx0 and idx1
+        let expr = Expression::<PhysicalRelExpr>::Binary {
+            op: BinaryOp::And,
+            left: Box::new(Expression::ColRef { id: 0 }),
+            right: Box::new(Expression::ColRef { id: 1 }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+
+        // idx0 or idx1
+        let expr = Expression::<PhysicalRelExpr>::Binary {
+            op: BinaryOp::Or,
+            left: Box::new(Expression::ColRef { id: 0 }),
+            right: Box::new(Expression::ColRef { id: 1 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
     }
 
     #[test]
@@ -881,5 +967,37 @@ mod tests {
         assert_eq!(result4, Field::from_bool(false));
         let result_null = bytecode_expr.eval(&tuple_null).unwrap();
         assert_eq!(result_null, Field::Boolean(None));
+    }
+
+    #[test]
+    fn test_extract() {
+        let tuple = Tuple::from_fields(vec![(2021, 1, 1).into()]);
+        // Extract year from idx0
+        let expr = Expression::<PhysicalRelExpr>::Extract {
+            field: DateField::Year,
+            expr: Box::new(Expression::ColRef { id: 0 }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Int(Some(2021)));
+
+        // Extract month from idx0
+        let expr = Expression::<PhysicalRelExpr>::Extract {
+            field: DateField::Month,
+            expr: Box::new(Expression::ColRef { id: 0 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Int(Some(1)));
+
+        // Extract day from idx0
+        let expr = Expression::<PhysicalRelExpr>::Extract {
+            field: DateField::Day,
+            expr: Box::new(Expression::ColRef { id: 0 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Int(Some(1)));
     }
 }

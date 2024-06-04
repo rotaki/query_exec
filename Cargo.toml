@@ -3,6 +3,14 @@ name = "query_exec"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+log_trace = []
+log_debug = []
+log_info = []
+log_warn = []
+log_error = []
+
 [dependencies]
 txn_storage = { git = "https://github.com/rotaki/txn_storage.git", branch = "master" }
 csv = "1.3"

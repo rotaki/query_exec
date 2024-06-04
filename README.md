@@ -10,4 +10,5 @@
   * [ ] Q4
   * [x] Q5
   * [x] Q6
+  * [x] Q7
 * [] Remove unnecessary projections in the query plan

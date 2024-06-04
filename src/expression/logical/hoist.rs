@@ -156,6 +156,29 @@ impl LogicalRelExpr {
                         att.into_iter().chain([id].into_iter()).collect(),
                     )
             }
+            Expression::Extract { field, expr } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                self.hoist(enabled_rules, col_id_gen, expr_id, *expr)
+                    .map(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        [(
+                            id,
+                            Expression::Extract {
+                                field,
+                                expr: Box::new(Expression::col_ref(expr_id)),
+                            },
+                        )],
+                    )
+                    .project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    )
+            }
         }
     }
 }

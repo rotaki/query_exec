@@ -10,6 +10,7 @@ use crate::{
     },
     error::ExecError,
     expression::{prelude::PhysicalRelExpr, AggOp, Expression, JoinType},
+    log, log_trace,
     tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
 };
@@ -45,9 +46,14 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
     fn execute(&mut self, txn: &T::TxnHandle) -> Result<Vec<Tuple>, ExecError> {
         let mut results = Vec::new();
         loop {
+            log_trace!("------------ VolcanoIterator::next ------------");
             match self.next(txn)? {
-                Some((_, tuple)) => results.push(tuple),
-                None => return Ok(results),
+                Some((_, tuple)) => {
+                    results.push(tuple);
+                }
+                None => {
+                    return Ok(results);
+                }
             }
         }
     }
@@ -57,15 +63,42 @@ impl<T: TxnStorageTrait> VolcanoIterator<T> {
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
         // (key, tuple)
         match self {
-            VolcanoIterator::Scan(iter) => iter.next(txn),
-            VolcanoIterator::Filter(iter) => iter.next(txn),
-            VolcanoIterator::Project(iter) => iter.next(txn),
-            VolcanoIterator::HashAggregate(iter) => iter.next(txn),
-            VolcanoIterator::Sort(iter) => iter.next(txn),
-            VolcanoIterator::Limit(iter) => iter.next(txn),
-            VolcanoIterator::HashJoin(iter) => iter.next(txn),
-            VolcanoIterator::NestedLoopJoin(iter) => iter.next(txn),
-            VolcanoIterator::Map(iter) => iter.next(txn),
+            VolcanoIterator::Scan(iter) => {
+                log_trace!("ScanIter::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::Filter(iter) => {
+                log_trace!("FilterIter::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::Project(iter) => {
+                log_trace!("ProjectIter::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::HashAggregate(iter) => {
+                log_trace!("HashAggregateIter::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::Sort(iter) => {
+                log_trace!("SortIter::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::Limit(iter) => {
+                log_trace!("LimitIter::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::HashJoin(iter) => {
+                log_trace!("HashJoin::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::NestedLoopJoin(iter) => {
+                log_trace!("NestedLoopJoin::next");
+                iter.next(txn)
+            }
+            VolcanoIterator::Map(iter) => {
+                log_trace!("MapIter::next");
+                iter.next(txn)
+            }
         }
     }
 
@@ -135,9 +168,11 @@ impl<T: TxnStorageTrait> ScanIter<T> {
         if let Some((k, v)) = self.storage.iter_next(iter)? {
             let tuple = Tuple::from_bytes(&v);
             let tuple = tuple.project(&self.column_indices);
+            log_trace!("ScanIter::next: c_id({}), tuple: {:?}", self.c_id, tuple);
             Ok(Some((k, tuple)))
         } else {
             self.iter = None;
+            log_trace!("ScanIter::next: None");
             Ok(None)
         }
     }
@@ -186,7 +221,10 @@ impl<T: TxnStorageTrait> FilterIter<T> {
                         return Ok(Some((k, tuple)));
                     }
                 }
-                None => return Ok(None),
+                None => {
+                    log_trace!("FilterIter::next: None");
+                    return Ok(None);
+                }
             }
         }
     }
@@ -227,7 +265,10 @@ impl<T: TxnStorageTrait> ProjectIter<T> {
                 let new_tuple = tuple.project(&self.column_indices);
                 Ok(Some((k, new_tuple)))
             }
-            None => Ok(None),
+            None => {
+                log_trace!("ProjectIter::next: None");
+                Ok(None)
+            }
         }
     }
 
@@ -277,7 +318,10 @@ impl<T: TxnStorageTrait> MapIter<T> {
                 }
                 Ok(Some((k, tuple)))
             }
-            None => Ok(None),
+            None => {
+                log_trace!("MapIter::next: None");
+                Ok(None)
+            }
         }
     }
 
@@ -401,6 +445,7 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
         let agg_result = self.agg_result.as_mut().unwrap();
         if agg_result.is_empty() {
             self.agg_result = None;
+            log_trace!("HashAggregateIter::next: None");
             Ok(None)
         } else {
             let tuple = agg_result.pop().unwrap();
@@ -476,6 +521,7 @@ impl<T: TxnStorageTrait> SortIter<T> {
             Some((k, tuple)) => Ok(Some((k, tuple))),
             None => {
                 self.buffer = None;
+                log_trace!("SortIter::next: None");
                 Ok(None)
             }
         }
@@ -527,6 +573,7 @@ impl<T: TxnStorageTrait> LimitIter<T> {
         }
         if self.current.unwrap() >= self.limit {
             self.current = None;
+            log_trace!("LimitIter::next: None");
             Ok(None)
         } else {
             self.current = Some(self.current.unwrap() + 1);
@@ -555,6 +602,7 @@ pub struct HashJoinIter<T: TxnStorageTrait> {
     pub filter: Option<ByteCodeExpr>,
     pub buffer: Option<HashMap<Vec<Field>, (bool, Vec<Tuple>)>>,
     pub current_right: Option<Tuple>,
+    pub current_right_fields: Option<Vec<Field>>,
     pub current_idx: Option<usize>,
     pub left_outer_buffer: Option<Vec<Tuple>>,
     pub null_tuple: Option<Tuple>,
@@ -580,6 +628,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             filter,
             buffer: None,
             current_right: None,
+            current_right_fields: None,
             current_idx: None,
             left_outer_buffer: None,
             null_tuple: None,
@@ -608,11 +657,18 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             if self.current_right.is_none() {
                 match self.right.next(txn)? {
                     Some((_, tuple)) => {
+                        let right_fields = self
+                            .right_exprs
+                            .iter()
+                            .map(|expr| expr.eval(&tuple))
+                            .collect::<Result<Vec<_>, _>>()?;
                         self.current_right = Some(tuple);
+                        self.current_right_fields = Some(right_fields);
                         self.current_idx = Some(0);
                     }
                     None => {
                         self.current_idx = None;
+                        self.current_right_fields = None;
                         self.buffer = None;
                         return Ok(None);
                     }
@@ -620,14 +676,10 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             }
 
             let current_right = self.current_right.as_ref().unwrap();
+            let current_right_fields = self.current_right_fields.as_ref().unwrap();
             let current_idx = self.current_idx.unwrap();
-            let right_fields = self
-                .right_exprs
-                .iter()
-                .map(|expr| expr.eval(current_right))
-                .collect::<Result<Vec<_>, _>>()?;
             let hash_table = self.buffer.as_mut().unwrap();
-            if let Some((has_match, left_tuples)) = hash_table.get_mut(&right_fields) {
+            if let Some((has_match, left_tuples)) = hash_table.get_mut(current_right_fields) {
                 if current_idx < left_tuples.len() {
                     *has_match = true; // Only used for outer joins
                     let left_tuple = &left_tuples[current_idx];
@@ -636,9 +688,13 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                     return Ok(Some((vec![], new_tuple)));
                 } else {
                     self.current_right = None;
+                    self.current_right_fields = None;
+                    self.current_idx = None;
                 }
             } else {
                 self.current_right = None;
+                self.current_right_fields = None;
+                self.current_idx = None;
             }
         }
     }
@@ -831,6 +887,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                 return Ok(Some((k, t)));
             }
         } else {
+            log_trace!("HashJoinIter::next: None");
             Ok(None)
         }
     }
@@ -907,6 +964,7 @@ impl<T: TxnStorageTrait> NestedLoopJoin<T> {
                         self.current_left = Some(tuple);
                     }
                     None => {
+                        log_trace!("NestedLoopJoin::next: None");
                         return Ok(None);
                     }
                 }

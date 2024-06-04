@@ -14,7 +14,7 @@ use crate::{
         prelude::{
             BinaryOp, HeuristicRule, HeuristicRulesRef, JoinType, LogicalRelExpr, PlanTrait,
         },
-        AggOp, Expression,
+        AggOp, DateField, Expression,
     },
     tuple::Field,
 };
@@ -1171,6 +1171,22 @@ impl Translator {
                     Ok(between)
                 }
             }
+            sqlparser::ast::Expr::Extract { field, expr } => {
+                let expr = self.process_expr(expr, distance)?;
+                let field = match field {
+                    sqlparser::ast::DateTimeField::Year => DateField::Year,
+                    sqlparser::ast::DateTimeField::Month => DateField::Month,
+                    sqlparser::ast::DateTimeField::Day => DateField::Day,
+                    _ => {
+                        return Err(translation_err!(
+                            UnsupportedSQL,
+                            "Unsupported extract field: {:?}",
+                            field
+                        ));
+                    }
+                };
+                Ok(expr.extract(field))
+            }
             other => Err(translation_err!(
                 UnsupportedSQL,
                 "Unsupported expression: {:?} matched {:?}",
@@ -1208,6 +1224,7 @@ fn has_agg(expr: &sqlparser::ast::Expr) -> bool {
             _ => false,
         },
         Nested(expr) => has_agg(expr),
+        Extract { .. } => false,
         _ => unimplemented!("Unsupported expression: {:?}", expr),
     }
 }

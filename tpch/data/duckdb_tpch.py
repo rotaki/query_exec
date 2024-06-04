@@ -35,14 +35,44 @@ def get_query_string(query):
 # query_string = get_query_string(1)
 query_string = """
 SELECT
-    SUM(L_EXTENDEDPRICE * L_DISCOUNT) AS REVENUE
+    SUPP_NATION,
+    CUST_NATION,
+    L_YEAR,
+    SUM(VOLUME) AS REVENUE
 FROM
-    LINEITEM
-WHERE
-        L_SHIPDATE >= DATE '1994-01-01'
-  AND L_SHIPDATE < DATE '1995-01-01'
-  AND L_DISCOUNT BETWEEN 0.05 AND 0.07
-  AND L_QUANTITY < 24;
+    (
+        SELECT
+            N1.N_NAME AS SUPP_NATION,
+            N2.N_NAME AS CUST_NATION,
+            EXTRACT(YEAR FROM L_SHIPDATE) AS L_YEAR,
+            L_EXTENDEDPRICE * (1 - L_DISCOUNT) AS VOLUME
+        FROM
+            SUPPLIER,
+            LINEITEM,
+            ORDERS,
+            CUSTOMER,
+            NATION N1,
+            NATION N2
+        WHERE
+                S_SUPPKEY = L_SUPPKEY
+          AND O_ORDERKEY = L_ORDERKEY
+          AND C_CUSTKEY = O_CUSTKEY
+          AND S_NATIONKEY = N1.N_NATIONKEY
+          AND C_NATIONKEY = N2.N_NATIONKEY
+          AND (
+                (N1.N_NAME = 'FRANCE' AND N2.N_NAME = 'GERMANY')
+                OR (N1.N_NAME = 'GERMANY' AND N2.N_NAME = 'FRANCE')
+            )
+          AND L_SHIPDATE BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
+    ) AS SHIPPING
+GROUP BY
+    SUPP_NATION,
+    CUST_NATION,
+    L_YEAR
+ORDER BY
+    SUPP_NATION,
+    CUST_NATION,
+    L_YEAR;
 """
 
 explain = con.execute("EXPLAIN {}".format(query_string))
