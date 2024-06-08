@@ -45,6 +45,10 @@ impl LogicalRelExpr {
     ) -> LogicalRelExpr {
         let outer_refs = self.free();
         let cols_set: HashSet<usize> = cols.iter().cloned().collect();
+        let att_set = self.att();
+        if att_set == cols_set {
+            return self;
+        }
 
         if optimize && enabled_rules.is_enabled(&HeuristicRule::ProjectionPushdown) {
             match self {
@@ -81,17 +85,28 @@ impl LogicalRelExpr {
                     if cols_set == plan.att() {
                         plan
                     } else {
+                        // After pushing down the projection, remove the projection if there is still
+                        // a projection node before the map node. This is to avoid unnecessary projection operations.
+                        let plan = if let LogicalRelExpr::Map { input, exprs } = plan {
+                            if let LogicalRelExpr::Project {
+                                src,
+                                cols: _no_need_cols,
+                            } = *input
+                            {
+                                src.map(true, enabled_rules, col_id_gen, exprs)
+                            } else {
+                                LogicalRelExpr::Map { input, exprs }
+                            }
+                        } else {
+                            plan
+                        };
                         plan.project(false, enabled_rules, col_id_gen, cols)
                     }
                 }
                 LogicalRelExpr::Select { src, predicates } => {
                     // We don't push projections through selections. Selections are prioritized.
-                    let plan = src.select(true, enabled_rules, col_id_gen, predicates);
-                    if cols_set == plan.att() {
-                        plan
-                    } else {
-                        plan.project(false, enabled_rules, col_id_gen, cols)
-                    }
+                    src.select(true, enabled_rules, col_id_gen, predicates)
+                        .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::Join {
                     join_type,
@@ -105,8 +120,7 @@ impl LogicalRelExpr {
                     let new_cols = union(&cols, &free);
                     let left_proj = intersect(&new_cols, &left.att());
                     let right_proj = intersect(&new_cols, &right.att());
-                    let plan = left
-                        .project(true, enabled_rules, col_id_gen, left_proj)
+                    left.project(true, enabled_rules, col_id_gen, left_proj)
                         .join(
                             true,
                             enabled_rules,
@@ -114,12 +128,8 @@ impl LogicalRelExpr {
                             join_type,
                             right.project(true, enabled_rules, col_id_gen, right_proj),
                             predicates,
-                        );
-                    if cols_set == plan.att() {
-                        plan
-                    } else {
-                        plan.project(false, enabled_rules, col_id_gen, cols)
-                    }
+                        )
+                        .project(false, enabled_rules, col_id_gen, cols)
                 }
                 LogicalRelExpr::OrderBy { src, cols: orderby } => {
                     // We can push down the projection through order by
@@ -132,6 +142,20 @@ impl LogicalRelExpr {
                     if cols_set == plan.att() {
                         plan
                     } else {
+                        // Remove the projection if it is not needed. This is to avoid unnecessary projection operations.
+                        let plan = if let LogicalRelExpr::OrderBy { src, cols } = plan {
+                            if let LogicalRelExpr::Project {
+                                src,
+                                cols: _no_need_cols,
+                            } = *src
+                            {
+                                src.order_by(true, enabled_rules, col_id_gen, cols)
+                            } else {
+                                LogicalRelExpr::OrderBy { src, cols }
+                            }
+                        } else {
+                            plan
+                        };
                         plan.project(false, enabled_rules, col_id_gen, cols)
                     }
                 }

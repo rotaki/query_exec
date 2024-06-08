@@ -495,6 +495,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "regex",
  "serde",
  "sqlparser",
  "txn_storage",

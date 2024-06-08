@@ -48,9 +48,11 @@ pub enum ByteCodes {
     ExtractYear,
     ExtractMonth,
     ExtractDay,
+    // LIKE
+    Like,
 }
 
-const STATIC_DISPATCHER: [DispatchFn; 25] = [
+const STATIC_DISPATCHER: [DispatchFn; 26] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
@@ -85,6 +87,8 @@ const STATIC_DISPATCHER: [DispatchFn; 25] = [
     EXTRACT_YEAR_FN,
     EXTRACT_MONTH_FN,
     EXTRACT_DAY_FN,
+    // LIKE
+    LIKE_FN,
 ];
 
 // Utility functions
@@ -188,6 +192,7 @@ const IS_BETWEEN_FN: DispatchFn = is_between;
 const EXTRACT_YEAR_FN: DispatchFn = extract_year;
 const EXTRACT_MONTH_FN: DispatchFn = extract_month;
 const EXTRACT_DAY_FN: DispatchFn = extract_day;
+const LIKE_FN: DispatchFn = like;
 
 fn push_field(
     bytecodes: &[ByteCodeType],
@@ -548,6 +553,74 @@ fn extract_day(
     Ok(())
 }
 
+fn like(
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let pattern = &literals[bytecodes[*i as usize] as usize];
+    *i += 1;
+    let escape = &literals[bytecodes[*i as usize] as usize];
+    *i += 1;
+    let field = stack.pop().unwrap();
+    if pattern.is_null() || field.is_null() {
+        stack.push(Field::Boolean(None)); // NULL
+    } else {
+        let field_str = field.as_string().as_ref().unwrap();
+        let pattern_str = pattern.as_string().as_ref().unwrap();
+        let escape_str = escape.as_string();
+        // %: Any string of zero or more characters.
+        // _: Any single character.
+        // [ ]: Any single character within the specified range ([a-f]) or set ([abcdef]).
+        // [^]: Any single character not within the specified range ([^a-f]) or set ([^abcdef]).
+        let result = is_like(&field_str, &pattern_str, &escape_str);
+        stack.push(Field::Boolean(Some(result)));
+    }
+    Ok(())
+}
+
+fn is_like(field: &str, pattern: &str, escape_str: &Option<String>) -> bool {
+    if pattern.is_empty() {
+        return field.is_empty();
+    }
+    // Convert SQL LIKE pattern to Rust regex pattern
+    let mut regex_pattern = String::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => regex_pattern.push_str(".*"),
+            '_' => regex_pattern.push_str("."),
+            _ => {
+                if let Some(esc) = escape_str {
+                    // If the character is escaped, we need to check if the next character is a special character.
+                    // If it is, and matches our escape character, treat the following character literally.
+                    if esc == &c.to_string()
+                        && chars
+                            .peek()
+                            .map_or(false, |&next| next == '%' || next == '_')
+                    {
+                        regex_pattern.push('\\'); // Escape the next special character in regex
+                        if let Some(next) = chars.next() {
+                            regex_pattern.push(next);
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                // If no special conditions were met, escape the current character if necessary
+                regex_pattern.push_str(&regex::escape(&c.to_string()));
+            }
+        }
+    }
+    // Compile the regex pattern
+    let regex = regex::Regex::new(&regex_pattern).unwrap();
+    // Check if the field matches the pattern
+    regex.is_match(field)
+}
+
 pub struct AstToByteCode<P: PlanTrait> {
     phantom: PhantomData<P>,
 }
@@ -722,6 +795,18 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     bytecode_expr.add_code(ByteCodes::ExtractDay as usize);
                 }
             }
+        }
+        Expression::Like {
+            expr,
+            pattern,
+            escape,
+        } => {
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            bytecode_expr.add_code(ByteCodes::Like as usize);
+            let pattern_idx = bytecode_expr.add_literal(Field::String(Some(pattern.clone())));
+            let escape_idx = bytecode_expr.add_literal(Field::String(escape.clone()));
+            bytecode_expr.add_code(pattern_idx);
+            bytecode_expr.add_code(escape_idx);
         }
         Expression::Subquery { .. } => {
             unimplemented!("Subquery not supported in bytecode")
@@ -999,5 +1084,122 @@ mod tests {
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::Int(Some(1)));
+    }
+
+    #[test]
+    fn test_like() {
+        let tuple = Tuple::from_fields(vec!["hello world".into()]);
+        // Simple match hello with hello
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "hello world".to_string(),
+            escape: None,
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // Percent wildcard
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "hello %".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // Percent wildcard many
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "%lo %".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // Underscore wildcard
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "hello _orld".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // Underscore wildcard many
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "hello _____".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // Escape character
+        let tuple = Tuple::from_fields(vec!["hello %world".into()]);
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "hello k%w_r%".to_string(),
+            escape: Some("k".to_string()),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // No match
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "world".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // Empty pattern
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+
+        // Empty string
+        let tuple = Tuple::from_fields(vec!["".into()]);
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "%".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "_".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+
+        // Null string
+        let tuple = Tuple::from_fields(vec![Field::String(None)]);
+        let expr = Expression::<PhysicalRelExpr>::Like {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            pattern: "hello".to_string(),
+            escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Boolean(None));
     }
 }

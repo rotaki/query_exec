@@ -35,44 +35,26 @@ def get_query_string(query):
 # query_string = get_query_string(1)
 query_string = """
 SELECT
-    SUPP_NATION,
-    CUST_NATION,
-    L_YEAR,
-    SUM(VOLUME) AS REVENUE
+    O_ORDERPRIORITY,
+    COUNT(*) AS ORDER_COUNT
 FROM
-    (
+    ORDERS
+WHERE
+        O_ORDERDATE >= DATE '1993-07-01'
+  AND O_ORDERDATE < DATE '1993-07-01' + INTERVAL '3' MONTH
+  AND EXISTS (
         SELECT
-            N1.N_NAME AS SUPP_NATION,
-            N2.N_NAME AS CUST_NATION,
-            EXTRACT(YEAR FROM L_SHIPDATE) AS L_YEAR,
-            L_EXTENDEDPRICE * (1 - L_DISCOUNT) AS VOLUME
+            *
         FROM
-            SUPPLIER,
-            LINEITEM,
-            ORDERS,
-            CUSTOMER,
-            NATION N1,
-            NATION N2
+            LINEITEM
         WHERE
-                S_SUPPKEY = L_SUPPKEY
-          AND O_ORDERKEY = L_ORDERKEY
-          AND C_CUSTKEY = O_CUSTKEY
-          AND S_NATIONKEY = N1.N_NATIONKEY
-          AND C_NATIONKEY = N2.N_NATIONKEY
-          AND (
-                (N1.N_NAME = 'FRANCE' AND N2.N_NAME = 'GERMANY')
-                OR (N1.N_NAME = 'GERMANY' AND N2.N_NAME = 'FRANCE')
-            )
-          AND L_SHIPDATE BETWEEN DATE '1995-01-01' AND DATE '1996-12-31'
-    ) AS SHIPPING
+                L_ORDERKEY = O_ORDERKEY
+          AND L_COMMITDATE < L_RECEIPTDATE
+    )
 GROUP BY
-    SUPP_NATION,
-    CUST_NATION,
-    L_YEAR
+    O_ORDERPRIORITY
 ORDER BY
-    SUPP_NATION,
-    CUST_NATION,
-    L_YEAR;
+    O_ORDERPRIORITY;
 """
 
 explain = con.execute("EXPLAIN {}".format(query_string))

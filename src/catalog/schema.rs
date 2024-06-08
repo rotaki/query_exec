@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 pub type SchemaRef = Arc<Schema>;
 
+#[derive(Debug)]
 pub struct Schema {
     columns: Vec<ColumnDef>,
     primary_key: Vec<usize>,
@@ -88,5 +89,7 @@ pub enum DataType {
     Float,
     String,
     Date,
+    Months,
+    Days,
     Unknown,
 }

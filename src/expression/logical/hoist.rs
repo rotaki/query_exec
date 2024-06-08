@@ -179,6 +179,34 @@ impl LogicalRelExpr {
                         att.into_iter().chain([id].into_iter()).collect(),
                     )
             }
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                self.hoist(enabled_rules, col_id_gen, expr_id, *expr)
+                    .map(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        [(
+                            id,
+                            Expression::Like {
+                                expr: Box::new(Expression::col_ref(expr_id)),
+                                pattern,
+                                escape,
+                            },
+                        )],
+                    )
+                    .project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    )
+            }
         }
     }
 }

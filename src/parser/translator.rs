@@ -384,33 +384,22 @@ impl Translator {
         if let Some(expr) = where_clause {
             match self.process_expr(expr, Some(0)) {
                 Ok(expr) => {
-                    match expr {
-                        Expression::Subquery { expr } => {
-                            if expr.att().len() != 1 {
-                                panic!("Subquery in WHERE clause returns more than one column")
-                            }
-                            // Add map first
-                            let col_id = self.col_id_gen.next();
-                            let plan = plan.map(
-                                true,
-                                &self.enabled_rules,
-                                &self.col_id_gen,
-                                [(col_id, Expression::subquery(*expr))],
-                            );
-                            // Add select
-                            Ok(plan.select(
-                                true,
-                                &self.enabled_rules,
-                                &self.col_id_gen,
-                                vec![Expression::col_ref(col_id)],
-                            ))
-                        }
-                        _ => Ok(plan.select(
+                    if expr.has_subquery() {
+                        let col_id = self.col_id_gen.next();
+                        let plan = plan.map(
                             true,
                             &self.enabled_rules,
                             &self.col_id_gen,
-                            vec![expr],
-                        )),
+                            [(col_id, expr)],
+                        );
+                        Ok(plan.select(
+                            true,
+                            &self.enabled_rules,
+                            &self.col_id_gen,
+                            vec![Expression::col_ref(col_id)],
+                        ))
+                    } else {
+                        Ok(plan.select(true, &self.enabled_rules, &self.col_id_gen, vec![expr]))
                     }
                 }
                 Err(TranslatorError::ColumnNotFound(_)) => {
@@ -637,7 +626,13 @@ impl Translator {
                     group_by
                 }
             };
-            plan = plan.aggregate(group_by, aggregations);
+            plan = plan.aggregate(
+                true,
+                &self.enabled_rules,
+                &self.col_id_gen,
+                group_by,
+                aggregations,
+            );
             plan = self.process_where(plan, having)?;
         }
         plan = plan.map(true, &self.enabled_rules, &self.col_id_gen, maps); // This map corresponds to the Level3 in the comment above
@@ -890,8 +885,7 @@ impl Translator {
                 sqlparser::ast::DataType::Date => {
                     let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
                         .map_err(|e| translation_err!(InvalidSQL, "{}", e))?;
-                    let days = date.num_days_from_ce();
-                    Ok(Expression::date(days))
+                    Ok(Expression::date(date))
                 }
                 _ => Err(translation_err!(
                     UnsupportedSQL,
@@ -933,7 +927,13 @@ impl Translator {
                     [(col_id1, Expression::int(1))],
                 );
                 let col_id2 = translator.col_id_gen.next();
-                plan = plan.aggregate(vec![], vec![(col_id2, (col_id1, AggOp::Count))]);
+                plan = plan.aggregate(
+                    true,
+                    &self.enabled_rules,
+                    &self.col_id_gen,
+                    vec![],
+                    vec![(col_id2, (col_id1, AggOp::Count))],
+                );
                 // Add count(*) > 0  to the subquery
                 let exists_expr = if *negated {
                     Expression::binary(
@@ -1037,6 +1037,9 @@ impl Translator {
                         let col_id3 = self.col_id_gen.next();
                         let col_id4 = self.col_id_gen.next();
                         plan = plan.aggregate(
+                            true,
+                            &self.enabled_rules,
+                            &self.col_id_gen,
                             vec![],
                             vec![
                                 (col_id2, (col_id0, AggOp::Count)),
@@ -1147,7 +1150,7 @@ impl Translator {
                             other
                         )),
                     }?;
-                    Ok(Expression::date(months * 30))
+                    Ok(Expression::months(months as u32))
                 }
                 _ => Err(translation_err!(
                     InvalidSQL,
@@ -1186,6 +1189,32 @@ impl Translator {
                     }
                 };
                 Ok(expr.extract(field))
+            }
+            sqlparser::ast::Expr::Like {
+                negated,
+                expr,
+                pattern,
+                escape_char,
+            } => {
+                let expr = self.process_expr(expr, distance)?;
+                let pattern = self.process_expr(pattern, distance)?;
+                let pattern = match pattern {
+                    Expression::Field {
+                        val: Field::String(Some(s)),
+                    } => Ok(s),
+                    _ => {
+                        return Err(translation_err!(
+                            UnsupportedSQL,
+                            "Unsupported pattern: {:?}",
+                            pattern
+                        ));
+                    }
+                }?;
+                if *negated {
+                    unimplemented!("Negation is not supported yet");
+                } else {
+                    Ok(expr.like(pattern, escape_char.clone()))
+                }
             }
             other => Err(translation_err!(
                 UnsupportedSQL,

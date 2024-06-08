@@ -1054,7 +1054,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 let schema = catalog
                     .get_schema(c_id)
                     .ok_or(ExecError::Catalog(format!("Schema not found")))?;
-                schema.project(&column_indices);
+                let schema = Arc::new(schema.project(&column_indices));
                 let scan = ScanIter::new(schema, self.storage.clone(), c_id, column_indices);
                 Ok((VolcanoIterator::Scan(scan), col_id_to_idx))
             }

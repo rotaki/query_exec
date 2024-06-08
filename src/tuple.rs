@@ -4,14 +4,14 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{de::value, Deserialize, Serialize};
 
 use crate::{
     catalog::{ColumnDef, DataType},
     error::ExecError,
 };
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta};
 
 fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     let mut val_bits = val.to_bits();
@@ -129,7 +129,16 @@ impl Tuple {
                     key.extend(val.clone().unwrap().as_bytes());
                 }
                 Field::Date(val) => {
-                    key.extend(&val.unwrap().to_be_bytes());
+                    let val = val.unwrap().num_days_from_ce();
+                    key.extend(&val.to_be_bytes());
+                }
+                Field::Months(val) => {
+                    let val = val.unwrap();
+                    key.extend(&val.to_be_bytes());
+                }
+                Field::Days(val) => {
+                    let val = val.unwrap();
+                    key.extend(&val.to_be_bytes());
                 }
             }
         }
@@ -206,6 +215,36 @@ impl Tuple {
                 Field::Date(val) => {
                     if let Some(val) = val {
                         key.push(non_null_prefix);
+                        let val_in_bytes = val.num_days_from_ce().to_be_bytes();
+                        for byte in &val_in_bytes {
+                            if *asc {
+                                key.push(*byte);
+                            } else {
+                                key.push(!byte);
+                            }
+                        }
+                    } else {
+                        key.push(null_prefix);
+                    }
+                }
+                Field::Months(val) => {
+                    if let Some(val) = val {
+                        key.push(non_null_prefix);
+                        let val_in_bytes = val.to_be_bytes();
+                        for byte in &val_in_bytes {
+                            if *asc {
+                                key.push(*byte);
+                            } else {
+                                key.push(!byte);
+                            }
+                        }
+                    } else {
+                        key.push(null_prefix);
+                    }
+                }
+                Field::Days(val) => {
+                    if let Some(val) = val {
+                        key.push(non_null_prefix);
                         let val_in_bytes = val.to_be_bytes();
                         for byte in &val_in_bytes {
                             if *asc {
@@ -253,7 +292,9 @@ pub enum Field {
     Int(Option<i64>),
     Float(Option<f64>), // f64 should not contain f64::NAN.
     String(Option<String>),
-    Date(Option<i32>),
+    Date(Option<NaiveDate>),
+    Months(Option<u32>),
+    Days(Option<u64>),
 }
 
 impl PartialEq for Field {
@@ -278,6 +319,8 @@ impl PartialEq for Field {
                     false
                 }
             }
+            (Field::Months(val1), Field::Months(val2)) => val1 == val2,
+            (Field::Days(val1), Field::Days(val2)) => val1 == val2,
             _ => false,
         }
     }
@@ -338,6 +381,8 @@ impl Hash for Field {
             }
             Field::String(val) => val.hash(state),
             Field::Date(val) => val.hash(state),
+            Field::Months(val) => val.hash(state),
+            Field::Days(val) => val.hash(state),
         }
     }
 }
@@ -350,6 +395,8 @@ impl Field {
             DataType::Float => Field::Float(None),
             DataType::String => Field::String(None),
             DataType::Date => Field::Date(None),
+            DataType::Months => Field::Months(None),
+            DataType::Days => Field::Days(None),
             DataType::Unknown => {
                 println!("Unknown data type, defaulting to int");
                 Field::Int(None) // Default to int for unknown data type
@@ -364,6 +411,8 @@ impl Field {
             Field::Float(val) => Field::Float(val.take()),
             Field::String(val) => Field::String(val.take()),
             Field::Date(val) => Field::Date(val.take()),
+            Field::Months(val) => Field::Months(val.take()),
+            Field::Days(val) => Field::Days(val.take()),
         }
     }
 
@@ -377,6 +426,8 @@ impl Field {
                 DataType::Float => Ok(Field::Float(None)),
                 DataType::String => Ok(Field::String(None)),
                 DataType::Date => Ok(Field::Date(None)),
+                DataType::Months => Ok(Field::Months(None)),
+                DataType::Days => Ok(Field::Days(None)),
                 DataType::Unknown => Err("Unknown data type".to_string()),
             }
         } else {
@@ -398,8 +449,15 @@ impl Field {
                     // Date is stored as yyyy-mm-dd
                     let val = chrono::NaiveDate::parse_from_str(field, "%Y-%m-%d")
                         .map_err(|e| e.to_string())?;
-                    let days = val.num_days_from_ce();
-                    Ok(Field::Date(Some(days)))
+                    Ok(Field::Date(Some(val)))
+                }
+                DataType::Months => {
+                    let val = field.parse::<u32>().map_err(|e| e.to_string())?;
+                    Ok(Field::Months(Some(val)))
+                }
+                DataType::Days => {
+                    let val = field.parse::<u64>().map_err(|e| e.to_string())?;
+                    Ok(Field::Days(Some(val)))
                 }
                 DataType::Unknown => Err("Unknown data type".to_string()),
             }
@@ -422,30 +480,21 @@ impl Field {
 
     pub fn extract_year(&self) -> Result<Option<i32>, ExecError> {
         match self {
-            Field::Date(val) => Ok(val.map(|days| {
-                let date = NaiveDate::from_num_days_from_ce_opt(days).unwrap();
-                date.year()
-            })),
+            Field::Date(val) => Ok(val.map(|date| date.year())),
             _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
         }
     }
 
     pub fn extract_month(&self) -> Result<Option<u32>, ExecError> {
         match self {
-            Field::Date(val) => Ok(val.map(|days| {
-                let date = NaiveDate::from_num_days_from_ce_opt(days).unwrap();
-                date.month()
-            })),
+            Field::Date(val) => Ok(val.map(|date| date.month())),
             _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
         }
     }
 
     pub fn extract_day(&self) -> Result<Option<u32>, ExecError> {
         match self {
-            Field::Date(val) => Ok(val.map(|days| {
-                let date = NaiveDate::from_num_days_from_ce_opt(days).unwrap();
-                date.day()
-            })),
+            Field::Date(val) => Ok(val.map(|date| date.day())),
             _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
         }
     }
@@ -472,10 +521,16 @@ impl std::fmt::Display for Field {
             },
             Field::Date(val) => match val {
                 Some(val) => {
-                    let date = NaiveDate::from_num_days_from_ce_opt(*val).unwrap();
-                    // date in the format yyyy-mm-dd
-                    write!(f, "{}", date)
+                    write!(f, "{}", val)
                 }
+                None => write!(f, "NULL"),
+            },
+            Field::Months(val) => match val {
+                Some(val) => write!(f, "{}", val),
+                None => write!(f, "NULL"),
+            },
+            Field::Days(val) => match val {
+                Some(val) => write!(f, "{}", val),
                 None => write!(f, "NULL"),
             },
         }
@@ -502,6 +557,18 @@ impl Add for Field {
             (Field::String(val1), Field::String(val2)) => {
                 Ok(Field::String(val1.and_then(|v1| val2.map(|v2| v1 + &v2))))
             }
+            (Field::Date(val1), Field::Months(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v1 + Months::new(v2))),
+            )),
+            (Field::Date(val1), Field::Days(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v1 + Days::new(v2))),
+            )),
+            (Field::Months(val1), Field::Date(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v2 + Months::new(v1))),
+            )),
+            (Field::Days(val1), Field::Date(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v2 + Days::new(v1))),
+            )),
             (x, y) => Err(ExecError::FieldOp(format!(
                 "Cannot add {:?} and {:?}",
                 x, y
@@ -535,6 +602,21 @@ impl Sub for Field {
             (Field::Float(val1), Field::Float(val2)) => {
                 Ok(Field::Float(val1.and_then(|v1| val2.map(|v2| v1 - v2))))
             }
+            (Field::Date(val1), Field::Months(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v1 - Months::new(v2))),
+            )),
+            (Field::Date(val1), Field::Days(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v1 - Days::new(v2))),
+            )),
+            (Field::Date(val1), Field::Date(val2)) => Ok(Field::Days(
+                val1.and_then(|v1| val2.map(|v2| (v1 - v2).num_days() as u64)),
+            )),
+            (Field::Months(val1), Field::Date(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v2 - Months::new(v1))),
+            )),
+            (Field::Days(val1), Field::Date(val2)) => Ok(Field::Date(
+                val1.and_then(|v1| val2.map(|v2| v2 - Days::new(v1))),
+            )),
             (x, y) => Err(ExecError::FieldOp(format!(
                 "Cannot subtract {:?} and {:?}",
                 x, y
@@ -702,6 +784,8 @@ impl IsNull for Field {
             Field::Float(val) => val.is_none(),
             Field::String(val) => val.is_none(),
             Field::Date(val) => val.is_none(),
+            Field::Months(val) => val.is_none(),
+            Field::Days(val) => val.is_none(),
         }
     }
 }
@@ -746,6 +830,6 @@ impl From<&str> for Field {
 impl From<(i32, u32, u32)> for Field {
     fn from(val: (i32, u32, u32)) -> Self {
         let date = NaiveDate::from_ymd_opt(val.0, val.1, val.2);
-        Field::Date(date.map(|d| d.num_days_from_ce()))
+        Field::Date(date)
     }
 }

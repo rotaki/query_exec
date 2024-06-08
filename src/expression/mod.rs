@@ -2,6 +2,7 @@ mod logical;
 mod physical;
 
 use crate::tuple::Field;
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -150,6 +151,11 @@ pub enum Expression<P: PlanTrait> {
         field: DateField,
         expr: Box<Expression<P>>,
     },
+    Like {
+        expr: Box<Expression<P>>,
+        pattern: String,
+        escape: Option<String>,
+    },
     Subquery {
         expr: Box<P>,
     },
@@ -178,9 +184,21 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
-    pub fn date(val: i32) -> Expression<P> {
+    pub fn date(val: NaiveDate) -> Expression<P> {
         Expression::Field {
             val: Field::Date(Some(val)),
+        }
+    }
+
+    pub fn months(val: u32) -> Expression<P> {
+        Expression::Field {
+            val: Field::Months(Some(val)),
+        }
+    }
+
+    pub fn days(val: u64) -> Expression<P> {
+        Expression::Field {
+            val: Field::Days(Some(val)),
         }
     }
 
@@ -229,6 +247,14 @@ impl<P: PlanTrait> Expression<P> {
         Expression::Extract {
             field,
             expr: Box::new(self),
+        }
+    }
+
+    pub fn like(self, pattern: String, escape: Option<String>) -> Expression<P> {
+        Expression::Like {
+            expr: Box::new(self),
+            pattern,
+            escape,
         }
     }
 
@@ -283,6 +309,11 @@ impl<P: PlanTrait> Expression<P> {
                 expr.has_subquery() || lower.has_subquery() || upper.has_subquery()
             }
             Expression::Extract { field: _, expr } => expr.has_subquery(),
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
         }
     }
@@ -363,6 +394,15 @@ impl<P: PlanTrait> Expression<P> {
                 field,
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => Expression::Like {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+                pattern,
+                escape,
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
@@ -420,6 +460,15 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Extract { field, expr } => Expression::Extract {
                 field,
                 expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+            },
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => Expression::Like {
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+                pattern,
+                escape,
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 // Do nothing for subquery
@@ -485,6 +534,17 @@ impl<P: PlanTrait> Expression<P> {
                 expr.print_inner(indent, out);
                 out.push_str(")");
             }
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => {
+                expr.print_inner(indent, out);
+                out.push_str(&format!(" like '{}'", pattern));
+                if let Some(escape) = escape {
+                    out.push_str(&format!(" escape '{}'", escape));
+                }
+            }
             Expression::Subquery { expr } => {
                 out.push_str(&format!("λ.{:?}(\n", expr.free()));
                 expr.print_inner(indent + 6, out);
@@ -544,6 +604,7 @@ impl<P: PlanTrait> Expression<P> {
                 set
             }
             Expression::Extract { expr, .. } => expr.free(),
+            Expression::Like { expr, .. } => expr.free(),
             Expression::Subquery { expr } => expr.free(),
         }
     }

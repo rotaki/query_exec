@@ -750,6 +750,15 @@ impl LogicalToPhysicalExpression {
                 field: field.clone(),
                 expr: Box::new(self.to_physical(expr)),
             },
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => Expression::Like {
+                expr: Box::new(self.to_physical(expr)),
+                pattern: pattern.clone(),
+                escape: escape.clone(),
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },

@@ -65,7 +65,7 @@ impl LogicalRelExpr {
                         .into_iter()
                         .partition(|pred| pred.free().is_subset(&group_by_cols));
                     src.select(true, enabled_rules, col_id_gen, push_down)
-                        .aggregate(group_by, aggrs)
+                        .aggregate(false, enabled_rules, col_id_gen, group_by, aggrs)
                         .select(false, enabled_rules, col_id_gen, keep)
                 }
                 LogicalRelExpr::Map { input, exprs } => {

@@ -11,7 +11,8 @@ use crate::catalog::CatalogRef;
 use crate::error::ExecError;
 use crate::executor::Executor;
 use crate::expression::prelude::{
-    HeuristicRulesRef, LogicalRelExpr, LogicalToPhysicalRelExpr, PhysicalRelExpr,
+    HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr, LogicalToPhysicalRelExpr,
+    PhysicalRelExpr,
 };
 use crate::loader::prelude::SimpleCsvLoader;
 use crate::loader::DataLoader;
@@ -70,12 +71,17 @@ pub struct QueryExecutor<T: TxnStorageTrait> {
 
 impl<T: TxnStorageTrait> QueryExecutor<T> {
     pub fn new(db_id: DatabaseId, catalog_ref: CatalogRef, storage: Arc<T>) -> Self {
-        let logical_rules = HeuristicRulesRef::default();
+        let logical_rules = HeuristicRules::new();
+        logical_rules.enable(HeuristicRule::Hoist);
+        logical_rules.enable(HeuristicRule::Decorrelate);
+        logical_rules.enable(HeuristicRule::SelectionPushdown);
+        logical_rules.enable(HeuristicRule::ProjectionPushdown);
+
         QueryExecutor {
             db_id,
             catalog_ref,
             storage,
-            logical_rules,
+            logical_rules: Arc::new(logical_rules),
         }
     }
 
