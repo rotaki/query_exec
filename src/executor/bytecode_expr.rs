@@ -1,4 +1,5 @@
 use crate::expression::{prelude::*, DateField};
+use crate::prelude::DataType;
 use crate::tuple::{AsBool, IsNull};
 use crate::{
     error::ExecError,
@@ -40,6 +41,7 @@ pub enum ByteCodes {
     // LOGICAL OPERATIONS
     And,
     Or,
+    Not,
     // IS_NULL
     IsNull,
     // IS_BETWEEN
@@ -50,9 +52,11 @@ pub enum ByteCodes {
     ExtractDay,
     // LIKE
     Like,
+    // CAST
+    Cast,
 }
 
-const STATIC_DISPATCHER: [DispatchFn; 26] = [
+const STATIC_DISPATCHER: [DispatchFn; 28] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
@@ -79,6 +83,7 @@ const STATIC_DISPATCHER: [DispatchFn; 26] = [
     // LOGICAL OPERATIONS
     AND_FN,
     OR_FN,
+    NOT_FN,
     // IS_NULL
     IS_NULL_FN,
     // IS_BETWEEN
@@ -89,6 +94,8 @@ const STATIC_DISPATCHER: [DispatchFn; 26] = [
     EXTRACT_DAY_FN,
     // LIKE
     LIKE_FN,
+    // CAST
+    CAST_FN,
 ];
 
 // Utility functions
@@ -187,12 +194,14 @@ const LTE_FN: DispatchFn = lte;
 const GTE_FN: DispatchFn = gte;
 const AND_FN: DispatchFn = and;
 const OR_FN: DispatchFn = or;
+const NOT_FN: DispatchFn = not;
 const IS_NULL_FN: DispatchFn = is_null;
 const IS_BETWEEN_FN: DispatchFn = is_between;
 const EXTRACT_YEAR_FN: DispatchFn = extract_year;
 const EXTRACT_MONTH_FN: DispatchFn = extract_month;
 const EXTRACT_DAY_FN: DispatchFn = extract_day;
 const LIKE_FN: DispatchFn = like;
+const CAST_FN: DispatchFn = cast;
 
 fn push_field(
     bytecodes: &[ByteCodeType],
@@ -248,7 +257,7 @@ fn jump_if_true(
     _record: &[Field],
 ) -> Result<(), ExecError> {
     let cond = stack.pop().unwrap();
-    if cond.as_bool()? {
+    if !cond.is_null() && cond.as_bool()? {
         *i = bytecodes[*i as usize];
     } else {
         *i += 1;
@@ -264,7 +273,7 @@ fn jump_if_false(
     _record: &[Field],
 ) -> Result<(), ExecError> {
     let cond = stack.pop().unwrap();
-    if !cond.as_bool()? {
+    if !cond.is_null() && !cond.as_bool()? {
         *i = bytecodes[*i as usize];
     } else {
         *i += 1;
@@ -486,6 +495,22 @@ fn or(
     Ok(())
 }
 
+fn not(
+    _bytecodes: &[ByteCodeType],
+    _i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let field = stack.pop().unwrap();
+    if field.is_null() {
+        stack.push(Field::Boolean(None));
+    } else {
+        stack.push(Field::from_bool(!field.as_bool()?));
+    }
+    Ok(())
+}
+
 fn is_null(
     _bytecodes: &[ByteCodeType],
     _i: &mut ByteCodeType,
@@ -581,6 +606,23 @@ fn like(
     Ok(())
 }
 
+fn cast(
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let field = stack.pop().unwrap();
+    let cast_type = bytecodes[*i as usize] as usize;
+    *i += 1;
+    let data_type = DataType::from(cast_type);
+    let result = field.cast(&data_type)?;
+    stack.push(result);
+    Ok(())
+}
+
+// Helper function to check if a field matches a LIKE pattern
 fn is_like(field: &str, pattern: &str, escape_str: &Option<String>) -> bool {
     if pattern.is_empty() {
         return field.is_empty();
@@ -744,7 +786,13 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     bytecode_expr.bytecodes[jump_if_false_addr] = end_addr as ByteCodeType + 1;
                 }
                 bytecode_expr.add_code(ByteCodes::Pop as usize);
-                convert_expr_to_bytecode(else_expr, bytecode_expr)?;
+                if let Some(else_expr) = else_expr {
+                    convert_expr_to_bytecode(else_expr, bytecode_expr)?;
+                } else {
+                    let i = bytecode_expr.add_literal(Field::null(&DataType::Unknown));
+                    bytecode_expr.add_code(ByteCodes::PushLit as usize);
+                    bytecode_expr.add_code(i);
+                }
                 for addr in jump_end_ifs {
                     bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
                 }
@@ -764,8 +812,16 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
                     jump_end_ifs.push(end_addr);
                     bytecode_expr.bytecodes[jump_if_false_addr] = end_addr as ByteCodeType + 1;
                 }
+                // If else_expr is None, we should push a NULL value to the stack
+                // to maintain the stack invariant
+                if let Some(else_expr) = else_expr {
+                    convert_expr_to_bytecode(else_expr, bytecode_expr)?;
+                } else {
+                    let i = bytecode_expr.add_literal(Field::null(&DataType::Unknown));
+                    bytecode_expr.add_code(ByteCodes::PushLit as usize);
+                    bytecode_expr.add_code(i);
+                }
 
-                convert_expr_to_bytecode(else_expr, bytecode_expr)?;
                 for addr in jump_end_ifs {
                     bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
                 }
@@ -807,6 +863,45 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
             let escape_idx = bytecode_expr.add_literal(Field::String(escape.clone()));
             bytecode_expr.add_code(pattern_idx);
             bytecode_expr.add_code(escape_idx);
+        }
+        Expression::Cast { expr, to_type } => {
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            bytecode_expr.add_code(ByteCodes::Cast as usize);
+            bytecode_expr.add_code(to_type.clone() as usize);
+        }
+        Expression::InList { expr, list } => {
+            // [base][dup][val1][eq][jump_if_true][ok]
+            //       [dup][val2][eq][jump_if_true][ok]
+            //       ...
+            //       [pop][push_lit][false][jump][end][(ok)pop][push_lit][true][(end)]
+            let mut jump_end_ifs = Vec::with_capacity(list.len());
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            for val in list {
+                bytecode_expr.add_code(ByteCodes::Duplicate as usize);
+                convert_expr_to_bytecode(val, bytecode_expr)?;
+                bytecode_expr.add_code(ByteCodes::Eq as usize);
+                bytecode_expr.add_code(ByteCodes::JumpIfTrue as usize);
+                let jump_if_true_addr = bytecode_expr.add_placeholder();
+                jump_end_ifs.push(jump_if_true_addr);
+            }
+            bytecode_expr.add_code(ByteCodes::Pop as usize);
+            let i = bytecode_expr.add_literal(Field::from_bool(false));
+            bytecode_expr.add_code(ByteCodes::PushLit as usize);
+            bytecode_expr.add_code(i);
+            bytecode_expr.add_code(ByteCodes::Jump as usize);
+            let end_addr = bytecode_expr.add_placeholder();
+            for addr in jump_end_ifs {
+                bytecode_expr.bytecodes[addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
+            }
+            bytecode_expr.add_code(ByteCodes::Pop as usize);
+            let i = bytecode_expr.add_literal(Field::from_bool(true));
+            bytecode_expr.add_code(ByteCodes::PushLit as usize);
+            bytecode_expr.add_code(i);
+            bytecode_expr.bytecodes[end_addr] = bytecode_expr.bytecodes.len() as ByteCodeType;
+        }
+        Expression::Not { expr } => {
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            bytecode_expr.add_code(ByteCodes::Not as usize);
         }
         Expression::Subquery { .. } => {
             unimplemented!("Subquery not supported in bytecode")
@@ -937,7 +1032,7 @@ mod tests {
                     Expression::Field { val: 30.into() },
                 ),
             ],
-            else_expr: Box::new(Expression::Field { val: 40.into() }),
+            else_expr: Some(Box::new(Expression::Field { val: 40.into() })),
         };
         let col_id_to_idx = HashMap::new();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
@@ -953,6 +1048,25 @@ mod tests {
         assert_eq!(result4, Field::Int(Some(40)));
         let result_null = bytecode_expr.eval(&tuple_null).unwrap();
         assert_eq!(result_null, Field::Int(Some(40)));
+
+        // Case idx0
+        // when 1 then 10
+
+        let expr = Expression::<PhysicalRelExpr>::Case {
+            expr: Some(Box::new(Expression::ColRef { id: 0 })),
+            whens: vec![(
+                Expression::Field { val: 1.into() },
+                Expression::Field { val: 10.into() },
+            )],
+            else_expr: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result0 = bytecode_expr.eval(&tuple0).unwrap();
+        assert_eq!(result0, Field::null(&DataType::Unknown));
+        let result1 = bytecode_expr.eval(&tuple1).unwrap();
+        assert_eq!(result1, Field::Int(Some(10)));
+        let result2 = bytecode_expr.eval(&tuple2).unwrap();
+        assert_eq!(result2, Field::null(&DataType::Unknown));
     }
 
     #[test]
@@ -1005,7 +1119,7 @@ mod tests {
                     Expression::Field { val: 40.into() },
                 ),
             ],
-            else_expr: Box::new(Expression::Field { val: 50.into() }),
+            else_expr: Some(Box::new(Expression::Field { val: 50.into() })),
         };
         let col_id_to_idx = HashMap::new();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
@@ -1021,6 +1135,29 @@ mod tests {
         assert_eq!(result4, Field::Int(Some(40)));
         let result_null = bytecode_expr.eval(&tuple_null).unwrap();
         assert_eq!(result_null, Field::Int(Some(40)));
+
+        // Case
+        // when idx0 = 1 then 10
+
+        let expr = Expression::<PhysicalRelExpr>::Case {
+            expr: None,
+            whens: vec![(
+                Expression::Binary {
+                    op: BinaryOp::Eq,
+                    left: Box::new(Expression::ColRef { id: 0 }),
+                    right: Box::new(Expression::Field { val: 1.into() }),
+                },
+                Expression::Field { val: 10.into() },
+            )],
+            else_expr: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result0 = bytecode_expr.eval(&tuple0).unwrap();
+        assert_eq!(result0, Field::null(&DataType::Unknown));
+        let result1 = bytecode_expr.eval(&tuple1).unwrap();
+        assert_eq!(result1, Field::Int(Some(10)));
+        let result2 = bytecode_expr.eval(&tuple2).unwrap();
+        assert_eq!(result2, Field::null(&DataType::Unknown));
     }
 
     #[test]
@@ -1197,6 +1334,152 @@ mod tests {
             expr: Box::new(Expression::ColRef { id: 0 }),
             pattern: "hello".to_string(),
             escape: None,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Boolean(None));
+    }
+
+    #[test]
+    fn test_cast() {
+        let tuple = Tuple::from_fields(vec![1.into()]);
+        // Cast idx0 to string
+        let expr = Expression::<PhysicalRelExpr>::Cast {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            to_type: DataType::String,
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::String(Some("1".to_string())));
+
+        // Cast idx0 to boolean
+        let expr = Expression::<PhysicalRelExpr>::Cast {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            to_type: DataType::Boolean,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Boolean(Some(true)));
+
+        // Cast idx0 to int
+        let expr = Expression::<PhysicalRelExpr>::Cast {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            to_type: DataType::Int,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Int(Some(1)));
+
+        // Cast idx0 to float
+        let expr = Expression::<PhysicalRelExpr>::Cast {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            to_type: DataType::Float,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Float(Some(1.0)));
+
+        // Cast idx0 to date
+        let expr = Expression::<PhysicalRelExpr>::Cast {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            to_type: DataType::Date,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Date(None));
+
+        // Float to Int
+        let tuple = Tuple::from_fields(vec![1.5.into()]);
+        let expr = Expression::<PhysicalRelExpr>::Cast {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            to_type: DataType::Int,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::Int(Some(1)));
+    }
+
+    #[test]
+    fn test_in_list() {
+        let tuple = Tuple::from_fields(vec![1.into()]);
+        // idx0 in (1, 2, 3)
+        let expr = Expression::<PhysicalRelExpr>::InList {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            list: vec![
+                Expression::Field { val: 1.into() },
+                Expression::Field { val: 2.into() },
+                Expression::Field { val: 3.into() },
+            ],
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        // idx0 in (2, 3, 4)
+        let expr = Expression::<PhysicalRelExpr>::InList {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            list: vec![
+                Expression::Field { val: 2.into() },
+                Expression::Field { val: 3.into() },
+                Expression::Field { val: 4.into() },
+            ],
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+
+        // idx0 in ()
+        let expr = Expression::<PhysicalRelExpr>::InList {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            list: vec![],
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+
+        // NULL in (1, 2, 3, NULL)
+        // This should be false because NULL != NULL
+        let tuple = Tuple::from_fields(vec![Field::Int(None)]);
+        let expr = Expression::<PhysicalRelExpr>::InList {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            list: vec![
+                Expression::Field { val: 1.into() },
+                Expression::Field { val: 2.into() },
+                Expression::Field { val: 3.into() },
+            ],
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+    }
+
+    #[test]
+    fn test_not() {
+        let tuple = Tuple::from_fields(vec![Field::from_bool(true)]);
+        // not idx0
+        let expr = Expression::<PhysicalRelExpr>::Not {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(false));
+
+        let tuple = Tuple::from_fields(vec![Field::from_bool(false)]);
+        // not idx0
+        let expr = Expression::<PhysicalRelExpr>::Not {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::from_bool(true));
+
+        let tuple = Tuple::from_fields(vec![Field::Boolean(None)]);
+        // not idx0
+        let expr = Expression::<PhysicalRelExpr>::Not {
+            expr: Box::new(Expression::ColRef { id: 0 }),
         };
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();

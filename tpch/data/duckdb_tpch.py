@@ -35,26 +35,25 @@ def get_query_string(query):
 # query_string = get_query_string(1)
 query_string = """
 SELECT
-    O_ORDERPRIORITY,
-    COUNT(*) AS ORDER_COUNT
+    C_COUNT,
+    COUNT(*) AS CUSTDIST
 FROM
-    ORDERS
-WHERE
-        O_ORDERDATE >= DATE '1993-07-01'
-  AND O_ORDERDATE < DATE '1993-07-01' + INTERVAL '3' MONTH
-  AND EXISTS (
+    (
         SELECT
-            *
+            C_CUSTKEY,
+            COUNT(O_ORDERKEY)
         FROM
-            LINEITEM
-        WHERE
-                L_ORDERKEY = O_ORDERKEY
-          AND L_COMMITDATE < L_RECEIPTDATE
-    )
+            CUSTOMER LEFT OUTER JOIN ORDERS ON
+                        C_CUSTKEY = O_CUSTKEY
+                    AND O_COMMENT NOT LIKE '%special%requests%'
+        GROUP BY
+            C_CUSTKEY
+    ) AS C_ORDERS (C_CUSTKEY, C_COUNT)
 GROUP BY
-    O_ORDERPRIORITY
+    C_COUNT
 ORDER BY
-    O_ORDERPRIORITY;
+    CUSTDIST DESC,
+    C_COUNT DESC;
 """
 
 explain = con.execute("EXPLAIN {}".format(query_string))

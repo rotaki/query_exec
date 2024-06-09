@@ -10,7 +10,7 @@ use crate::{
     },
     error::ExecError,
     expression::{prelude::PhysicalRelExpr, AggOp, Expression, JoinType},
-    log, log_trace,
+    log, log_info, log_trace,
     tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
 };
@@ -218,6 +218,7 @@ impl<T: TxnStorageTrait> FilterIter<T> {
             match self.input.next(txn)? {
                 Some((k, tuple)) => {
                     if self.expr.eval(&tuple)? == Field::from_bool(true) {
+                        log_info!("FilterIter::next: tuple: {:?}", tuple);
                         return Ok(Some((k, tuple)));
                     }
                 }
@@ -413,7 +414,13 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
                                 AggOp::Sum | AggOp::Avg | AggOp::Max | AggOp::Min => {
                                     agg_vals.push(val.clone())
                                 }
-                                AggOp::Count => agg_vals.push(Field::Int(Some(1))),
+                                AggOp::Count => {
+                                    if val.is_null() {
+                                        agg_vals.push(Field::Int(Some(0)))
+                                    } else {
+                                        agg_vals.push(Field::Int(Some(1)))
+                                    }
+                                }
                             }
                         }
                         agg_result.insert(group_key, (agg_vals, 1));

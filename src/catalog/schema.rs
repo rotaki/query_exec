@@ -84,7 +84,7 @@ impl ColumnDef {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DataType {
-    Boolean,
+    Boolean = 0,
     Int,
     Float,
     String,
@@ -92,4 +92,19 @@ pub enum DataType {
     Months,
     Days,
     Unknown,
+}
+
+impl From<usize> for DataType {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => DataType::Boolean,
+            1 => DataType::Int,
+            2 => DataType::Float,
+            3 => DataType::String,
+            4 => DataType::Date,
+            5 => DataType::Months,
+            6 => DataType::Days,
+            _ => DataType::Unknown,
+        }
+    }
 }

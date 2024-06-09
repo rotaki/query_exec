@@ -46,12 +46,9 @@ impl LogicalRelExpr {
                 // Pull up Projects
                 LogicalRelExpr::Project { src, mut cols } => {
                     cols.extend(self.att());
-                    return self.flatmap(true, enabled_rules, col_id_gen, *src).project(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        cols,
-                    );
+                    return self
+                        .flatmap(true, enabled_rules, col_id_gen, *src)
+                        .u_project(true, enabled_rules, col_id_gen, cols.into_iter().collect());
                 }
                 // Pull up Maps
                 LogicalRelExpr::Map { input, exprs } => {
@@ -223,13 +220,20 @@ impl LogicalRelExpr {
                                                     Expression::int(0),
                                                 )]
                                                 .to_vec(),
-                                                else_expr: Box::new(Expression::col_ref(new_id)),
+                                                else_expr: Some(Box::new(Expression::col_ref(
+                                                    new_id,
+                                                ))),
                                             },
                                         )
                                     })
                                     .collect::<Vec<_>>(),
                             )
-                            .project(true, enabled_rules, col_id_gen, new_project_att);
+                            .u_project(
+                                true,
+                                enabled_rules,
+                                col_id_gen,
+                                new_project_att.into_iter().collect(),
+                            );
                     }
                 }
             }

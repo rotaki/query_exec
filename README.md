@@ -11,4 +11,10 @@
   * [x] Q5
   * [x] Q6
   * [x] Q7
+  * [x] Q8 (Cast)
+  * [x] Q9
+  * [x] Q10
+  * [x] Q11 (Sum with subquery)
+  * [x] Q12 (Inlist)
+  * [x] Q13
 * [] Remove unnecessary projections in the query plan

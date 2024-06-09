@@ -678,7 +678,6 @@ impl LogicalToPhysicalRelExpr {
                     }
                 }
             }
-            // TODO: The current translator does not support ORDER BY
             LogicalRelExpr::OrderBy { src, cols } => PhysicalRelExpr::Sort {
                 src: Box::new(self.to_physical(*src)),
                 column_names: cols,
@@ -739,7 +738,9 @@ impl LogicalToPhysicalExpression {
                     .iter()
                     .map(|(when, then)| (self.to_physical(when), self.to_physical(then)))
                     .collect(),
-                else_expr: Box::new(self.to_physical(else_expr)),
+                else_expr: else_expr
+                    .as_ref()
+                    .map(|expr| Box::new(self.to_physical(expr))),
             },
             Expression::Between { expr, lower, upper } => Expression::Between {
                 expr: Box::new(self.to_physical(expr)),
@@ -758,6 +759,17 @@ impl LogicalToPhysicalExpression {
                 expr: Box::new(self.to_physical(expr)),
                 pattern: pattern.clone(),
                 escape: escape.clone(),
+            },
+            Expression::Cast { expr, to_type } => Expression::Cast {
+                expr: Box::new(self.to_physical(expr)),
+                to_type: to_type.clone(),
+            },
+            Expression::InList { expr, list } => Expression::InList {
+                expr: Box::new(self.to_physical(expr)),
+                list: list.iter().map(|expr| self.to_physical(expr)).collect(),
+            },
+            Expression::Not { expr } => Expression::Not {
+                expr: Box::new(self.to_physical(expr)),
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),

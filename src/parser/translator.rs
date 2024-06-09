@@ -16,6 +16,7 @@ use crate::{
         },
         AggOp, DateField, Expression,
     },
+    prelude::DataType,
     tuple::Field,
 };
 
@@ -104,6 +105,7 @@ pub enum TranslatorError {
     TableNotFound(String),
     InvalidSQL(String),
     UnsupportedSQL(String),
+    FailedToTranslate(String),
 }
 
 macro_rules! translation_err {
@@ -118,6 +120,9 @@ macro_rules! translation_err {
     };
     (UnsupportedSQL, $($arg:tt)*) => {
         TranslatorError::UnsupportedSQL(format!($($arg)*))
+    };
+    (FailedToTranslate, $($arg:tt)*) => {
+        TranslatorError::FailedToTranslate(format!($($arg)*))
     };
 }
 
@@ -244,7 +249,7 @@ impl Translator {
                         condition.into_iter().collect(),
                     )
             } else {
-                plan.join(
+                plan.on(
                     true,
                     &self.enabled_rules,
                     &self.col_id_gen,
@@ -347,26 +352,60 @@ impl Translator {
                 );
                 let subquery = translator.process_query(subquery)?;
                 let plan = subquery.plan;
-                let att = plan.att();
-
-                for i in att {
-                    // get the name of the column from env
-                    let names = subquery.env.get_names(i);
-                    for name in &names {
-                        self.env.set(&name, i);
+                if let Some(alias) = alias {
+                    if !is_valid_alias(&alias.name.value) {
+                        return Err(translation_err!(
+                            InvalidSQL,
+                            "Invalid table alias name: {}",
+                            alias.name.value
+                        ));
                     }
-                    // If there is an alias, set the alias in the current environment
-                    if let Some(alias) = alias {
-                        if is_valid_alias(&alias.name.value) {
+                    if alias.columns.is_empty() {
+                        // Just add alias.name to the environment
+                        let att = plan.att();
+                        for i in att {
+                            // get the name of the column from env
+                            let names = subquery.env.get_names(i);
                             for name in &names {
-                                self.env.set(&format!("{}.{}", alias, name), i);
+                                self.env.set(&name, i);
+                                self.env.set(&format!("{}.{}", alias.name.value, name), i);
+                            }
+                        }
+                    } else {
+                        // columns correspond to the subquery's output columns
+                        if let LogicalRelExpr::Project { src: _, cols } = &plan {
+                            let table_alias = alias.name.value.clone();
+                            for (col_alias, col_id) in alias.columns.iter().zip(cols.iter()) {
+                                if !is_valid_alias(&col_alias.value) {
+                                    return Err(translation_err!(
+                                        InvalidSQL,
+                                        "Invalid column alias name: {}",
+                                        col_alias.value
+                                    ));
+                                }
+                                let names = subquery.env.get_names(*col_id);
+                                for name in &names {
+                                    self.env.set(&name, *col_id);
+                                }
+                                self.env.set(&col_alias.value, *col_id);
+                                self.env
+                                    .set(&format!("{}.{}", table_alias, col_alias.value), *col_id);
                             }
                         } else {
                             return Err(translation_err!(
-                                InvalidSQL,
-                                "Invalid alias name: {}",
-                                alias.name.value
+                                FailedToTranslate,
+                                "Top level operation of a query should be a projection: {:?}",
+                                plan
                             ));
+                        }
+                    }
+                } else {
+                    // No alias. Just add the columns to the environment.
+                    let att = plan.att();
+                    for i in att {
+                        let names = subquery.env.get_names(i);
+                        for name in &names {
+                            self.env.set(&name, i);
                         }
                     }
                 }
@@ -427,6 +466,101 @@ impl Translator {
         }
     }
 
+    fn process_projection_col(
+        &mut self,
+        mut plan: LogicalRelExpr,
+        expr: &sqlparser::ast::Expr,
+        projected_cols: &mut Vec<usize>,
+        agg_ops: &mut Vec<(usize, (usize, AggOp))>,
+        agg_maps: &mut Vec<(usize, Expression<LogicalRelExpr>)>,
+    ) -> Result<(LogicalRelExpr, usize), TranslatorError> {
+        // create a new col_id for the expression
+        let col_id = if !has_agg(expr) {
+            let col_id = match self.process_expr(expr, Some(0)) {
+                Ok(expr) => {
+                    if let Expression::ColRef { id } = expr {
+                        id
+                    } else {
+                        let col_id = self.col_id_gen.next();
+                        plan = plan.map(
+                            true,
+                            &self.enabled_rules,
+                            &self.col_id_gen,
+                            [(col_id, expr)],
+                        );
+                        col_id
+                    }
+                }
+                Err(TranslatorError::ColumnNotFound(_)) => {
+                    // Search globally.
+                    let expr = self.process_expr(expr, None)?;
+                    let col_id = self.col_id_gen.next();
+                    plan = plan.map(
+                        true,
+                        &self.enabled_rules,
+                        &self.col_id_gen,
+                        [(col_id, expr)],
+                    );
+                    col_id
+                }
+                Err(e) => return Err(e),
+            };
+            projected_cols.push(col_id);
+            col_id
+        } else {
+            // The most complicated case will be:
+            // Agg(a + b) + Agg(c + d) + 4
+            // if we ignore nested aggregation.
+            //
+            // In this case,
+            // Level1: | map a + b to col_id1
+            //         | map c + d to col_id2
+            // Level2: |Agg(col_id1) to col_id3
+            //         |Agg(col_id2) to col_id4
+            // Level3: |map col_id3 + col_id4 + 4 to col_id5
+
+            let mut aggs = Vec::new();
+            let res = self.process_aggregation_arguments(plan, expr, &mut aggs);
+            plan = res.0;
+            let expr = res.1;
+            let col_id = if let Expression::ColRef { id } = expr {
+                id
+            } else {
+                // create a new col_id for the expression
+                let col_id = self.col_id_gen.next();
+                agg_maps.push((col_id, expr));
+                col_id
+            };
+            agg_ops.append(&mut aggs);
+            projected_cols.push(col_id);
+            col_id
+        };
+        Ok((plan, col_id))
+    }
+
+    fn process_having(
+        &mut self,
+        mut plan: LogicalRelExpr,
+        having: &sqlparser::ast::Expr,
+        agg_ops: &mut Vec<(usize, (usize, AggOp))>,
+        agg_maps: &mut Vec<(usize, Expression<LogicalRelExpr>)>,
+    ) -> Result<(LogicalRelExpr, usize), TranslatorError> {
+        let mut aggs = Vec::new();
+        let res = self.process_aggregation_arguments(plan, having, &mut aggs);
+        plan = res.0;
+        let expr = res.1;
+        let col_id = if let Expression::ColRef { id } = expr {
+            id
+        } else {
+            // create a new col_id for the expression
+            let col_id = self.col_id_gen.next();
+            agg_maps.push((col_id, expr));
+            col_id
+        };
+        agg_ops.append(&mut aggs);
+        Ok((plan, col_id))
+    }
+
     fn process_projection(
         &mut self,
         mut plan: LogicalRelExpr,
@@ -439,8 +573,9 @@ impl Translator {
         distinct: &Option<sqlparser::ast::Distinct>,
     ) -> Result<LogicalRelExpr, TranslatorError> {
         let mut projected_cols = Vec::new();
-        let mut aggregations = Vec::new();
-        let mut maps = Vec::new();
+        let mut agg_ops = Vec::new();
+        let mut agg_maps = Vec::new();
+
         for item in projection {
             match item {
                 sqlparser::ast::SelectItem::Wildcard(_) => {
@@ -452,130 +587,25 @@ impl Translator {
                     projected_cols.extend(all_cols);
                 }
                 sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
-                    if !has_agg(expr) {
-                        match self.process_expr(expr, Some(0)) {
-                            Ok(expr) => {
-                                let col_id = if let Expression::ColRef { id } = expr {
-                                    id
-                                } else {
-                                    // create a new col_id for the expression
-                                    let col_id = self.col_id_gen.next();
-                                    plan = plan.map(
-                                        true,
-                                        &self.enabled_rules,
-                                        &self.col_id_gen,
-                                        [(col_id, expr)],
-                                    );
-                                    col_id
-                                };
-                                projected_cols.push(col_id);
-                            }
-                            Err(TranslatorError::ColumnNotFound(_)) => {
-                                // Search globally.
-                                let expr = self.process_expr(expr, None)?;
-                                // Add a map to the plan
-                                let col_id = self.col_id_gen.next();
-                                plan = plan.map(
-                                    true,
-                                    &self.enabled_rules,
-                                    &self.col_id_gen,
-                                    [(col_id, expr)],
-                                );
-                                projected_cols.push(col_id);
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    } else {
-                        // The most complicated case will be:
-                        // Agg(a + b) + Agg(c + d) + 4
-                        // if we ignore nested aggregation.
-                        //
-                        // In this case,
-                        // Level1: | map a + b to col_id1
-                        //         | map c + d to col_id2
-                        // Level2: |Agg(col_id1) to col_id3
-                        //         |Agg(col_id2) to col_id4
-                        // Level3: |map col_id3 + col_id4 + 4 to col_id5
-
-                        let mut aggs = Vec::new();
-                        let res = self.process_aggregation_arguments(plan, expr, &mut aggs);
-                        plan = res.0;
-                        let expr = res.1;
-                        let col_id = if let Expression::ColRef { id } = expr {
-                            id
-                        } else {
-                            // create a new col_id for the expression
-                            let col_id = self.col_id_gen.next();
-                            maps.push((col_id, expr));
-                            col_id
-                        };
-                        aggregations.append(&mut aggs);
-                        projected_cols.push(col_id);
-                    }
+                    let res = self.process_projection_col(
+                        plan,
+                        expr,
+                        &mut projected_cols,
+                        &mut agg_ops,
+                        &mut agg_maps,
+                    )?;
+                    plan = res.0;
                 }
                 sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
-                    // create a new col_id for the expression
-                    let col_id = if !has_agg(expr) {
-                        let col_id = match self.process_expr(expr, Some(0)) {
-                            Ok(expr) => {
-                                if let Expression::ColRef { id } = expr {
-                                    id
-                                } else {
-                                    let col_id = self.col_id_gen.next();
-                                    plan = plan.map(
-                                        true,
-                                        &self.enabled_rules,
-                                        &self.col_id_gen,
-                                        [(col_id, expr)],
-                                    );
-                                    col_id
-                                }
-                            }
-                            Err(TranslatorError::ColumnNotFound(_)) => {
-                                // Search globally.
-                                let expr = self.process_expr(expr, None)?;
-                                let col_id = self.col_id_gen.next();
-                                plan = plan.map(
-                                    true,
-                                    &self.enabled_rules,
-                                    &self.col_id_gen,
-                                    [(col_id, expr)],
-                                );
-                                col_id
-                            }
-                            Err(e) => return Err(e),
-                        };
-                        projected_cols.push(col_id);
-                        col_id
-                    } else {
-                        // The most complicated case will be:
-                        // Agg(a + b) + Agg(c + d) + 4
-                        // if we ignore nested aggregation.
-                        //
-                        // In this case,
-                        // Level1: | map a + b to col_id1
-                        //         | map c + d to col_id2
-                        // Level2: |Agg(col_id1) to col_id3
-                        //         |Agg(col_id2) to col_id4
-                        // Level3: |map col_id3 + col_id4 + 4 to col_id5
-
-                        let mut aggs = Vec::new();
-                        let res = self.process_aggregation_arguments(plan, expr, &mut aggs);
-                        plan = res.0;
-                        let expr = res.1;
-                        let col_id = if let Expression::ColRef { id } = expr {
-                            id
-                        } else {
-                            // create a new col_id for the expression
-                            let col_id = self.col_id_gen.next();
-                            maps.push((col_id, expr));
-                            col_id
-                        };
-                        aggregations.append(&mut aggs);
-                        projected_cols.push(col_id);
-                        col_id
-                    };
-
+                    let res = self.process_projection_col(
+                        plan,
+                        expr,
+                        &mut projected_cols,
+                        &mut agg_ops,
+                        &mut agg_maps,
+                    )?;
+                    plan = res.0;
+                    let col_id = res.1;
                     // Add the alias to the aliases map
                     let alias_name = alias.value.clone();
                     if is_valid_alias(&alias_name) {
@@ -598,44 +628,58 @@ impl Translator {
             }
         }
 
-        if !aggregations.is_empty() {
-            let group_by = match group_by {
-                sqlparser::ast::GroupByExpr::All => Err(translation_err!(
-                    UnsupportedSQL,
-                    "GROUP BY ALL is not supported"
-                ))?,
-                sqlparser::ast::GroupByExpr::Expressions(exprs) => {
-                    let mut group_by = Vec::new();
-                    for expr in exprs {
-                        let expr = self.process_expr(expr, None)?;
-                        let col_id = if let Expression::ColRef { id } = expr {
-                            id
-                        } else {
-                            // create a new col_id for the expression
-                            let col_id = self.col_id_gen.next();
-                            plan = plan.map(
-                                true,
-                                &self.enabled_rules,
-                                &self.col_id_gen,
-                                [(col_id, expr)],
-                            );
-                            col_id
-                        };
-                        group_by.push(col_id);
-                    }
-                    group_by
+        // Process aggregations
+        let mut having_predicates = Vec::new();
+        if let Some(h) = having {
+            let res = self.process_having(plan, h, &mut agg_ops, &mut agg_maps)?;
+            plan = res.0;
+            having_predicates.push(Expression::col_ref(res.1));
+        }
+        let group_by = match group_by {
+            sqlparser::ast::GroupByExpr::All => Err(translation_err!(
+                UnsupportedSQL,
+                "GROUP BY ALL is not supported"
+            ))?,
+            sqlparser::ast::GroupByExpr::Expressions(exprs) => {
+                let mut group_by = Vec::new();
+                for expr in exprs {
+                    let expr = self.process_expr(expr, None)?;
+                    let col_id = if let Expression::ColRef { id } = expr {
+                        id
+                    } else {
+                        // create a new col_id for the expression
+                        let col_id = self.col_id_gen.next();
+                        plan = plan.map(
+                            true,
+                            &self.enabled_rules,
+                            &self.col_id_gen,
+                            [(col_id, expr)],
+                        );
+                        col_id
+                    };
+                    group_by.push(col_id);
                 }
-            };
+                group_by
+            }
+        };
+        if !group_by.is_empty() || !agg_ops.is_empty() {
             plan = plan.aggregate(
                 true,
                 &self.enabled_rules,
                 &self.col_id_gen,
                 group_by,
-                aggregations,
+                agg_ops,
             );
-            plan = self.process_where(plan, having)?;
+            plan = plan.map(true, &self.enabled_rules, &self.col_id_gen, agg_maps);
         }
-        plan = plan.map(true, &self.enabled_rules, &self.col_id_gen, maps); // This map corresponds to the Level3 in the comment above
+        if !having_predicates.is_empty() {
+            plan = plan.select(
+                true,
+                &self.enabled_rules,
+                &self.col_id_gen,
+                having_predicates,
+            );
+        }
 
         let mut order_by_fields = Vec::new();
         for order_by_expr in order_by {
@@ -661,14 +705,7 @@ impl Translator {
             plan = plan.order_by(true, &self.enabled_rules, &self.col_id_gen, order_by_fields);
         }
 
-        plan = plan.project(
-            true,
-            &self.enabled_rules,
-            &self.col_id_gen,
-            projected_cols.clone(),
-        );
-        // Add another project to run optimization rules from the top
-        plan = plan.project(true, &self.enabled_rules, &self.col_id_gen, projected_cols);
+        plan = plan.o_project(true, &self.enabled_rules, &self.col_id_gen, projected_cols);
         Ok(plan)
     }
 
@@ -690,6 +727,17 @@ impl Translator {
                 unreachable!(
                     "Identifier and compound identifier should be processed in the Function branch"
                 )
+            }
+            sqlparser::ast::Expr::Subquery(query) => {
+                let mut translator = Translator::new_with_outer(
+                    self.db_id,
+                    &self.catalog_ref,
+                    &self.enabled_rules,
+                    &self.col_id_gen,
+                    &self.env,
+                );
+                let subquery = translator.process_query(query).unwrap();
+                (plan, Expression::subquery(subquery.plan))
             }
             sqlparser::ast::Expr::Value(_) | sqlparser::ast::Expr::TypedString { .. } => {
                 let expr = self.process_expr(expr, Some(0)).unwrap();
@@ -714,6 +762,16 @@ impl Translator {
                     _ => unimplemented!("Unsupported binary operator: {:?}", op),
                 };
                 (plan, Expression::binary(bin_op, left, right))
+            }
+            sqlparser::ast::Expr::Cast {
+                kind: _,
+                expr,
+                data_type,
+                format: _,
+            } => {
+                let (plan, expr) = self.process_aggregation_arguments(plan, expr, aggs);
+                let data_type = get_type(data_type);
+                (plan, Expression::cast(expr, data_type))
             }
             sqlparser::ast::Expr::Function(function) => {
                 let name = get_name(&function.name).to_uppercase();
@@ -956,7 +1014,7 @@ impl Translator {
                     [(col_id3, exists_expr)],
                 );
                 // Add project col 'count(*) > 0' to the subquery
-                plan = plan.project(
+                plan = plan.u_project(
                     true,
                     &translator.enabled_rules,
                     &translator.col_id_gen,
@@ -1024,7 +1082,7 @@ impl Translator {
                                     Expression::int(1),
                                 ),
                             ],
-                            else_expr: Box::new(Expression::int(0)),
+                            else_expr: Some(Box::new(Expression::int(0))),
                         };
                         plan = plan.map(
                             true,
@@ -1076,7 +1134,7 @@ impl Translator {
                                     },
                                 ),
                             ],
-                            else_expr: Box::new(Expression::bool(false)),
+                            else_expr: Some(Box::new(Expression::bool(false))),
                         };
                         let col_id5 = self.col_id_gen.next();
                         plan = plan
@@ -1086,7 +1144,7 @@ impl Translator {
                                 &self.col_id_gen,
                                 [(col_id5, case_expr2)],
                             )
-                            .project(
+                            .u_project(
                                 true,
                                 &self.enabled_rules,
                                 &self.col_id_gen,
@@ -1158,6 +1216,28 @@ impl Translator {
                     interval
                 )),
             },
+            sqlparser::ast::Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                let operand = match operand {
+                    Some(operand) => Some(self.process_expr(operand, distance)?),
+                    None => None,
+                };
+                let mut whens = Vec::with_capacity(conditions.len());
+                for (condition, result) in conditions.iter().zip(results.iter()) {
+                    let condition = self.process_expr(condition, distance)?;
+                    let result = self.process_expr(result, distance)?;
+                    whens.push((condition, result));
+                }
+                let else_result = match else_result {
+                    Some(expr) => Some(self.process_expr(expr, distance)?),
+                    None => None,
+                };
+                Ok(Expression::case(operand, whens, else_result))
+            }
             sqlparser::ast::Expr::Between {
                 expr,
                 negated,
@@ -1169,7 +1249,7 @@ impl Translator {
                 let high = self.process_expr(high, distance)?;
                 let between = expr.between(low, high);
                 if *negated {
-                    unimplemented!("Negated BETWEEN is not supported yet");
+                    Ok(between.not())
                 } else {
                     Ok(between)
                 }
@@ -1210,10 +1290,38 @@ impl Translator {
                         ));
                     }
                 }?;
+                let expr = expr.like(pattern, escape_char.clone());
                 if *negated {
-                    unimplemented!("Negation is not supported yet");
+                    Ok(expr.not())
                 } else {
-                    Ok(expr.like(pattern, escape_char.clone()))
+                    Ok(expr)
+                }
+            }
+            sqlparser::ast::Expr::Cast {
+                kind: _,
+                expr,
+                data_type,
+                format: _,
+            } => {
+                let expr = self.process_expr(expr, distance)?;
+                let data_type = get_type(data_type);
+                Ok(expr.cast(data_type))
+            }
+            sqlparser::ast::Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let expr = self.process_expr(expr, distance)?;
+                let list = list
+                    .iter()
+                    .map(|expr| self.process_expr(expr, distance))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let expr = expr.in_list(list);
+                if *negated {
+                    Ok(expr.not())
+                } else {
+                    Ok(expr)
                 }
             }
             other => Err(translation_err!(
@@ -1254,7 +1362,23 @@ fn has_agg(expr: &sqlparser::ast::Expr) -> bool {
         },
         Nested(expr) => has_agg(expr),
         Extract { .. } => false,
+        Cast { expr, .. } => has_agg(expr),
         _ => unimplemented!("Unsupported expression: {:?}", expr),
+    }
+}
+
+fn get_type(d_type: &sqlparser::ast::DataType) -> DataType {
+    match d_type {
+        sqlparser::ast::DataType::Int(_)
+        | sqlparser::ast::DataType::SmallInt(_)
+        | sqlparser::ast::DataType::BigInt(_) => DataType::Int,
+        sqlparser::ast::DataType::Double | sqlparser::ast::DataType::Decimal(_) => DataType::Float,
+        sqlparser::ast::DataType::Char(_)
+        | sqlparser::ast::DataType::Varchar(_)
+        | sqlparser::ast::DataType::Text => DataType::String,
+        sqlparser::ast::DataType::Date => DataType::Date,
+        sqlparser::ast::DataType::Boolean => DataType::Boolean,
+        _ => unimplemented!("Unsupported data type: {:?}", d_type),
     }
 }
 

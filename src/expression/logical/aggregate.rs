@@ -24,7 +24,12 @@ impl LogicalRelExpr {
             for (_, (src, _)) in &aggrs {
                 src_cols.push(*src);
             }
-            let plan = self.project(true, enabled_rules, col_id_gen, src_cols);
+            let plan = self.u_project(
+                true,
+                enabled_rules,
+                col_id_gen,
+                src_cols.into_iter().collect(),
+            );
             LogicalRelExpr::Aggregate {
                 src: Box::new(plan),
                 group_by,

@@ -675,6 +675,16 @@ mod tests {
     }
 
     #[test]
+    fn test_groupby_aggregate_having() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name HAVING AVG(e.age) > 30";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![Tuple::from_fields(vec!["HR".into(), 32.5.into()])];
+        check_result(&mut result, &mut expected, false);
+    }
+
+    #[test]
     fn test_subquery() {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());

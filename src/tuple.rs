@@ -326,37 +326,45 @@ impl PartialEq for Field {
     }
 }
 
+// Two null values comparison returns None. To check if a field is null, use Field::is_null().
 impl PartialOrd for Field {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
-            (Field::Boolean(val1), Field::Boolean(val2)) => val1.partial_cmp(val2),
-            (Field::Int(val1), Field::Int(val2)) => val1.partial_cmp(val2),
-            (Field::Float(val1), Field::Float(val2)) => val1.partial_cmp(val2),
-            (Field::String(val1), Field::String(val2)) => val1.partial_cmp(val2),
-            (Field::Date(val1), Field::Date(val2)) => val1.partial_cmp(val2),
-            (Field::Int(val1), Field::Float(val2)) => {
-                if let (Some(val1), Some(val2)) = (val1, val2) {
-                    (*val1 as f64).partial_cmp(&val2)
-                } else {
-                    None
-                }
+            (Field::Boolean(val1), Field::Boolean(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+            (Field::Int(val1), Field::Int(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+            (Field::Float(val1), Field::Float(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| v1.partial_cmp(v2))),
+            (Field::String(val1), Field::String(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+            (Field::Date(val1), Field::Date(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+            (Field::Int(val1), Field::Float(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| (*v1 as f64).partial_cmp(v2))),
+            (Field::Float(val1), Field::Int(val2)) => val1
+                .as_ref()
+                .and_then(|v1| val2.as_ref().and_then(|v2| v1.partial_cmp(&(*v2 as f64)))),
+            _ => {
+                panic!("Cannot compare different types")
             }
-            (Field::Float(val1), Field::Int(val2)) => {
-                if let (Some(val1), Some(val2)) = (val1, val2) {
-                    val1.partial_cmp(&(*val2 as f64))
-                } else {
-                    None
-                }
-            }
-            _ => None,
         }
     }
 }
 
 impl Eq for Field {}
+
+// Ord is only used for sorting tuples when testing. Two null values are equal. Null values are the smallest in the ordering.
 impl Ord for Field {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
+            (x, y) if x.is_null() && y.is_null() => std::cmp::Ordering::Equal,
             (Field::Boolean(val1), Field::Boolean(val2)) => val1.cmp(val2),
             (Field::Int(val1), Field::Int(val2)) => val1.cmp(val2),
             (Field::Float(val1), Field::Float(val2)) => val1.partial_cmp(val2).unwrap(),
@@ -498,6 +506,67 @@ impl Field {
             _ => Err(ExecError::FieldOp("Field is not a date".to_string())),
         }
     }
+
+    pub fn cast(&self, to_type: &DataType) -> Result<Field, ExecError> {
+        match (self, to_type) {
+            (Field::Boolean(val), DataType::Boolean) => Ok(Field::Boolean(*val)),
+            (Field::Int(val), DataType::Int) => Ok(Field::Int(*val)),
+            (Field::Float(val), DataType::Float) => Ok(Field::Float(*val)),
+            (Field::String(val), DataType::String) => Ok(Field::String(val.clone())),
+            (Field::Date(val), DataType::Date) => Ok(Field::Date(*val)),
+            (Field::Months(val), DataType::Months) => Ok(Field::Months(*val)),
+            (Field::Days(val), DataType::Days) => Ok(Field::Days(*val)),
+            (Field::Int(val), DataType::Float) => Ok(Field::Float(val.map(|v| v as f64))),
+            (Field::Float(val), DataType::Int) => Ok(Field::Int(val.map(|v| v as i64))),
+            (Field::String(val), DataType::Int) => {
+                let val = val.as_ref().and_then(|v| v.parse::<i64>().ok());
+                Ok(Field::Int(val))
+            }
+            (Field::String(val), DataType::Float) => {
+                let val = val.as_ref().and_then(|v| v.parse::<f64>().ok());
+                Ok(Field::Float(val))
+            }
+            (Field::String(val), DataType::Date) => {
+                let val = val
+                    .as_ref()
+                    .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok());
+                Ok(Field::Date(val))
+            }
+            (Field::String(val), DataType::Months) => {
+                let val = val.as_ref().and_then(|v| v.parse::<u32>().ok());
+                Ok(Field::Months(val))
+            }
+            (Field::String(val), DataType::Days) => {
+                let val = val.as_ref().and_then(|v| v.parse::<u64>().ok());
+                Ok(Field::Days(val))
+            }
+            (Field::Int(value), DataType::String) => {
+                Ok(Field::String(value.map(|v| v.to_string())))
+            }
+            (Field::Float(value), DataType::String) => {
+                Ok(Field::String(value.map(|v| v.to_string())))
+            }
+            (Field::Date(value), DataType::String) => {
+                Ok(Field::String(value.map(|v| v.to_string())))
+            }
+            (Field::Months(value), DataType::String) => {
+                Ok(Field::String(value.map(|v| v.to_string())))
+            }
+            (Field::Days(value), DataType::String) => {
+                Ok(Field::String(value.map(|v| v.to_string())))
+            }
+            (Field::Int(value), DataType::Boolean) => Ok(Field::Boolean(value.map(|v| v != 0))),
+            // Othercases, return None with the DataType
+            (_, DataType::Boolean) => Ok(Field::Boolean(None)),
+            (_, DataType::Int) => Ok(Field::Int(None)),
+            (_, DataType::Float) => Ok(Field::Float(None)),
+            (_, DataType::String) => Ok(Field::String(None)),
+            (_, DataType::Date) => Ok(Field::Date(None)),
+            (_, DataType::Months) => Ok(Field::Months(None)),
+            (_, DataType::Days) => Ok(Field::Days(None)),
+            (_, DataType::Unknown) => Err(ExecError::FieldOp("Unknown data type".to_string())),
+        }
+    }
 }
 
 impl std::fmt::Display for Field {
@@ -526,11 +595,11 @@ impl std::fmt::Display for Field {
                 None => write!(f, "NULL"),
             },
             Field::Months(val) => match val {
-                Some(val) => write!(f, "{}", val),
+                Some(val) => write!(f, "{}M", val),
                 None => write!(f, "NULL"),
             },
             Field::Days(val) => match val {
-                Some(val) => write!(f, "{}", val),
+                Some(val) => write!(f, "{}D", val),
                 None => write!(f, "NULL"),
             },
         }

@@ -1,7 +1,7 @@
 mod logical;
 mod physical;
 
-use crate::tuple::Field;
+use crate::{prelude::DataType, tuple::Field};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -145,7 +145,7 @@ pub enum Expression<P: PlanTrait> {
     Case {
         expr: Option<Box<Expression<P>>>,
         whens: Vec<(Expression<P>, Expression<P>)>,
-        else_expr: Box<Expression<P>>,
+        else_expr: Option<Box<Expression<P>>>,
     },
     Extract {
         field: DateField,
@@ -155,6 +155,17 @@ pub enum Expression<P: PlanTrait> {
         expr: Box<Expression<P>>,
         pattern: String,
         escape: Option<String>,
+    },
+    Cast {
+        expr: Box<Expression<P>>,
+        to_type: DataType,
+    },
+    InList {
+        expr: Box<Expression<P>>,
+        list: Vec<Expression<P>>,
+    },
+    Not {
+        expr: Box<Expression<P>>,
     },
     Subquery {
         expr: Box<P>,
@@ -258,6 +269,38 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn case(
+        expr: Option<Expression<P>>,
+        whens: Vec<(Expression<P>, Expression<P>)>,
+        else_expr: Option<Expression<P>>,
+    ) -> Expression<P> {
+        Expression::Case {
+            expr: expr.map(Box::new),
+            whens,
+            else_expr: else_expr.map(Box::new),
+        }
+    }
+
+    pub fn cast(self, to_type: DataType) -> Expression<P> {
+        Expression::Cast {
+            expr: Box::new(self),
+            to_type,
+        }
+    }
+
+    pub fn in_list(self, list: Vec<Expression<P>>) -> Expression<P> {
+        Expression::InList {
+            expr: Box::new(self),
+            list,
+        }
+    }
+
+    pub fn not(self) -> Expression<P> {
+        Expression::Not {
+            expr: Box::new(self),
+        }
+    }
+
     pub fn eq(self, other: Expression<P>) -> Expression<P> {
         Expression::Binary {
             op: BinaryOp::Eq,
@@ -303,7 +346,7 @@ impl<P: PlanTrait> Expression<P> {
                     || whens
                         .iter()
                         .any(|(when, then)| when.has_subquery() || then.has_subquery())
-                    || else_expr.has_subquery()
+                    || else_expr.as_ref().map_or(false, |expr| expr.has_subquery())
             }
             Expression::Between { expr, lower, upper } => {
                 expr.has_subquery() || lower.has_subquery() || upper.has_subquery()
@@ -314,6 +357,11 @@ impl<P: PlanTrait> Expression<P> {
                 pattern,
                 escape,
             } => expr.has_subquery(),
+            Expression::Cast { expr, to_type } => expr.has_subquery(),
+            Expression::InList { expr, list } => {
+                expr.has_subquery() || list.iter().any(|expr| expr.has_subquery())
+            }
+            Expression::Not { expr } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
         }
     }
@@ -383,7 +431,7 @@ impl<P: PlanTrait> Expression<P> {
                         )
                     })
                     .collect(),
-                else_expr: Box::new(else_expr.replace_variables(src_to_dest)),
+                else_expr: else_expr.map(|expr| Box::new(expr.replace_variables(src_to_dest))),
             },
             Expression::Between { expr, lower, upper } => Expression::Between {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
@@ -402,6 +450,21 @@ impl<P: PlanTrait> Expression<P> {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
                 pattern,
                 escape,
+            },
+            Expression::Cast { expr, to_type } => Expression::Cast {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+                to_type,
+            },
+            Expression::InList { expr, list } => {
+                let expr = Box::new(expr.replace_variables(src_to_dest));
+                let list = list
+                    .into_iter()
+                    .map(|expr| expr.replace_variables(src_to_dest))
+                    .collect();
+                Expression::InList { expr, list }
+            }
+            Expression::Not { expr } => Expression::Not {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
@@ -450,7 +513,8 @@ impl<P: PlanTrait> Expression<P> {
                         )
                     })
                     .collect(),
-                else_expr: Box::new(else_expr.replace_variables_with_exprs(src_to_dest)),
+                else_expr: else_expr
+                    .map(|expr| Box::new(expr.replace_variables_with_exprs(src_to_dest))),
             },
             Expression::Between { expr, lower, upper } => Expression::Between {
                 expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
@@ -469,6 +533,21 @@ impl<P: PlanTrait> Expression<P> {
                 expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
                 pattern,
                 escape,
+            },
+            Expression::Cast { expr, to_type } => Expression::Cast {
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+                to_type,
+            },
+            Expression::InList { expr, list } => {
+                let expr = Box::new(expr.replace_variables_with_exprs(src_to_dest));
+                let list = list
+                    .into_iter()
+                    .map(|expr| expr.replace_variables_with_exprs(src_to_dest))
+                    .collect();
+                Expression::InList { expr, list }
+            }
+            Expression::Not { expr } => Expression::Not {
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 // Do nothing for subquery
@@ -518,9 +597,10 @@ impl<P: PlanTrait> Expression<P> {
                     out.push_str(" then ");
                     then.print_inner(indent, out);
                 }
-                out.push_str(" else ");
-                else_expr.print_inner(indent, out);
-                out.push_str(" end");
+                else_expr.as_ref().map(|expr| {
+                    out.push_str(" else ");
+                    expr.print_inner(indent, out);
+                });
             }
             Expression::Between { expr, lower, upper } => {
                 expr.print_inner(indent, out);
@@ -544,6 +624,26 @@ impl<P: PlanTrait> Expression<P> {
                 if let Some(escape) = escape {
                     out.push_str(&format!(" escape '{}'", escape));
                 }
+            }
+            Expression::Cast { expr, to_type } => {
+                out.push_str(&format!("cast("));
+                expr.print_inner(indent, out);
+                out.push_str(&format!(" as {:?})", to_type));
+            }
+            Expression::InList { expr, list } => {
+                expr.print_inner(indent, out);
+                out.push_str(" in (");
+                for (i, expr) in list.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    expr.print_inner(indent, out);
+                }
+                out.push_str(")");
+            }
+            Expression::Not { expr } => {
+                out.push_str("not ");
+                expr.print_inner(indent, out);
             }
             Expression::Subquery { expr } => {
                 out.push_str(&format!("λ.{:?}(\n", expr.free()));
@@ -594,7 +694,11 @@ impl<P: PlanTrait> Expression<P> {
                     set.extend(when.free());
                     set.extend(then.free());
                 }
-                set.extend(else_expr.free());
+                set.extend(
+                    else_expr
+                        .as_ref()
+                        .map_or(HashSet::new(), |expr| expr.free()),
+                );
                 set
             }
             Expression::Between { expr, lower, upper } => {
@@ -605,6 +709,15 @@ impl<P: PlanTrait> Expression<P> {
             }
             Expression::Extract { expr, .. } => expr.free(),
             Expression::Like { expr, .. } => expr.free(),
+            Expression::Cast { expr, .. } => expr.free(),
+            Expression::InList { expr, list } => {
+                let mut set = expr.free();
+                for expr in list {
+                    set.extend(expr.free());
+                }
+                set
+            }
+            Expression::Not { expr } => expr.free(),
             Expression::Subquery { expr } => expr.free(),
         }
     }

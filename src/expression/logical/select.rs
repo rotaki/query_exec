@@ -43,7 +43,7 @@ impl LogicalRelExpr {
                         "Selection referencing non-projected columns"
                     );
                     src.select(true, enabled_rules, col_id_gen, push_down)
-                        .project(false, enabled_rules, col_id_gen, cols)
+                        .u_project(false, enabled_rules, col_id_gen, cols.into_iter().collect())
                 }
                 LogicalRelExpr::Join {
                     join_type,

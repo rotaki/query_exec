@@ -41,12 +41,12 @@ impl LogicalRelExpr {
     // -------------------------------------------
     //              /                   \
     // ---------------------------     -----------
-    // |  Join (@lhs_id <- 4)    |     | @3 + @1 |
+    // |  Map  (@lhs_id <- 4)    |     | @3 + @1 |
     // ---------------------------     -----------
-    //          /         \
-    // ----------------
-    // |  Scan @1, @2 |     4
-    // ----------------
+    //              |
+    // ---------------------------
+    // |  Scan @1, @2            |
+    // ---------------------------
 
     /// Try to make a subquery into a flatmap
     pub(crate) fn hoist(
@@ -71,7 +71,9 @@ impl LogicalRelExpr {
                     col_id_gen,
                     vec![(id, Expression::col_ref(*input_col_id))],
                 );
-                self.flatmap(true, enabled_rules, col_id_gen, rhs)
+
+                let plan = self.flatmap(true, enabled_rules, col_id_gen, rhs);
+                plan
             }
             Expression::Binary { op, left, right } => {
                 // Hoist the left, hoist the right, then perform the binary operation
@@ -93,7 +95,7 @@ impl LogicalRelExpr {
                             },
                         )],
                     )
-                    .project(
+                    .u_project(
                         true,
                         enabled_rules,
                         col_id_gen,
@@ -118,7 +120,7 @@ impl LogicalRelExpr {
                             },
                         )],
                     )
-                    .project(
+                    .u_project(
                         true,
                         enabled_rules,
                         col_id_gen,
@@ -149,7 +151,7 @@ impl LogicalRelExpr {
                             },
                         )],
                     )
-                    .project(
+                    .u_project(
                         true,
                         enabled_rules,
                         col_id_gen,
@@ -172,7 +174,7 @@ impl LogicalRelExpr {
                             },
                         )],
                     )
-                    .project(
+                    .u_project(
                         true,
                         enabled_rules,
                         col_id_gen,
@@ -200,7 +202,81 @@ impl LogicalRelExpr {
                             },
                         )],
                     )
-                    .project(
+                    .u_project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    )
+            }
+            Expression::Cast { expr, to_type } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                self.hoist(enabled_rules, col_id_gen, expr_id, *expr)
+                    .map(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        [(
+                            id,
+                            Expression::Cast {
+                                expr: Box::new(Expression::col_ref(expr_id)),
+                                to_type,
+                            },
+                        )],
+                    )
+                    .u_project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    )
+            }
+            Expression::InList { expr, list } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                let mut plan = self.hoist(enabled_rules, col_id_gen, id, *expr);
+                let mut list_ids = Vec::with_capacity(list.len());
+                for l in list {
+                    let l_id = col_id_gen.next();
+                    plan = plan.hoist(enabled_rules, col_id_gen, l_id, l);
+                    list_ids.push(l_id);
+                }
+                plan.map(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    [(
+                        id,
+                        Expression::InList {
+                            expr: Box::new(Expression::col_ref(expr_id)),
+                            list: list_ids.into_iter().map(Expression::col_ref).collect(),
+                        },
+                    )],
+                )
+                .u_project(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    att.into_iter().chain([id].into_iter()).collect(),
+                )
+            }
+            Expression::Not { expr } => {
+                let att = self.att();
+                let expr_id = col_id_gen.next();
+                self.hoist(enabled_rules, col_id_gen, expr_id, *expr)
+                    .map(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        [(
+                            id,
+                            Expression::Not {
+                                expr: Box::new(Expression::col_ref(expr_id)),
+                            },
+                        )],
+                    )
+                    .u_project(
                         true,
                         enabled_rules,
                         col_id_gen,
