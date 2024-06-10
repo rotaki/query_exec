@@ -774,6 +774,11 @@ impl LogicalToPhysicalExpression {
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },
+            Expression::UncorrelatedAny { left, comp, right } => Expression::UncorrelatedAny {
+                left: Box::new(self.to_physical(left)),
+                comp: *comp,
+                right: Box::new(LogicalToPhysicalRelExpr.to_physical(right.as_ref().clone())),
+            },
         }
     }
 }

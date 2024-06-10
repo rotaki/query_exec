@@ -49,6 +49,8 @@ impl LogicalRelExpr {
     // ---------------------------
 
     /// Try to make a subquery into a flatmap
+    /// Similar to map, hoist just appends (id, expr) to the tuple fields.
+    /// The difference is that hoist will try to convert the subquery into a flatmap.
     pub(crate) fn hoist(
         self,
         enabled_rules: &HeuristicRulesRef,
@@ -57,6 +59,34 @@ impl LogicalRelExpr {
         expr: Expression<LogicalRelExpr>,
     ) -> LogicalRelExpr {
         match expr {
+            Expression::UncorrelatedAny { left, comp, right } => {
+                let att = self.att();
+                let left_id = col_id_gen.next();
+                let right_att = right.att();
+                if right_att.len() != 1 {
+                    panic!("Subquery has more than one column");
+                }
+                let right_id = *right_att.iter().next().unwrap();
+                self.hoist(enabled_rules, col_id_gen, left_id, *left) // Evaluate left
+                    .join(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        JoinType::LeftMarkJoin(id),
+                        *right,
+                        vec![Expression::Binary {
+                            op: comp,
+                            left: Box::new(Expression::col_ref(left_id)),
+                            right: Box::new(Expression::col_ref(right_id)),
+                        }],
+                    ) // Mark join left and right and put the result in id
+                    .u_project(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        att.into_iter().chain([id].into_iter()).collect(),
+                    ) // Project the att and id
+            }
             Expression::Subquery { expr } => {
                 let att = expr.att();
                 assert!(att.len() == 1);

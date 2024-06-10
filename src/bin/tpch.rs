@@ -9,7 +9,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 #[clap(name = "TPC-H", about = "TPC-H Benchmarks.")]
 pub struct TpchOpt {
     /// Query ID. Should be in range [1, 22].
-    #[clap(short = 'q', long = "query", default_value = "21")]
+    #[clap(short = 'q', long = "query", default_value = "20")]
     pub query_id: usize,
     /// Scale factor. Should be in range [0.01, 100].
     #[clap(short = 's', long = "scale factor", default_value = "0.01")]

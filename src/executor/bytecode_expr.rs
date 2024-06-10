@@ -667,6 +667,8 @@ fn is_like(field: &str, pattern: &str, escape_str: &Option<String>) -> bool {
     }
     // Convert SQL LIKE pattern to Rust regex pattern
     let mut regex_pattern = String::new();
+    // Add a ^ to match the start of the string
+    regex_pattern.push('^');
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -941,7 +943,7 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
             convert_expr_to_bytecode(expr, bytecode_expr)?;
             bytecode_expr.add_code(ByteCodes::Not as usize);
         }
-        Expression::Subquery { .. } => {
+        Expression::Subquery { .. } | Expression::UncorrelatedAny { .. } => {
             unimplemented!("Subquery not supported in bytecode")
         }
     }
@@ -1329,12 +1331,12 @@ mod tests {
         // No match
         let expr = Expression::<PhysicalRelExpr>::Like {
             expr: Box::new(Expression::ColRef { id: 0 }),
-            pattern: "world".to_string(),
+            pattern: "world%".to_string(),
             escape: None,
         };
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
-        assert_eq!(result, Field::from_bool(true));
+        assert_eq!(result, Field::from_bool(false));
 
         // Empty pattern
         let expr = Expression::<PhysicalRelExpr>::Like {

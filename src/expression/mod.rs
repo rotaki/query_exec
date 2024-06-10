@@ -191,6 +191,11 @@ pub enum Expression<P: PlanTrait> {
     Subquery {
         expr: Box<P>,
     },
+    UncorrelatedAny {
+        left: Box<Expression<P>>,
+        comp: BinaryOp,
+        right: Box<P>,
+    },
 }
 
 impl<P: PlanTrait> Expression<P> {
@@ -344,6 +349,14 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn uncorrelated_any(left: Expression<P>, comp: BinaryOp, right: P) -> Expression<P> {
+        Expression::UncorrelatedAny {
+            left: Box::new(left),
+            comp,
+            right: Box::new(right),
+        }
+    }
+
     pub fn between(self, lower: Expression<P>, upper: Expression<P>) -> Expression<P> {
         Expression::Between {
             expr: Box::new(self),
@@ -384,6 +397,7 @@ impl<P: PlanTrait> Expression<P> {
             }
             Expression::Not { expr } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
+            Expression::UncorrelatedAny { left, comp, right } => true,
         }
     }
 
@@ -490,6 +504,11 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
+            Expression::UncorrelatedAny { left, comp, right } => Expression::UncorrelatedAny {
+                left: Box::new(left.replace_variables(src_to_dest)),
+                comp,
+                right: Box::new(right.replace_variables(src_to_dest)),
+            },
         }
     }
 
@@ -573,6 +592,11 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Subquery { expr } => Expression::Subquery {
                 // Do nothing for subquery
                 expr,
+            },
+            Expression::UncorrelatedAny { left, comp, right } => Expression::UncorrelatedAny {
+                left: Box::new(left.replace_variables_with_exprs(src_to_dest)),
+                comp,
+                right, // Do nothing for subquery
             },
         }
     }
@@ -671,6 +695,12 @@ impl<P: PlanTrait> Expression<P> {
                 expr.print_inner(indent + 6, out);
                 out.push_str(&format!("{})", " ".repeat(indent + 4)));
             }
+            Expression::UncorrelatedAny { left, comp, right } => {
+                left.print_inner(indent, out);
+                out.push_str(&format!(" {} uncorrelated any (", comp));
+                right.print_inner(indent, out);
+                out.push_str(")");
+            }
         }
     }
 }
@@ -740,6 +770,11 @@ impl<P: PlanTrait> Expression<P> {
             }
             Expression::Not { expr } => expr.free(),
             Expression::Subquery { expr } => expr.free(),
+            Expression::UncorrelatedAny { left, right, .. } => {
+                let mut set = left.free();
+                set.extend(right.free());
+                set
+            }
         }
     }
 

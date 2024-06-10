@@ -19,11 +19,12 @@
   * [x] Q13
   * [x] Q14
   * [ ] Q15 (Create view)
-  * [?] Q16 (Partially done. Without markjoin, n^3 complexity)
+  * [x] Q16 (Mark join)
   * [x] Q17
-  * [?] Q18 (Partially done. Without markjoin, n^3 complexity)
+  * [x] Q18 (Mark join)
   * [x] Q19 (Expanding OR causes super complicated filter predicates)
-  * [?] Q20 (Partially done. Without markjoin, n^3 complexity)
+  * [x] Q20 (Mark join)
   * [ ] Q21 (Semi-join for uncorrelated exists)
   * [ ] Q22 (Substring)
 * [] Remove unnecessary projections in the query plan
+* [] Convert mark join to semi-join or anti-join if possible

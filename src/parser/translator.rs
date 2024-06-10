@@ -1075,10 +1075,12 @@ impl Translator {
             }
             sqlparser::ast::Expr::Nested(expr) => self.process_expr(expr, distance),
             sqlparser::ast::Expr::Interval(interval) => match interval.leading_field {
-                Some(sqlparser::ast::DateTimeField::Month) => {
-                    let months = match &*interval.value {
+                Some(sqlparser::ast::DateTimeField::Day)
+                | Some(sqlparser::ast::DateTimeField::Month)
+                | Some(sqlparser::ast::DateTimeField::Year) => {
+                    let val = match &*interval.value {
                         sqlparser::ast::Expr::Value(val) => match val {
-                            sqlparser::ast::Value::Number(s, _) => s.parse::<i32>().map_err(|e| {
+                            sqlparser::ast::Value::Number(s, _) => s.parse::<i64>().map_err(|e| {
                                 translation_err!(
                                     InvalidSQL,
                                     "Failed to parse number from string {}, error: {}",
@@ -1087,7 +1089,7 @@ impl Translator {
                                 )
                             }),
                             sqlparser::ast::Value::SingleQuotedString(s) => {
-                                s.parse::<i32>().map_err(|e| {
+                                s.parse::<i64>().map_err(|e| {
                                     translation_err!(
                                         InvalidSQL,
                                         "Failed to parse number from string {}, error: {}",
@@ -1108,7 +1110,18 @@ impl Translator {
                             other
                         )),
                     }?;
-                    Ok(Expression::months(months as u32))
+                    match interval.leading_field {
+                        Some(sqlparser::ast::DateTimeField::Day) => {
+                            Ok(Expression::days(val as u64))
+                        }
+                        Some(sqlparser::ast::DateTimeField::Month) => {
+                            Ok(Expression::months(val as u32))
+                        }
+                        Some(sqlparser::ast::DateTimeField::Year) => {
+                            Ok(Expression::months(val as u32 * 12))
+                        }
+                        _ => unreachable!(),
+                    }
                 }
                 _ => Err(translation_err!(
                     InvalidSQL,
@@ -1304,117 +1317,133 @@ fn process_any(
     };
     match right {
         Expression::Subquery { expr } => {
-            let mut plan = *expr;
-            let att = plan.att();
-            if att.len() != 1 {
-                panic!("Subquery in ANY should return only one column")
+            if expr.free().is_empty() {
+                // Uncorrelated any subquery. Will be converted to a mark join
+                // by hoisting
+                Ok(Expression::uncorrelated_any(left, bin_op, *expr))
+            } else {
+                // Correlated any subquery
+                process_correlated_any(translator, left, bin_op, *expr)
             }
-            let col_id = att.iter().next().unwrap();
-            // left bin_op ANY (right) is translated to:
-            // 1. If right contains NULL, then match TRUE else NULL
-            // 2. If right does not contain NULL, then match TRUE else FALSE
-            // 3. If right returns 0 rows, then FALSE even if left row is NULL
-            //
-            // We compute this by taking the aggregate of the subquery to compute
-            // the number of rows and if there is any NULL in left or right rows.
-            //
-            // Super dirty hack to deal with ANY subquery without introducing a new join rule (mark join)
-            // First, we append two columns to the result of the subquery
-            // Expression::int(1) and the result of the case when operation
-            //
-            let col_id0 = translator.col_id_gen.next();
-            let col_id1 = translator.col_id_gen.next();
-            // Case when col is NULL then MIN_INT/2 (Large negative number)
-            //      when left is NULL then MIN_INT/4 (Second large negative number)
-            //      when (left bin_op col) then 1
-            //      else 0
-            let case_expr1 = Expression::Case {
-                expr: None,
-                whens: vec![
-                    (
-                        Expression::col_ref(*col_id).is_null(),
-                        Expression::int(i64::MIN / 2),
-                    ),
-                    (left.clone().is_null(), Expression::int(i64::MIN / 4)),
-                    (
-                        Expression::binary(bin_op, left, Expression::col_ref(*col_id)),
-                        Expression::int(1),
-                    ),
-                ],
-                else_expr: Some(Box::new(Expression::int(0))),
-            };
-            plan = plan.map(
-                true,
-                &translator.enabled_rules,
-                &translator.col_id_gen,
-                [(col_id0, Expression::int(1)), (col_id1, case_expr1)],
-            );
-            // Take the count, max, min of the columns
-            let col_id2 = translator.col_id_gen.next();
-            let col_id3 = translator.col_id_gen.next();
-            let col_id4 = translator.col_id_gen.next();
-            plan = plan.aggregate(
-                true,
-                &translator.enabled_rules,
-                &translator.col_id_gen,
-                vec![],
-                vec![
-                    (col_id2, (col_id0, AggOp::Count)),
-                    (col_id3, (col_id1, AggOp::Max)),
-                    (col_id4, (col_id1, AggOp::Min)),
-                ],
-            );
-            // Case when count(1) == 0 then FALSE
-            //      when max == 1 then TRUE
-            //      when min == MIN_INT/2 then NULL
-            //      when min == MIN_INT/4 then NULL
-            //      else FALSE
-            let case_expr2 = Expression::Case {
-                expr: None,
-                whens: vec![
-                    (
-                        Expression::col_ref(col_id2).eq(Expression::int(0)),
-                        Expression::bool(false),
-                    ),
-                    (
-                        Expression::col_ref(col_id3).eq(Expression::int(1)),
-                        Expression::bool(true),
-                    ),
-                    (
-                        Expression::col_ref(col_id4).eq(Expression::int(i64::MIN / 2)),
-                        Expression::Field {
-                            val: Field::Boolean(None),
-                        },
-                    ),
-                    (
-                        Expression::col_ref(col_id4).eq(Expression::int(i64::MIN / 4)),
-                        Expression::Field {
-                            val: Field::Boolean(None),
-                        },
-                    ),
-                ],
-                else_expr: Some(Box::new(Expression::bool(false))),
-            };
-            let col_id5 = translator.col_id_gen.next();
-            plan = plan
-                .map(
-                    true,
-                    &translator.enabled_rules,
-                    &translator.col_id_gen,
-                    [(col_id5, case_expr2)],
-                )
-                .u_project(
-                    true,
-                    &translator.enabled_rules,
-                    &translator.col_id_gen,
-                    [col_id5].into_iter().collect(),
-                );
-            Ok(Expression::subquery(plan))
         }
         _ => {
             unimplemented!("AnyOp should have a subquery on the right side")
         }
     }
+}
+
+fn process_correlated_any(
+    translator: &Translator,
+    left: Expression<LogicalRelExpr>,
+    bin_op: BinaryOp,
+    right: LogicalRelExpr,
+) -> Result<Expression<LogicalRelExpr>, TranslatorError> {
+    let mut plan = right;
+    let att = plan.att();
+    if att.len() != 1 {
+        panic!("Subquery in ANY should return only one column")
+    }
+    let col_id = att.iter().next().unwrap();
+    // left bin_op ANY (right) is translated to:
+    // 1. If right contains NULL, then match TRUE else NULL
+    // 2. If right does not contain NULL, then match TRUE else FALSE
+    // 3. If right returns 0 rows, then FALSE even if left row is NULL
+    //
+    // We compute this by taking the aggregate of the subquery to compute
+    // the number of rows and if there is any NULL in left or right rows.
+    //
+    // Super dirty hack to deal with ANY subquery without introducing a new join rule (mark join)
+    // First, we append two columns to the result of the subquery
+    // Expression::int(1) and the result of the case when operation
+    //
+    let col_id0 = translator.col_id_gen.next();
+    let col_id1 = translator.col_id_gen.next();
+    // Case when col is NULL then MIN_INT/2 (Large negative number)
+    //      when left is NULL then MIN_INT/4 (Second large negative number)
+    //      when (left bin_op col) then 1
+    //      else 0
+    let case_expr1 = Expression::Case {
+        expr: None,
+        whens: vec![
+            (
+                Expression::col_ref(*col_id).is_null(),
+                Expression::int(i64::MIN / 2),
+            ),
+            (left.clone().is_null(), Expression::int(i64::MIN / 4)),
+            (
+                Expression::binary(bin_op, left, Expression::col_ref(*col_id)),
+                Expression::int(1),
+            ),
+        ],
+        else_expr: Some(Box::new(Expression::int(0))),
+    };
+    plan = plan.map(
+        true,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        [(col_id0, Expression::int(1)), (col_id1, case_expr1)],
+    );
+    // Take the count, max, min of the columns
+    let col_id2 = translator.col_id_gen.next();
+    let col_id3 = translator.col_id_gen.next();
+    let col_id4 = translator.col_id_gen.next();
+    plan = plan.aggregate(
+        true,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        vec![],
+        vec![
+            (col_id2, (col_id0, AggOp::Count)),
+            (col_id3, (col_id1, AggOp::Max)),
+            (col_id4, (col_id1, AggOp::Min)),
+        ],
+    );
+    // Case when count(1) == 0 then FALSE
+    //      when max == 1 then TRUE
+    //      when min == MIN_INT/2 then NULL
+    //      when min == MIN_INT/4 then NULL
+    //      else FALSE
+    let case_expr2 = Expression::Case {
+        expr: None,
+        whens: vec![
+            (
+                Expression::col_ref(col_id2).eq(Expression::int(0)),
+                Expression::bool(false),
+            ),
+            (
+                Expression::col_ref(col_id3).eq(Expression::int(1)),
+                Expression::bool(true),
+            ),
+            (
+                Expression::col_ref(col_id4).eq(Expression::int(i64::MIN / 2)),
+                Expression::Field {
+                    val: Field::Boolean(None),
+                },
+            ),
+            (
+                Expression::col_ref(col_id4).eq(Expression::int(i64::MIN / 4)),
+                Expression::Field {
+                    val: Field::Boolean(None),
+                },
+            ),
+        ],
+        else_expr: Some(Box::new(Expression::bool(false))),
+    };
+    let col_id5 = translator.col_id_gen.next();
+    plan = plan
+        .map(
+            true,
+            &translator.enabled_rules,
+            &translator.col_id_gen,
+            [(col_id5, case_expr2)],
+        )
+        .u_project(
+            true,
+            &translator.enabled_rules,
+            &translator.col_id_gen,
+            [col_id5].into_iter().collect(),
+        );
+    Ok(Expression::subquery(plan))
 }
 
 #[cfg(test)]
