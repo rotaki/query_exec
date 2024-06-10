@@ -47,6 +47,15 @@ impl Schema {
     pub fn primary_key_indices(&self) -> &Vec<usize> {
         &self.primary_key
     }
+
+    pub fn make_nullable(&self) -> Schema {
+        let columns = self
+            .columns
+            .iter()
+            .map(|col| ColumnDef::new(col.name(), col.data_type().clone(), true))
+            .collect();
+        Schema::new(columns, self.primary_key.clone())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

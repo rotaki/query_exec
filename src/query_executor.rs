@@ -586,21 +586,21 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT e.name, e.age, d.name AS department FROM Employees e JOIN Departments d ON e.department_id = d.id";
-        let mut result = run_query(&executor, sql_string, false);
+        let mut result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into(), "Engineering".into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into(), "HR".into()]),
             Tuple::from_fields(vec!["David".into(), 28.into(), "Engineering".into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(&mut result, &mut expected, true);
     }
 
     #[test]
-    fn test_left_join() {
+    fn test_left_outer_join() {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
-        let sql_string = "SELECT d.name, sum(e.age) FROM Departments d LEFT JOIN Employees e ON e.department_id = d.id GROUP BY d.name";
+        let sql_string = "SELECT d.name, sum(e.age) FROM Departments d LEFT OUTER JOIN Employees e ON e.department_id = d.id GROUP BY d.name";
         let mut result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 65.into()]),
@@ -611,15 +611,42 @@ mod tests {
     }
 
     #[test]
-    fn test_right_join() {
+    fn test_right_outer_join() {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
-        let sql_string =  "SELECT d.name, sum(e.age) FROM Employees e RIGHT JOIN Departments d ON e.department_id = d.id GROUP BY d.name";
+        let sql_string =  "SELECT d.name, sum(e.age) FROM Employees e RIGHT OUTER JOIN Departments d ON e.department_id = d.id GROUP BY d.name";
         let mut result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
             Tuple::from_fields(vec!["Marketing".into(), Field::Int(None)]),
+        ];
+        check_result(&mut result, &mut expected, true);
+    }
+
+    #[test]
+    fn test_left_semi_join() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string =
+            "SELECT d.name FROM Departments d LEFT SEMI JOIN Employees e ON e.department_id = d.id";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into()]),
+            Tuple::from_fields(vec!["Engineering".into()]),
+        ];
+        check_result(&mut result, &mut expected, true);
+    }
+
+    #[test]
+    fn test_right_semi_join() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string = "SELECT d.name FROM Employees e RIGHT SEMI JOIN Departments d ON e.department_id = d.id";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into()]),
+            Tuple::from_fields(vec!["Engineering".into()]),
         ];
         check_result(&mut result, &mut expected, true);
     }

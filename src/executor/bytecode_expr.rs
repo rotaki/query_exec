@@ -143,7 +143,7 @@ pub fn colidx_expr(colidx: usize) -> ByteCodeExpr {
     expr
 }
 
-type ByteCodeType = u8;
+type ByteCodeType = u16;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ByteCodeExpr {

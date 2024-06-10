@@ -281,6 +281,12 @@ impl Translator {
                 Ok((JoinType::FullOuter, Some(self.process_expr(cond, None)?)))
             }
             CrossJoin => Ok((JoinType::CrossJoin, None)),
+            LeftSemi(JoinConstraint::On(cond)) => {
+                Ok((JoinType::LeftSemi, Some(self.process_expr(cond, None)?)))
+            }
+            RightSemi(JoinConstraint::On(cond)) => {
+                Ok((JoinType::RightSemi, Some(self.process_expr(cond, None)?)))
+            }
             _ => Err(translation_err!(
                 UnsupportedSQL,
                 "Unsupported join operator: {:?}",

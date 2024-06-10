@@ -405,11 +405,24 @@ impl PlanTrait for LogicalRelExpr {
                 column_indices: column_names,
             } => column_names.iter().cloned().collect(),
             LogicalRelExpr::Select { src, .. } => src.att(),
-            LogicalRelExpr::Join { left, right, .. } => {
-                let mut set = left.att();
-                set.extend(right.att());
-                set
-            }
+            LogicalRelExpr::Join {
+                join_type,
+                left,
+                right,
+                ..
+            } => match join_type {
+                JoinType::CrossJoin
+                | JoinType::Inner
+                | JoinType::LeftOuter
+                | JoinType::RightOuter
+                | JoinType::FullOuter => {
+                    let mut set = left.att();
+                    set.extend(right.att());
+                    set
+                }
+                JoinType::LeftSemi => left.att(),
+                JoinType::RightSemi => right.att(),
+            },
             LogicalRelExpr::Project { cols, .. } => cols.iter().cloned().collect(),
             LogicalRelExpr::OrderBy { src, .. } => src.att(),
             LogicalRelExpr::Aggregate {

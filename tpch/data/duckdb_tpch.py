@@ -35,35 +35,42 @@ def get_query_string(query):
 # query_string = get_query_string(1)
 query_string = """
 SELECT
-    P_BRAND,
-    P_TYPE,
-    P_SIZE,
-    COUNT(DISTINCT PS_SUPPKEY) AS SUPPLIER_CNT
+    S_NAME,
+    S_ADDRESS
 FROM
-    PARTSUPP,
-    PART
+    SUPPLIER,
+    NATION
 WHERE
-        P_PARTKEY = PS_PARTKEY
-  AND P_BRAND <> 'Brand#45'
-  AND P_TYPE NOT LIKE 'MEDIUM POLISHED%'
-  AND P_SIZE IN (49, 14, 23, 45, 19, 3, 36, 9)
---   AND PS_SUPPKEY NOT IN (
---     SELECT
---         S_SUPPKEY
---     FROM
---         SUPPLIER
---     WHERE
---             S_COMMENT LIKE '%Customer%Complaints%'
--- )
-GROUP BY
-    P_BRAND,
-    P_TYPE,
-    P_SIZE
+        S_SUPPKEY IN (
+        SELECT
+            PS_SUPPKEY
+        FROM
+            PARTSUPP
+        WHERE
+                PS_PARTKEY IN (
+                SELECT
+                    P_PARTKEY
+                FROM
+                    PART
+                WHERE
+                        P_NAME LIKE 'forest%'
+            )
+          AND PS_AVAILQTY > (
+            SELECT
+                    0.5 * SUM(L_QUANTITY)
+            FROM
+                LINEITEM
+            WHERE
+                    L_PARTKEY = PS_PARTKEY
+              AND L_SUPPKEY = PS_SUPPKEY
+              AND L_SHIPDATE >= DATE '1994-01-01'
+              AND L_SHIPDATE < DATE '1994-01-01' + INTERVAL '1' YEAR
+        )
+    )
+  AND S_NATIONKEY = N_NATIONKEY
+  AND N_NAME = 'CANADA'
 ORDER BY
-    SUPPLIER_CNT DESC,
-    P_BRAND,
-    P_TYPE,
-    P_SIZE;
+    S_NAME;
 """
 
 explain = con.execute("EXPLAIN {}".format(query_string))

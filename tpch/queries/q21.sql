@@ -36,4 +36,4 @@ GROUP BY
     S_NAME
 ORDER BY
     NUMWAIT DESC,
-    s_NAME;
+    S_NAME;

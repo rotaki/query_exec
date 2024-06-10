@@ -78,7 +78,6 @@ pub enum AggOp {
     Max,
     Min,
     Sum,
-    HasNull,
 }
 
 impl std::fmt::Display for AggOp {
@@ -90,7 +89,6 @@ impl std::fmt::Display for AggOp {
             Max => write!(f, "MAX"),
             Min => write!(f, "MIN"),
             Sum => write!(f, "SUM"),
-            HasNull => write!(f, "HAS_NULL"),
         }
     }
 }
@@ -100,16 +98,10 @@ pub enum JoinType {
     Inner,
     LeftOuter,
     RightOuter,
-    // Left cardinality preserving mark join. A new column is added per row in
-    // the left table. If there is a match, mark will be true. If there is a
-    // NULL in the right table, mark will be false. Otherwise, mark will be false.
-    LeftMark,
-    // Right cardinality preserving mark join. A new column is added per row in
-    // the right table. If there is a match, mark will be true. If there is a
-    // NULL in the left table, mark will be false. Otherwise, mark will be false.
-    RightMark,
     FullOuter,
     CrossJoin,
+    LeftSemi,
+    RightSemi,
 }
 
 impl std::fmt::Display for JoinType {
@@ -118,10 +110,10 @@ impl std::fmt::Display for JoinType {
             JoinType::Inner => write!(f, "inner"),
             JoinType::LeftOuter => write!(f, "left_outer"),
             JoinType::RightOuter => write!(f, "right_outer"),
-            JoinType::LeftMark => write!(f, "left_mark"),
-            JoinType::RightMark => write!(f, "right_mark"),
             JoinType::FullOuter => write!(f, "full_outer"),
             JoinType::CrossJoin => write!(f, "cross"),
+            JoinType::LeftSemi => write!(f, "left_semi"),
+            JoinType::RightSemi => write!(f, "right_semi"),
         }
     }
 }
