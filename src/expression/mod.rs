@@ -104,6 +104,8 @@ pub enum JoinType {
     RightSemi,
     LeftAnti,
     RightAnti,
+    LeftMarkJoin(ColumnId),
+    RightMarkJoin(ColumnId),
 }
 
 impl std::fmt::Display for JoinType {
@@ -118,6 +120,8 @@ impl std::fmt::Display for JoinType {
             JoinType::RightSemi => write!(f, "right_semi"),
             JoinType::LeftAnti => write!(f, "left_anti"),
             JoinType::RightAnti => write!(f, "right_anti"),
+            JoinType::LeftMarkJoin(col_id) => write!(f, "left_mark@{}", col_id),
+            JoinType::RightMarkJoin(col_id) => write!(f, "right_mark@{}", col_id),
         }
     }
 }

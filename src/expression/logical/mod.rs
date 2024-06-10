@@ -422,6 +422,16 @@ impl PlanTrait for LogicalRelExpr {
                 }
                 JoinType::LeftSemi | JoinType::LeftAnti => left.att(),
                 JoinType::RightSemi | JoinType::RightAnti => right.att(),
+                JoinType::LeftMarkJoin(col_id) => {
+                    let mut set = left.att();
+                    set.insert(*col_id);
+                    set
+                }
+                JoinType::RightMarkJoin(col_id) => {
+                    let mut set = right.att();
+                    set.insert(*col_id);
+                    set
+                }
             },
             LogicalRelExpr::Project { cols, .. } => cols.iter().cloned().collect(),
             LogicalRelExpr::OrderBy { src, .. } => src.att(),

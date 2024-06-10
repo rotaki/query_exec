@@ -614,11 +614,12 @@ impl<T: TxnStorageTrait> LimitIter<T> {
     }
 }
 
-enum HashJoinIter<T: TxnStorageTrait> {
+pub enum HashJoinIter<T: TxnStorageTrait> {
     Inner(HashJoinInner<T>),
     RightOuter(HashJoinRightOuter<T>),
     RightSemi(HashJoinRightSemi<T>),
     RightAnti(HashJoinRightAnti<T>),
+    RightMark(HashJoinRightMark<T>),
 }
 
 impl<T: TxnStorageTrait> HashJoinIter<T> {
@@ -664,6 +665,14 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                 right_exprs,
                 filter,
             )),
+            JoinType::RightMarkJoin(_) => Self::RightMark(HashJoinRightMark::new(
+                schema,
+                left,
+                right,
+                left_exprs,
+                right_exprs,
+                filter,
+            )),
             other => {
                 panic!("Unimplemented join type: {:?}", other);
             }
@@ -673,9 +682,10 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
     pub fn schema(&self) -> SchemaRef {
         match self {
             Self::Inner(inner) => inner.schema(),
-            Self::RightOuter(inner) => inner.schema.clone(),
-            Self::RightSemi(inner) => inner.schema.clone(),
-            Self::RightAnti(inner) => inner.schema.clone(),
+            Self::RightOuter(inner) => inner.schema(),
+            Self::RightSemi(inner) => inner.schema(),
+            Self::RightAnti(inner) => inner.schema(),
+            Self::RightMark(inner) => inner.schema(),
         }
     }
 
@@ -685,6 +695,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             Self::RightOuter(inner) => inner.next(txn),
             Self::RightSemi(inner) => inner.next(txn),
             Self::RightAnti(inner) => inner.next(txn),
+            Self::RightMark(inner) => inner.next(txn),
         }
     }
 
@@ -694,11 +705,12 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             Self::RightOuter(inner) => inner.print_inner(indent, out),
             Self::RightSemi(inner) => inner.print_inner(indent, out),
             Self::RightAnti(inner) => inner.print_inner(indent, out),
+            Self::RightMark(inner) => inner.print_inner(indent, out),
         }
     }
 }
 
-struct HashJoinInner<T: TxnStorageTrait> {
+pub struct HashJoinInner<T: TxnStorageTrait> {
     schema: SchemaRef,
     left: Box<VolcanoIterator<T>>,
     right: Box<VolcanoIterator<T>>,
@@ -712,7 +724,7 @@ struct HashJoinInner<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> HashJoinInner<T> {
-    pub fn new(
+    fn new(
         schema: SchemaRef,
         left: Box<VolcanoIterator<T>>,
         right: Box<VolcanoIterator<T>>,
@@ -838,7 +850,7 @@ impl<T: TxnStorageTrait> HashJoinInner<T> {
     }
 }
 
-struct HashJoinRightOuter<T: TxnStorageTrait> {
+pub struct HashJoinRightOuter<T: TxnStorageTrait> {
     schema: SchemaRef,
     left: Box<VolcanoIterator<T>>,
     right: Box<VolcanoIterator<T>>,
@@ -885,6 +897,9 @@ impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
                     .iter()
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
+                if fields.iter().any(|f| f.is_null()) {
+                    continue;
+                }
                 hash_table
                     .entry(fields)
                     .or_insert_with(Vec::new)
@@ -1006,7 +1021,7 @@ impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
     }
 }
 
-struct HashJoinRightSemi<T: TxnStorageTrait> {
+pub struct HashJoinRightSemi<T: TxnStorageTrait> {
     schema: SchemaRef,
     left: Box<VolcanoIterator<T>>,
     right: Box<VolcanoIterator<T>>,
@@ -1045,6 +1060,9 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
                     .iter()
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
+                if fields.iter().any(|f| f.is_null()) {
+                    continue;
+                }
                 hash_table
                     .entry(fields)
                     .or_insert_with(Vec::new)
@@ -1113,7 +1131,7 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
     }
 }
 
-struct HashJoinRightAnti<T: TxnStorageTrait> {
+pub struct HashJoinRightAnti<T: TxnStorageTrait> {
     schema: SchemaRef,
     left: Box<VolcanoIterator<T>>,
     right: Box<VolcanoIterator<T>>,
@@ -1152,6 +1170,9 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
                     .iter()
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
+                if fields.iter().any(|f| f.is_null()) {
+                    continue;
+                }
                 hash_table
                     .entry(fields)
                     .or_insert_with(Vec::new)
@@ -1195,6 +1216,128 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
 
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> hash_join_right_anti(\n", " ".repeat(indent)));
+        out.push_str(&format!("{}left_exprs: [", " ".repeat(indent + 4)));
+        let mut split = "";
+        for expr in &self.left_exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("]\n");
+        out.push_str(&format!("{}right_exprs: [", " ".repeat(indent + 4)));
+        split = "";
+        for expr in &self.right_exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        split = "";
+        out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
+        if let Some(filter) = &self.filter {
+            out.push_str(&format!("{:?}", filter));
+        }
+        out.push_str("]\n");
+        out.push_str(&format!("{})\n", " ".repeat(indent)));
+        self.left.print_inner(indent + 2, out);
+        self.right.print_inner(indent + 2, out);
+    }
+}
+
+pub struct HashJoinRightMark<T: TxnStorageTrait> {
+    schema: SchemaRef,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
+    left_exprs: Vec<ByteCodeExpr>,
+    right_exprs: Vec<ByteCodeExpr>,
+    filter: Option<ByteCodeExpr>,
+    buffer: Option<HashMap<Vec<Field>, Vec<Tuple>>>,
+    null_in_left: bool,
+}
+
+impl<T: TxnStorageTrait> HashJoinRightMark<T> {
+    fn new(
+        schema: SchemaRef,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
+        left_exprs: Vec<ByteCodeExpr>,
+        right_exprs: Vec<ByteCodeExpr>,
+        filter: Option<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            left,
+            right,
+            left_exprs,
+            right_exprs,
+            filter,
+            buffer: None,
+            null_in_left: false,
+        }
+    }
+
+    fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
+        if self.buffer.is_none() {
+            let mut hash_table: HashMap<Vec<Field>, Vec<Tuple>> = HashMap::new();
+            while let Some((_, tuple)) = self.left.next(txn)? {
+                let fields = self
+                    .left_exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if fields.iter().any(|f| f.is_null()) {
+                    self.null_in_left = true;
+                    continue;
+                }
+                hash_table
+                    .entry(fields)
+                    .or_insert_with(Vec::new)
+                    .push(tuple);
+            }
+            self.buffer = Some(hash_table);
+        }
+
+        loop {
+            if let Some((key, mut tuple)) = self.right.next(txn)? {
+                let fields = self
+                    .right_exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let hash_table = self.buffer.as_mut().unwrap();
+                let mark = if let Some(_) = hash_table.get_mut(&fields) {
+                    // There is a match in the hash table.
+                    Field::from_bool(true)
+                } else {
+                    if self.null_in_left {
+                        Field::null(&DataType::Boolean)
+                    } else {
+                        Field::from_bool(false)
+                    }
+                };
+                tuple.push(mark); // Append the mark to the tuple.
+                if let Some(filter) = &self.filter {
+                    if filter.eval(&tuple)? == Field::from_bool(true) {
+                        return Ok(Some((key, tuple)));
+                    } else {
+                        continue;
+                    }
+                } else {
+                    return Ok(Some((key, tuple)));
+                }
+            } else {
+                self.buffer = None;
+                return Ok(None);
+            }
+        }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}-> hash_join_right_mark(\n", " ".repeat(indent)));
         out.push_str(&format!("{}left_exprs: [", " ".repeat(indent + 4)));
         let mut split = "";
         for expr in &self.left_exprs {
@@ -1600,6 +1743,64 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                             filter,
                         );
                         (VolcanoIterator::HashJoin(hash_join), right_col_id_to_idx)
+                    }
+                    JoinType::LeftMarkJoin(col_id) => {
+                        // insert col_id to left_col_id_to_idx
+                        let left_len = left_col_id_to_idx.len();
+                        let mut col_id_to_idx = left_col_id_to_idx;
+                        let res = col_id_to_idx.insert(col_id, left_len);
+                        assert_eq!(res, None);
+                        let filter = if filter.is_empty() {
+                            None
+                        } else {
+                            Some(ByteCodeExpr::from_ast(
+                                Expression::merge_conjunction(filter),
+                                &col_id_to_idx,
+                            )?)
+                        };
+                        // Mark join returns the left side with a new nullable boolean column
+                        let left_schema = left_op.schema();
+                        let col_def = ColumnDef::new("mark", DataType::Boolean, true);
+                        let schema = left_schema.merge(&Schema::new(vec![col_def], Vec::new()));
+                        let hash_join = HashJoinIter::new(
+                            Arc::new(schema),
+                            join_type,
+                            Box::new(left_op),
+                            Box::new(right_op),
+                            left_exprs,
+                            right_exprs,
+                            filter,
+                        );
+                        (VolcanoIterator::HashJoin(hash_join), col_id_to_idx)
+                    }
+                    JoinType::RightMarkJoin(col_id) => {
+                        // insert col_id to right_col_id_to_idx
+                        let right_len = right_col_id_to_idx.len();
+                        let mut col_id_to_idx = right_col_id_to_idx;
+                        let res = col_id_to_idx.insert(col_id, right_len);
+                        assert_eq!(res, None);
+                        let filter = if filter.is_empty() {
+                            None
+                        } else {
+                            Some(ByteCodeExpr::from_ast(
+                                Expression::merge_conjunction(filter),
+                                &col_id_to_idx,
+                            )?)
+                        };
+                        // Mark join returns the right side with a new nullable boolean column
+                        let right_schema = right_op.schema();
+                        let col_def = ColumnDef::new("mark", DataType::Boolean, true);
+                        let schema = right_schema.merge(&Schema::new(vec![col_def], Vec::new()));
+                        let hash_join = HashJoinIter::new(
+                            Arc::new(schema),
+                            join_type,
+                            Box::new(left_op),
+                            Box::new(right_op),
+                            left_exprs,
+                            right_exprs,
+                            filter,
+                        );
+                        (VolcanoIterator::HashJoin(hash_join), col_id_to_idx)
                     }
                     JoinType::FullOuter => {
                         // FullOuter is not supported yet

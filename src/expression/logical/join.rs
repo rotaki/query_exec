@@ -108,7 +108,12 @@ impl LogicalRelExpr {
         if optimize {
             if matches!(
                 join_type,
-                JoinType::Inner | JoinType::LeftOuter | JoinType::CrossJoin | JoinType::LeftSemi
+                JoinType::Inner
+                    | JoinType::LeftOuter
+                    | JoinType::CrossJoin
+                    | JoinType::LeftSemi
+                    | JoinType::LeftAnti
+                    | JoinType::LeftMarkJoin(_)
             ) {
                 let (push_down, keep): (Vec<_>, Vec<_>) =
                     predicates.iter().partition(|pred| pred.bound_by(&self));
@@ -124,7 +129,12 @@ impl LogicalRelExpr {
 
             if matches!(
                 join_type,
-                JoinType::Inner | JoinType::RightOuter | JoinType::CrossJoin | JoinType::RightSemi
+                JoinType::Inner
+                    | JoinType::RightOuter
+                    | JoinType::CrossJoin
+                    | JoinType::RightSemi
+                    | JoinType::RightAnti
+                    | JoinType::RightMarkJoin(_)
             ) {
                 let (push_down, keep): (Vec<_>, Vec<_>) =
                     predicates.iter().partition(|pred| pred.bound_by(&other));
@@ -167,49 +177,54 @@ impl LogicalRelExpr {
                 );
             }
 
-            if matches!(join_type, JoinType::LeftOuter) {
-                // Always convert to right outer join because
-                // we assume that we build the hash table on the left side
-                // and probe the hash table on the right side, thus
-                // right outer join is more efficient.
-                return other.join(
-                    false,
-                    enabled_rules,
-                    col_id_gen,
-                    JoinType::RightOuter,
-                    self,
-                    predicates,
-                );
-            }
-
-            if matches!(join_type, JoinType::LeftSemi) {
-                // Always convert to right semi join because
-                // we assume that we build the hash table on the left side
-                // and probe the hash table on the right side, thus
-                // right semi join is more efficient.
-                return other.join(
-                    false,
-                    enabled_rules,
-                    col_id_gen,
-                    JoinType::RightSemi,
-                    self,
-                    predicates,
-                );
-            }
-
-            if matches!(join_type, JoinType::LeftAnti) {
-                // Always convert to right anti join because
-                // we assume that we build the hash table on the left side
-                // and probe the hash table on the right side, thus
-                // right anti join is more efficient.
-                return other.join(
-                    false,
-                    enabled_rules,
-                    col_id_gen,
-                    JoinType::RightAnti,
-                    self,
-                    predicates,
-                );
+            // Always convert left X join to right X join because
+            // we assume that we build the hash table on the left side
+            // and probe the hash table on the right side, thus
+            // right X join is more efficient.
+            match join_type {
+                JoinType::LeftOuter => {
+                    return other.join(
+                        false,
+                        enabled_rules,
+                        col_id_gen,
+                        JoinType::RightOuter,
+                        self,
+                        predicates,
+                    );
+                }
+                JoinType::LeftSemi => {
+                    return other.join(
+                        false,
+                        enabled_rules,
+                        col_id_gen,
+                        JoinType::RightSemi,
+                        self,
+                        predicates,
+                    );
+                }
+                JoinType::LeftAnti => {
+                    return other.join(
+                        false,
+                        enabled_rules,
+                        col_id_gen,
+                        JoinType::RightAnti,
+                        self,
+                        predicates,
+                    );
+                }
+                JoinType::LeftMarkJoin(col_id) => {
+                    return other.join(
+                        false,
+                        enabled_rules,
+                        col_id_gen,
+                        JoinType::RightMarkJoin(col_id),
+                        self,
+                        predicates,
+                    );
+                }
+                _ => {
+                    // do nothing
+                }
             }
         }
 
