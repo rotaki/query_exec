@@ -668,12 +668,21 @@ impl LogicalToPhysicalRelExpr {
                                 }
                             }
                         }
-                        PhysicalRelExpr::HashJoin {
-                            join_type,
-                            left,
-                            right,
-                            equalities,
-                            filter,
+                        if equalities.is_empty() {
+                            PhysicalRelExpr::NestedLoopJoin {
+                                join_type,
+                                left,
+                                right,
+                                predicates: filter,
+                            }
+                        } else {
+                            PhysicalRelExpr::HashJoin {
+                                join_type,
+                                left,
+                                right,
+                                equalities,
+                                filter,
+                            }
                         }
                     }
                 }
