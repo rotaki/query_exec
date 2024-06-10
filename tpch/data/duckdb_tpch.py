@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--query", default=1, type=int, help="Query number")
 parser.add_argument("--sf", default=0.01, type=float, help="Scale factor")
 
+q = parser.parse_args().query
 sf = parser.parse_args().sf
 # create a temporary database
 con = duckdb.connect(database=tempfile.mktemp())
@@ -32,37 +34,7 @@ def get_query_string(query):
         query_string = query_string[:-1]
     return query_string
 
-query_string = get_query_string(21)
-# query_string = """
-# /*
-# SELECT
-#     PS_SUPPKEY
-# FROM
-#     PARTSUPP
-# WHERE
-#         PS_PARTKEY IN (
-#         SELECT
-#             P_PARTKEY
-#         FROM
-#             PART
-#         WHERE
-#                 P_NAME LIKE 'forest%'
-#     )
-# --   AND PS_AVAILQTY > (
-# --     SELECT
-# --             0.5 * SUM(L_QUANTITY)
-# --     FROM
-# --         LINEITEM
-# --     WHERE
-# --             L_PARTKEY = PS_PARTKEY
-# --       AND L_SUPPKEY = PS_SUPPKEY
-# --       AND L_SHIPDATE >= DATE '1994-01-01'
-# --       AND L_SHIPDATE < DATE '1994-01-01' + INTERVAL '1' YEAR
-# -- )
-# ORDER BY
-#     PS_SUPPKEY;
-# */
-# """
+query_string = get_query_string(q)
 
 explain = con.execute("EXPLAIN {}".format(query_string))
 result = explain.fetchall()
