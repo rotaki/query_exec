@@ -104,6 +104,15 @@ pub enum JoinType {
     RightSemi,
     LeftAnti,
     RightAnti,
+    // Mark join is a special type of join that is used to evaluate Uncorrelated Subqueries.
+    // Left mark join adds a mark column to the left side of the join which indicates if
+    // the row is matched by the right side of the join. If there is a match, the mark column
+    // is set to true. Otherwise, if the right side of the join does not contain NULL values,
+    // the mark column is set to false. If the right side of the join contains NULL values,
+    // the mark column is set to NULL. The same applies to the right mark join.
+    // See more at:
+    // * https://www.btw2017.informatik.uni-stuttgart.de/slidesandpapers/F1-10-37/paper_web.pdf
+    // * https://www.youtube.com/watch?v=ajpg_pMX620
     LeftMarkJoin(ColumnId),
     RightMarkJoin(ColumnId),
 }
