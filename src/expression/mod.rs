@@ -102,6 +102,8 @@ pub enum JoinType {
     CrossJoin,
     LeftSemi,
     RightSemi,
+    LeftAnti,
+    RightAnti,
 }
 
 impl std::fmt::Display for JoinType {
@@ -114,6 +116,8 @@ impl std::fmt::Display for JoinType {
             JoinType::CrossJoin => write!(f, "cross"),
             JoinType::LeftSemi => write!(f, "left_semi"),
             JoinType::RightSemi => write!(f, "right_semi"),
+            JoinType::LeftAnti => write!(f, "left_anti"),
+            JoinType::RightAnti => write!(f, "right_anti"),
         }
     }
 }

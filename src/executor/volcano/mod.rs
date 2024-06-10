@@ -618,6 +618,7 @@ enum HashJoinIter<T: TxnStorageTrait> {
     Inner(HashJoinInner<T>),
     RightOuter(HashJoinRightOuter<T>),
     RightSemi(HashJoinRightSemi<T>),
+    RightAnti(HashJoinRightAnti<T>),
 }
 
 impl<T: TxnStorageTrait> HashJoinIter<T> {
@@ -655,8 +656,16 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
                 right_exprs,
                 filter,
             )),
+            JoinType::RightAnti => Self::RightAnti(HashJoinRightAnti::new(
+                schema,
+                left,
+                right,
+                left_exprs,
+                right_exprs,
+                filter,
+            )),
             other => {
-                panic!("Unsupported join type in HashJoin {:?}.", other);
+                panic!("Unimplemented join type: {:?}", other);
             }
         }
     }
@@ -666,6 +675,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             Self::Inner(inner) => inner.schema(),
             Self::RightOuter(inner) => inner.schema.clone(),
             Self::RightSemi(inner) => inner.schema.clone(),
+            Self::RightAnti(inner) => inner.schema.clone(),
         }
     }
 
@@ -674,6 +684,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             Self::Inner(inner) => inner.next(txn),
             Self::RightOuter(inner) => inner.next(txn),
             Self::RightSemi(inner) => inner.next(txn),
+            Self::RightAnti(inner) => inner.next(txn),
         }
     }
 
@@ -682,6 +693,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
             Self::Inner(inner) => inner.print_inner(indent, out),
             Self::RightOuter(inner) => inner.print_inner(indent, out),
             Self::RightSemi(inner) => inner.print_inner(indent, out),
+            Self::RightAnti(inner) => inner.print_inner(indent, out),
         }
     }
 }
@@ -1101,6 +1113,116 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
     }
 }
 
+struct HashJoinRightAnti<T: TxnStorageTrait> {
+    schema: SchemaRef,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
+    left_exprs: Vec<ByteCodeExpr>,
+    right_exprs: Vec<ByteCodeExpr>,
+    filter: Option<ByteCodeExpr>,
+    buffer: Option<HashMap<Vec<Field>, Vec<Tuple>>>,
+}
+
+impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
+    fn new(
+        schema: SchemaRef,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
+        left_exprs: Vec<ByteCodeExpr>,
+        right_exprs: Vec<ByteCodeExpr>,
+        filter: Option<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            left,
+            right,
+            left_exprs,
+            right_exprs,
+            filter,
+            buffer: None,
+        }
+    }
+
+    fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
+        if self.buffer.is_none() {
+            let mut hash_table: HashMap<Vec<Field>, Vec<Tuple>> = HashMap::new();
+            while let Some((_, tuple)) = self.left.next(txn)? {
+                let fields = self
+                    .left_exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()?;
+                hash_table
+                    .entry(fields)
+                    .or_insert_with(Vec::new)
+                    .push(tuple);
+            }
+            self.buffer = Some(hash_table);
+        }
+
+        loop {
+            if let Some((key, tuple)) = self.right.next(txn)? {
+                let fields = self
+                    .right_exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let hash_table = self.buffer.as_mut().unwrap();
+                if let Some(_) = hash_table.get_mut(&fields) {
+                    // If the tuple is in the hash table, skip it
+                    continue;
+                } else {
+                    if let Some(filter) = &self.filter {
+                        if filter.eval(&tuple)? == Field::from_bool(true) {
+                            return Ok(Some((key, tuple)));
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        return Ok(Some((key, tuple)));
+                    }
+                }
+            } else {
+                self.buffer = None;
+                return Ok(None);
+            }
+        }
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}-> hash_join_right_anti(\n", " ".repeat(indent)));
+        out.push_str(&format!("{}left_exprs: [", " ".repeat(indent + 4)));
+        let mut split = "";
+        for expr in &self.left_exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("]\n");
+        out.push_str(&format!("{}right_exprs: [", " ".repeat(indent + 4)));
+        split = "";
+        for expr in &self.right_exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        split = "";
+        out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
+        if let Some(filter) = &self.filter {
+            out.push_str(&format!("{:?}", filter));
+        }
+        out.push_str("]\n");
+        out.push_str(&format!("{})\n", " ".repeat(indent)));
+        self.left.print_inner(indent + 2, out);
+        self.right.print_inner(indent + 2, out);
+    }
+}
+
 pub struct NestedLoopJoin<T: TxnStorageTrait> {
     pub schema: SchemaRef,
     pub join_type: JoinType,
@@ -1437,8 +1559,8 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                         );
                         (VolcanoIterator::HashJoin(hash_join), col_id_to_idx)
                     }
-                    JoinType::LeftSemi => {
-                        // LeftSemi only returns the left side
+                    JoinType::LeftSemi | JoinType::LeftAnti => {
+                        // LeftSemi/LeftAnti only returns the left side
                         let filter = if filter.is_empty() {
                             None
                         } else {
@@ -1458,8 +1580,8 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                         );
                         (VolcanoIterator::HashJoin(hash_join), left_col_id_to_idx)
                     }
-                    JoinType::RightSemi => {
-                        // RightSemi only returns the right side
+                    JoinType::RightSemi | JoinType::RightAnti => {
+                        // RightSemi/RightAnti only returns the right side
                         let filter = if filter.is_empty() {
                             None
                         } else {

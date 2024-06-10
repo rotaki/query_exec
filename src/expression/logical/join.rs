@@ -196,6 +196,21 @@ impl LogicalRelExpr {
                     predicates,
                 );
             }
+
+            if matches!(join_type, JoinType::LeftAnti) {
+                // Always convert to right anti join because
+                // we assume that we build the hash table on the left side
+                // and probe the hash table on the right side, thus
+                // right anti join is more efficient.
+                return other.join(
+                    false,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::RightAnti,
+                    self,
+                    predicates,
+                );
+            }
         }
 
         LogicalRelExpr::Join {

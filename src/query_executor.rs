@@ -652,6 +652,27 @@ mod tests {
     }
 
     #[test]
+    fn test_left_anti_join() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string =
+            "SELECT d.name FROM Departments d LEFT ANTI JOIN Employees e ON e.department_id = d.id";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![Tuple::from_fields(vec!["Marketing".into()])];
+        check_result(&mut result, &mut expected, true);
+    }
+
+    #[test]
+    fn test_right_anti_join() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string = "SELECT d.name FROM Employees e RIGHT ANTI JOIN Departments d ON e.department_id = d.id";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![Tuple::from_fields(vec!["Marketing".into()])];
+        check_result(&mut result, &mut expected, true);
+    }
+
+    #[test]
     fn test_cross_join() {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());

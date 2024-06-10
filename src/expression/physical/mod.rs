@@ -270,7 +270,7 @@ impl PlanTrait for PhysicalRelExpr {
                 for (left, right) in equalities {
                     out.push_str(split);
                     left.print_inner(0, out);
-                    out.push_str(" = ");
+                    out.push_str("=");
                     right.print_inner(0, out);
                     split = " && ";
                 }

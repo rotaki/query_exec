@@ -232,13 +232,11 @@ impl Translator {
             // Other wise we use a join
             let (join_type, condition) = self.process_join_operator(&join.join_operator)?;
             plan = if is_subquery {
-                if matches!(
-                    join_type,
-                    JoinType::LeftOuter | JoinType::RightOuter | JoinType::FullOuter
-                ) {
+                if !matches!(join_type, JoinType::Inner | JoinType::CrossJoin) {
                     return Err(translation_err!(
                         UnsupportedSQL,
-                        "Unsupported join type with subquery"
+                        "Unsupported join type for subquery: {:?}",
+                        join_type
                     ));
                 }
                 plan.flatmap(true, &self.enabled_rules, &self.col_id_gen, right)
@@ -286,6 +284,12 @@ impl Translator {
             }
             RightSemi(JoinConstraint::On(cond)) => {
                 Ok((JoinType::RightSemi, Some(self.process_expr(cond, None)?)))
+            }
+            LeftAnti(JoinConstraint::On(cond)) => {
+                Ok((JoinType::LeftAnti, Some(self.process_expr(cond, None)?)))
+            }
+            RightAnti(JoinConstraint::On(cond)) => {
+                Ok((JoinType::RightAnti, Some(self.process_expr(cond, None)?)))
             }
             _ => Err(translation_err!(
                 UnsupportedSQL,

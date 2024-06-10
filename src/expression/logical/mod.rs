@@ -420,8 +420,8 @@ impl PlanTrait for LogicalRelExpr {
                     set.extend(right.att());
                     set
                 }
-                JoinType::LeftSemi => left.att(),
-                JoinType::RightSemi => right.att(),
+                JoinType::LeftSemi | JoinType::LeftAnti => left.att(),
+                JoinType::RightSemi | JoinType::RightAnti => right.att(),
             },
             LogicalRelExpr::Project { cols, .. } => cols.iter().cloned().collect(),
             LogicalRelExpr::OrderBy { src, .. } => src.att(),
