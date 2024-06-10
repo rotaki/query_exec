@@ -87,6 +87,23 @@ impl LogicalRelExpr {
                         att.into_iter().chain([id].into_iter()).collect(),
                     ) // Project the att and id
             }
+            Expression::UncorrelatedExists { expr } => {
+                let att = self.att();
+                self.join(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::LeftMarkJoin(id),
+                    *expr,
+                    vec![],
+                )
+                .u_project(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    att.into_iter().chain([id].into_iter()).collect(),
+                )
+            }
             Expression::Subquery { expr } => {
                 let att = expr.att();
                 assert!(att.len() == 1);

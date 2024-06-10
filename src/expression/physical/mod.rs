@@ -239,11 +239,7 @@ impl PlanTrait for PhysicalRelExpr {
                 right,
                 predicates,
             } => {
-                out.push_str(&format!(
-                    "{}-> cross {}_join(",
-                    " ".repeat(indent),
-                    join_type
-                ));
+                out.push_str(&format!("{}-> nl {}_join(", " ".repeat(indent), join_type));
                 let mut split = "";
                 for pred in predicates {
                     out.push_str(split);
@@ -668,21 +664,12 @@ impl LogicalToPhysicalRelExpr {
                                 }
                             }
                         }
-                        if equalities.is_empty() {
-                            PhysicalRelExpr::NestedLoopJoin {
-                                join_type,
-                                left,
-                                right,
-                                predicates: filter,
-                            }
-                        } else {
-                            PhysicalRelExpr::HashJoin {
-                                join_type,
-                                left,
-                                right,
-                                equalities,
-                                filter,
-                            }
+                        PhysicalRelExpr::HashJoin {
+                            join_type,
+                            left,
+                            right,
+                            equalities,
+                            filter,
                         }
                     }
                 }
@@ -787,6 +774,9 @@ impl LogicalToPhysicalExpression {
                 left: Box::new(self.to_physical(left)),
                 comp: *comp,
                 right: Box::new(LogicalToPhysicalRelExpr.to_physical(right.as_ref().clone())),
+            },
+            Expression::UncorrelatedExists { expr } => Expression::UncorrelatedExists {
+                expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },
         }
     }

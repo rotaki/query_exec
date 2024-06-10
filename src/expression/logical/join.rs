@@ -153,6 +153,45 @@ impl LogicalRelExpr {
                 }
             }
 
+            /* THIS DOES NOT WORK FOR CASE WHEN EXPRESSIONS HAVE NULL RELATED OPERATIONS
+            // Special case of LeftOuter join. If the predicate is bound by the right side
+            // but does not contain is_null, we can push it to the right side.
+            if matches!(join_type, JoinType::LeftOuter) {
+                let (push_down, keep): (Vec<_>, Vec<_>) = predicates
+                    .iter()
+                    .partition(|pred| pred.bound_by(&other) && !pred.has_is_null());
+                if !push_down.is_empty() {
+                    // This condition is necessary to avoid infinite recursion
+                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
+                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
+                    return self.join(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        join_type,
+                        other.select(true, enabled_rules, col_id_gen, push_down),
+                        keep,
+                    );
+                }
+            }
+
+            // Special case of RightOuter join. If the predicate is bound by the left side
+            // but does not contain is_null, we can push it to the left side.
+            if matches!(join_type, JoinType::RightOuter) {
+                let (push_down, keep): (Vec<_>, Vec<_>) = predicates
+                    .iter()
+                    .partition(|pred| pred.bound_by(&self) && !pred.has_is_null());
+                if !push_down.is_empty() {
+                    // This condition is necessary to avoid infinite recursion
+                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
+                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
+                    return self
+                        .select(true, enabled_rules, col_id_gen, push_down)
+                        .join(true, enabled_rules, col_id_gen, join_type, other, keep);
+                }
+            }
+            */
+
             // If the remaining predicates are bound by the left and right sides
             if matches!(join_type, JoinType::CrossJoin) {
                 #[cfg(debug_assertions)]
@@ -184,7 +223,7 @@ impl LogicalRelExpr {
             match join_type {
                 JoinType::LeftOuter => {
                     return other.join(
-                        false,
+                        true,
                         enabled_rules,
                         col_id_gen,
                         JoinType::RightOuter,
@@ -194,7 +233,7 @@ impl LogicalRelExpr {
                 }
                 JoinType::LeftSemi => {
                     return other.join(
-                        false,
+                        true,
                         enabled_rules,
                         col_id_gen,
                         JoinType::RightSemi,
@@ -204,7 +243,7 @@ impl LogicalRelExpr {
                 }
                 JoinType::LeftAnti => {
                     return other.join(
-                        false,
+                        true,
                         enabled_rules,
                         col_id_gen,
                         JoinType::RightAnti,
@@ -214,7 +253,7 @@ impl LogicalRelExpr {
                 }
                 JoinType::LeftMarkJoin(col_id) => {
                     return other.join(
-                        false,
+                        true,
                         enabled_rules,
                         col_id_gen,
                         JoinType::RightMarkJoin(col_id),

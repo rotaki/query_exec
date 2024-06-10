@@ -32,7 +32,7 @@ def get_query_string(query):
         query_string = query_string[:-1]
     return query_string
 
-query_string = get_query_string(20)
+query_string = get_query_string(21)
 # query_string = """
 # /*
 # SELECT

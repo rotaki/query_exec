@@ -8,12 +8,9 @@ use crate::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::{
-    collections::HashMap,
-    ops::{Add, Div, Mul, Sub},
-};
 
 pub enum ByteCodes {
     // CONTROL FLOW
@@ -943,7 +940,9 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
             convert_expr_to_bytecode(expr, bytecode_expr)?;
             bytecode_expr.add_code(ByteCodes::Not as usize);
         }
-        Expression::Subquery { .. } | Expression::UncorrelatedAny { .. } => {
+        Expression::Subquery { .. }
+        | Expression::UncorrelatedAny { .. }
+        | Expression::UncorrelatedExists { .. } => {
             unimplemented!("Subquery not supported in bytecode")
         }
     }

@@ -1,4 +1,5 @@
 # TODO
+
 * [x] Orderby clause
 * [] Limit clause
 * [] Subquery in the from clause
@@ -24,7 +25,9 @@
   * [x] Q18 (Mark join)
   * [x] Q19 (Expanding OR causes super complicated filter predicates)
   * [x] Q20 (Mark join)
-  * [ ] Q21 (Semi-join for uncorrelated exists)
+  * [x] Q21 (Semi-join for uncorrelated exists)
   * [ ] Q22 (Substring)
-* [] Remove unnecessary projections in the query plan
-* [] Convert mark join to semi-join or anti-join if possible
+* [ ] Remove unnecessary projections in the query plan
+* [ ] Convert mark join to semi-join or anti-join if possible
+* [ ] Add complicated selection push-downs
+  * For example, say we have join(t1@c1==t2@c2).filter(@c1>0). Then predicate (@c1>0) can not only be pushed down to t1, but also to t2 as (@c2>0)

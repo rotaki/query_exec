@@ -430,47 +430,50 @@ impl Translator {
         plan: LogicalRelExpr,
         where_clause: &Option<sqlparser::ast::Expr>,
     ) -> Result<LogicalRelExpr, TranslatorError> {
+        let att = plan.att();
         if let Some(expr) = where_clause {
-            match self.process_expr(expr, Some(0)) {
-                Ok(expr) => {
-                    if expr.has_subquery() {
-                        let col_id = self.col_id_gen.next();
-                        let plan = plan.map(
-                            true,
-                            &self.enabled_rules,
-                            &self.col_id_gen,
-                            [(col_id, expr)],
-                        );
-                        Ok(plan.select(
-                            true,
-                            &self.enabled_rules,
-                            &self.col_id_gen,
-                            vec![Expression::col_ref(col_id)],
-                        ))
-                    } else {
-                        Ok(plan.select(true, &self.enabled_rules, &self.col_id_gen, vec![expr]))
-                    }
-                }
+            let expr = match self.process_expr(expr, Some(0)) {
+                Ok(expr) => expr,
                 Err(TranslatorError::ColumnNotFound(_)) => {
                     // Search globally.
-                    let expr = self.process_expr(expr, None)?;
-                    let col_id = self.col_id_gen.next();
-                    Ok(plan
-                        .map(
-                            true,
-                            &self.enabled_rules,
-                            &self.col_id_gen,
-                            [(col_id, expr)],
-                        )
-                        .select(
-                            true,
-                            &self.enabled_rules,
-                            &self.col_id_gen,
-                            vec![Expression::col_ref(col_id)],
-                        ))
+                    self.process_expr(expr, None)?
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
+            let mut plan = plan;
+            let (subqueries, non_subqueries): (Vec<_>, Vec<_>) = expr
+                .split_conjunction()
+                .into_iter()
+                .partition(|expr| expr.has_subquery());
+            // Add the select for non-subqueries first to filter out rows as early as possible
+            // before evaluating subqueries.
+            plan = plan.select(true, &self.enabled_rules, &self.col_id_gen, non_subqueries);
+            for subquery in subqueries {
+                let col_id = self.col_id_gen.next();
+                plan = plan
+                    .map(
+                        true,
+                        &self.enabled_rules,
+                        &self.col_id_gen,
+                        [(col_id, subquery)],
+                    )
+                    .select(
+                        true,
+                        &self.enabled_rules,
+                        &self.col_id_gen,
+                        vec![Expression::col_ref(col_id)],
+                    )
+                    .u_project(
+                        true,
+                        &self.enabled_rules,
+                        &self.col_id_gen,
+                        att.iter().cloned().collect(),
+                    );
             }
+            Ok(plan)
         } else {
             Ok(plan)
         }
@@ -977,60 +980,7 @@ impl Translator {
                 )),
             },
             sqlparser::ast::Expr::Exists { subquery, negated } => {
-                let mut translator = Translator::new_with_outer(
-                    self.db_id,
-                    &self.catalog_ref,
-                    &self.enabled_rules,
-                    &self.col_id_gen,
-                    &self.env,
-                );
-                let subquery = translator.process_query(subquery)?;
-                let mut plan = subquery.plan;
-                // Add count(*) to the subquery
-                let col_id1 = translator.col_id_gen.next();
-                plan = plan.map(
-                    true,
-                    &translator.enabled_rules,
-                    &translator.col_id_gen,
-                    [(col_id1, Expression::int(1))],
-                );
-                let col_id2 = translator.col_id_gen.next();
-                plan = plan.aggregate(
-                    true,
-                    &self.enabled_rules,
-                    &self.col_id_gen,
-                    vec![],
-                    vec![(col_id2, (col_id1, AggOp::Count))],
-                );
-                // Add count(*) > 0  to the subquery
-                let exists_expr = if *negated {
-                    Expression::binary(
-                        BinaryOp::Le,
-                        Expression::col_ref(col_id2),
-                        Expression::int(0),
-                    )
-                } else {
-                    Expression::binary(
-                        BinaryOp::Gt,
-                        Expression::col_ref(col_id2),
-                        Expression::int(0),
-                    )
-                };
-                let col_id3 = self.col_id_gen.next();
-                plan = plan.map(
-                    true,
-                    &translator.enabled_rules,
-                    &translator.col_id_gen,
-                    [(col_id3, exists_expr)],
-                );
-                // Add project col 'count(*) > 0' to the subquery
-                plan = plan.u_project(
-                    true,
-                    &translator.enabled_rules,
-                    &translator.col_id_gen,
-                    [col_id3].into_iter().collect(),
-                );
-                Ok(Expression::subquery(plan))
+                process_exist(self, subquery, *negated)
             }
             sqlparser::ast::Expr::InSubquery {
                 expr,
@@ -1293,6 +1243,84 @@ fn get_type(d_type: &sqlparser::ast::DataType) -> DataType {
         sqlparser::ast::DataType::Boolean => DataType::Boolean,
         _ => unimplemented!("Unsupported data type: {:?}", d_type),
     }
+}
+
+fn process_exist(
+    translator: &Translator,
+    subquery: &sqlparser::ast::Query,
+    negated: bool,
+) -> Result<Expression<LogicalRelExpr>, TranslatorError> {
+    let mut new_translator = Translator::new_with_outer(
+        translator.db_id,
+        &translator.catalog_ref,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        &translator.env,
+    );
+    let subquery = new_translator.process_query(subquery)?;
+    let plan = subquery.plan;
+    if plan.free().is_empty() {
+        let result = Expression::uncorrelated_exist(plan);
+        if negated {
+            Ok(result.not())
+        } else {
+            Ok(result)
+        }
+    } else {
+        process_correlated_exist(translator, plan, negated)
+    }
+}
+
+fn process_correlated_exist(
+    translator: &Translator,
+    mut plan: LogicalRelExpr,
+    negated: bool,
+) -> Result<Expression<LogicalRelExpr>, TranslatorError> {
+    // Add count(*) to the subquery
+    let col_id1 = translator.col_id_gen.next();
+    plan = plan.map(
+        true,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        [(col_id1, Expression::int(1))],
+    );
+    let col_id2 = translator.col_id_gen.next();
+    plan = plan.aggregate(
+        true,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        vec![],
+        vec![(col_id2, (col_id1, AggOp::Count))],
+    );
+    // Add count(*) > 0  to the subquery
+    let exists_expr = if negated {
+        Expression::binary(
+            BinaryOp::Le,
+            Expression::col_ref(col_id2),
+            Expression::int(0),
+        )
+    } else {
+        Expression::binary(
+            BinaryOp::Gt,
+            Expression::col_ref(col_id2),
+            Expression::int(0),
+        )
+    };
+    let col_id3 = translator.col_id_gen.next();
+    plan = plan.map(
+        true,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        [(col_id3, exists_expr)],
+    );
+    // Add project col 'count(*) > 0' to the subquery
+    plan = plan.u_project(
+        true,
+        &translator.enabled_rules,
+        &translator.col_id_gen,
+        [col_id3].into_iter().collect(),
+    );
+    Ok(Expression::subquery(plan))
 }
 
 fn process_any(

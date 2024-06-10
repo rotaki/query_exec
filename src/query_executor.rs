@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn test_where_exists() {
+    fn test_correlated_exists() {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
@@ -756,6 +756,23 @@ mod tests {
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
+        ];
+        result.sort();
+        expected.sort();
+        check_result(&mut result, &mut expected, true);
+    }
+
+    #[test]
+    fn test_uncorrelated_exists() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string =
+            "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees ); ";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into()]),
+            Tuple::from_fields(vec!["Engineering".into()]),
+            Tuple::from_fields(vec!["Marketing".into()]),
         ];
         result.sort();
         expected.sort();

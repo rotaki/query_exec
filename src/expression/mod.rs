@@ -196,6 +196,9 @@ pub enum Expression<P: PlanTrait> {
         comp: BinaryOp,
         right: Box<P>,
     },
+    UncorrelatedExists {
+        expr: Box<P>,
+    },
 }
 
 impl<P: PlanTrait> Expression<P> {
@@ -357,6 +360,12 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn uncorrelated_exist(expr: P) -> Expression<P> {
+        Expression::UncorrelatedExists {
+            expr: Box::new(expr),
+        }
+    }
+
     pub fn between(self, lower: Expression<P>, upper: Expression<P>) -> Expression<P> {
         Expression::Between {
             expr: Box::new(self),
@@ -398,6 +407,44 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Not { expr } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
             Expression::UncorrelatedAny { left, comp, right } => true,
+            Expression::UncorrelatedExists { expr } => true,
+        }
+    }
+
+    pub fn has_is_null(&self) -> bool {
+        match self {
+            Expression::ColRef { id: _ } => false,
+            Expression::Field { val: _ } => false,
+            Expression::IsNull { expr: _ } => true,
+            Expression::Binary { left, right, .. } => left.has_is_null() || right.has_is_null(),
+            Expression::Case {
+                expr,
+                whens,
+                else_expr,
+            } => {
+                expr.as_ref().map_or(false, |expr| expr.has_is_null())
+                    || whens
+                        .iter()
+                        .any(|(when, then)| when.has_is_null() || then.has_is_null())
+                    || else_expr.as_ref().map_or(false, |expr| expr.has_is_null())
+            }
+            Expression::Between { expr, lower, upper } => {
+                expr.has_is_null() || lower.has_is_null() || upper.has_is_null()
+            }
+            Expression::Extract { field: _, expr } => expr.has_is_null(),
+            Expression::Like {
+                expr,
+                pattern,
+                escape,
+            } => expr.has_is_null(),
+            Expression::Cast { expr, to_type } => expr.has_is_null(),
+            Expression::InList { expr, list } => {
+                expr.has_is_null() || list.iter().any(|expr| expr.has_is_null())
+            }
+            Expression::Not { expr } => expr.has_is_null(),
+            Expression::Subquery { expr: _ } => false,
+            Expression::UncorrelatedAny { left, comp, right } => left.has_is_null(),
+            Expression::UncorrelatedExists { expr } => false,
         }
     }
 
@@ -509,6 +556,9 @@ impl<P: PlanTrait> Expression<P> {
                 comp,
                 right: Box::new(right.replace_variables(src_to_dest)),
             },
+            Expression::UncorrelatedExists { expr } => Expression::UncorrelatedExists {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+            },
         }
     }
 
@@ -597,6 +647,10 @@ impl<P: PlanTrait> Expression<P> {
                 left: Box::new(left.replace_variables_with_exprs(src_to_dest)),
                 comp,
                 right, // Do nothing for subquery
+            },
+            Expression::UncorrelatedExists { expr } => Expression::UncorrelatedExists {
+                // Do nothing for subquery
+                expr,
             },
         }
     }
@@ -701,6 +755,11 @@ impl<P: PlanTrait> Expression<P> {
                 right.print_inner(indent, out);
                 out.push_str(")");
             }
+            Expression::UncorrelatedExists { expr } => {
+                out.push_str("uncorrelated exists (");
+                expr.print_inner(indent, out);
+                out.push_str(")");
+            }
         }
     }
 }
@@ -775,6 +834,7 @@ impl<P: PlanTrait> Expression<P> {
                 set.extend(right.free());
                 set
             }
+            Expression::UncorrelatedExists { expr } => expr.free(),
         }
     }
 
