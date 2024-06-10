@@ -8,6 +8,7 @@ use crate::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::{
     collections::HashMap,
@@ -54,6 +55,42 @@ pub enum ByteCodes {
     Like,
     // CAST
     Cast,
+}
+
+impl From<usize> for ByteCodes {
+    fn from(code: usize) -> Self {
+        match code {
+            0 => ByteCodes::PushLit,
+            1 => ByteCodes::PushField,
+            2 => ByteCodes::Pop,
+            3 => ByteCodes::Jump,
+            4 => ByteCodes::JumpIfTrue,
+            5 => ByteCodes::JumpIfFalse,
+            6 => ByteCodes::JumpIfFalseOrNull,
+            7 => ByteCodes::Duplicate,
+            8 => ByteCodes::Add,
+            9 => ByteCodes::Sub,
+            10 => ByteCodes::Mul,
+            11 => ByteCodes::Div,
+            12 => ByteCodes::Eq,
+            13 => ByteCodes::Neq,
+            14 => ByteCodes::Lt,
+            15 => ByteCodes::Gt,
+            16 => ByteCodes::Lte,
+            17 => ByteCodes::Gte,
+            18 => ByteCodes::And,
+            19 => ByteCodes::Or,
+            20 => ByteCodes::Not,
+            21 => ByteCodes::IsNull,
+            22 => ByteCodes::IsBetween,
+            23 => ByteCodes::ExtractYear,
+            24 => ByteCodes::ExtractMonth,
+            25 => ByteCodes::ExtractDay,
+            26 => ByteCodes::Like,
+            27 => ByteCodes::Cast,
+            _ => panic!("Invalid bytecode"),
+        }
+    }
 }
 
 const STATIC_DISPATCHER: [DispatchFn; 28] = [
@@ -107,6 +144,7 @@ pub fn colidx_expr(colidx: usize) -> ByteCodeExpr {
 }
 
 type ByteCodeType = u8;
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ByteCodeExpr {
     pub bytecodes: Vec<ByteCodeType>,

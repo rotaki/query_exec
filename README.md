@@ -17,4 +17,7 @@
   * [x] Q11 (Sum with subquery)
   * [x] Q12 (Inlist)
   * [x] Q13
+  * [x] Q14
+  * [ ] Q15 (Create view)
+  * [ ] Q16
 * [] Remove unnecessary projections in the query plan

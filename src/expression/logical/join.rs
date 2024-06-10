@@ -108,7 +108,7 @@ impl LogicalRelExpr {
         if optimize {
             if matches!(
                 join_type,
-                JoinType::Inner | JoinType::LeftOuter | JoinType::CrossJoin
+                JoinType::Inner | JoinType::LeftOuter | JoinType::LeftMark | JoinType::CrossJoin
             ) {
                 let (push_down, keep): (Vec<_>, Vec<_>) =
                     predicates.iter().partition(|pred| pred.bound_by(&self));
@@ -124,7 +124,7 @@ impl LogicalRelExpr {
 
             if matches!(
                 join_type,
-                JoinType::Inner | JoinType::RightOuter | JoinType::CrossJoin
+                JoinType::Inner | JoinType::RightOuter | JoinType::RightMark | JoinType::CrossJoin
             ) {
                 let (push_down, keep): (Vec<_>, Vec<_>) =
                     predicates.iter().partition(|pred| pred.bound_by(&other));
@@ -177,6 +177,21 @@ impl LogicalRelExpr {
                     enabled_rules,
                     col_id_gen,
                     JoinType::RightOuter,
+                    self,
+                    predicates,
+                );
+            }
+
+            if matches!(join_type, JoinType::LeftMark) {
+                // Always convert to right mark join because
+                // we assume that we build the hash table on the left side
+                // and probe the hash table on the right side, thus
+                // right mark join is more efficient.
+                return other.join(
+                    false,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::RightMark,
                     self,
                     predicates,
                 );

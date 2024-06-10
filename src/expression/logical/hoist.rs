@@ -235,7 +235,7 @@ impl LogicalRelExpr {
             Expression::InList { expr, list } => {
                 let att = self.att();
                 let expr_id = col_id_gen.next();
-                let mut plan = self.hoist(enabled_rules, col_id_gen, id, *expr);
+                let mut plan = self.hoist(enabled_rules, col_id_gen, expr_id, *expr);
                 let mut list_ids = Vec::with_capacity(list.len());
                 for l in list {
                     let l_id = col_id_gen.next();

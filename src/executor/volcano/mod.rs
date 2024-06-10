@@ -401,7 +401,11 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
                                         agg_vals[idx] = (&agg_vals[idx] + &Field::Int(Some(1)))?;
                                     }
                                 }
-                                _ => unimplemented!(),
+                                AggOp::HasNull => {
+                                    if val.is_null() {
+                                        agg_vals[idx] = Field::Boolean(Some(true));
+                                    }
+                                }
                             }
                         }
                         *count += 1;
@@ -419,6 +423,13 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
                                         agg_vals.push(Field::Int(Some(0)))
                                     } else {
                                         agg_vals.push(Field::Int(Some(1)))
+                                    }
+                                }
+                                AggOp::HasNull => {
+                                    if val.is_null() {
+                                        agg_vals.push(Field::Boolean(Some(true)))
+                                    } else {
+                                        agg_vals.push(Field::Boolean(Some(false)))
                                     }
                                 }
                             }
@@ -601,7 +612,7 @@ impl<T: TxnStorageTrait> LimitIter<T> {
 
 pub struct HashJoinIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub join_type: JoinType, // Currently only supports Inner join
+    pub join_type: JoinType,
     pub left: Box<VolcanoIterator<T>>,
     pub right: Box<VolcanoIterator<T>>,
     pub left_exprs: Vec<ByteCodeExpr>,
@@ -646,7 +657,7 @@ impl<T: TxnStorageTrait> HashJoinIter<T> {
         if self.buffer.is_none() {
             let mut hash_table: HashMap<Vec<Field>, (bool, Vec<Tuple>)> = HashMap::new();
             while let Some((_, tuple)) = self.left.next(txn)? {
-                let fields = self
+                let fields: Vec<Field> = self
                     .left_exprs
                     .iter()
                     .map(|expr| expr.eval(&tuple))
@@ -1120,11 +1131,14 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                         }
                         AggOp::Sum | AggOp::Max | AggOp::Min => {
                             let col_type = input_schema.get_column(col).data_type();
-                            schema.push_column(ColumnDef::new("dest", col_type.clone(), false))
+                            schema.push_column(ColumnDef::new("dest", col_type.clone(), true))
                         }
                         AggOp::Avg => {
                             // float
-                            schema.push_column(ColumnDef::new("dest", DataType::Float, false))
+                            schema.push_column(ColumnDef::new("dest", DataType::Float, true))
+                        }
+                        AggOp::HasNull => {
+                            schema.push_column(ColumnDef::new("dest", DataType::Boolean, false))
                         }
                     }
                 }

@@ -758,4 +758,31 @@ mod tests {
         ];
         check_result(&mut result, &mut expected, false);
     }
+
+    #[test]
+    fn test_in_subquery() {
+        let storage = get_in_mem_storage();
+        let executor = setup_executor(storage.clone());
+        let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'HR')";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["Alice".into()]),
+            Tuple::from_fields(vec!["Charlie".into()]),
+        ];
+        check_result(&mut result, &mut expected, false);
+
+        let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'Marketing')";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![];
+        check_result(&mut result, &mut expected, false);
+
+        let sql_string =
+            "SELECT name FROM Departments WHERE id IN (SELECT department_id FROM Employees)";
+        let mut result = run_query(&executor, sql_string, true);
+        let mut expected = vec![
+            Tuple::from_fields(vec!["HR".into()]),
+            Tuple::from_fields(vec!["Engineering".into()]),
+        ];
+        check_result(&mut result, &mut expected, false);
+    }
 }

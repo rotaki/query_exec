@@ -38,7 +38,8 @@ impl ColIdGen {
     }
 
     pub fn next(&self) -> ColumnId {
-        self.current_id.fetch_add(1, Ordering::AcqRel)
+        let val = self.current_id.fetch_add(1, Ordering::AcqRel);
+        val
     }
 }
 
