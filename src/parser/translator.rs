@@ -2,7 +2,7 @@ use std::{
     cell::{Ref, RefCell},
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use chrono::{Datelike, Month};
@@ -20,12 +20,12 @@ use crate::{
     tuple::Field,
 };
 
-type EnvironmentRef = Rc<Environment>;
+pub type EnvironmentRef = Rc<Environment>;
 
 #[derive(Debug, Clone)]
-struct Environment {
+pub struct Environment {
     outer: Option<EnvironmentRef>,
-    columns: RefCell<HashMap<String, usize>>,
+    columns: RefCell<HashMap<String, usize>>, // Column name -> Column ID
 }
 
 impl Environment {
@@ -44,8 +44,8 @@ impl Environment {
     }
 
     fn get(&self, name: &str) -> Option<usize> {
-        if let Some(index) = self.columns.borrow().get(name) {
-            return Some(*index);
+        if let Some(column_id) = self.columns.borrow().get(name) {
+            return Some(*column_id);
         }
 
         if let Some(outer) = &self.outer {
@@ -57,8 +57,8 @@ impl Environment {
 
     fn get_at(&self, distance: usize, name: &str) -> Option<usize> {
         if distance == 0 {
-            if let Some(index) = self.columns.borrow().get(name) {
-                return Some(*index);
+            if let Some(column_id) = self.columns.borrow().get(name) {
+                return Some(*column_id);
             } else {
                 return None;
             }
@@ -71,14 +71,16 @@ impl Environment {
         None
     }
 
-    fn set(&self, name: &str, index: usize) {
-        self.columns.borrow_mut().insert(name.to_string(), index);
+    fn set(&self, name: &str, column_id: usize) {
+        self.columns
+            .borrow_mut()
+            .insert(name.to_string(), column_id);
     }
 
-    fn get_names(&self, col_id: usize) -> Vec<String> {
+    fn get_names(&self, column_id: usize) -> Vec<String> {
         let mut names = Vec::new();
-        for (name, index) in self.columns.borrow().iter() {
-            if *index == col_id {
+        for (name, id) in self.columns.borrow().iter() {
+            if *id == column_id {
                 names.push(name.clone());
             }
         }
@@ -86,9 +88,35 @@ impl Environment {
     }
 }
 
+struct CTEs {
+    ctes: Mutex<HashMap<String, Arc<Query>>>, // CTE name -> Query (env, plan)
+}
+
+impl CTEs {
+    fn new() -> CTEs {
+        CTEs {
+            ctes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn add(&self, name: &str, query: Query) {
+        self.ctes
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), Arc::new(query));
+    }
+
+    fn get(&self, name: &str) -> Option<Arc<Query>> {
+        self.ctes.lock().unwrap().get(name).cloned()
+    }
+}
+
+type CTEsRef = Arc<CTEs>;
+
 pub struct Translator {
     db_id: DatabaseId,
     catalog_ref: CatalogRef,
+    ctes_ref: CTEsRef,
     enabled_rules: HeuristicRulesRef,
     col_id_gen: ColIdGenRef,
     env: EnvironmentRef, // Variables in the current scope
@@ -135,6 +163,7 @@ impl Translator {
         Translator {
             db_id,
             catalog_ref: catalog.clone(),
+            ctes_ref: Arc::new(CTEs::new()),
             enabled_rules: enabled_rules.clone(),
             col_id_gen: ColIdGen::new(),
             env: Rc::new(Environment::new()),
@@ -144,15 +173,17 @@ impl Translator {
     fn new_with_outer(
         db_id: DatabaseId,
         catalog: &CatalogRef,
+        ctes_ref: &CTEsRef,
         enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
         outer: &EnvironmentRef,
     ) -> Translator {
         Translator {
             db_id,
+            catalog_ref: catalog.clone(),
+            ctes_ref: ctes_ref.clone(),
             col_id_gen: col_id_gen.clone(),
             enabled_rules: enabled_rules.clone(),
-            catalog_ref: catalog.clone(),
             env: Rc::new(Environment::new_with_outer(outer.clone())),
         }
     }
@@ -161,6 +192,29 @@ impl Translator {
         &mut self,
         query: &sqlparser::ast::Query,
     ) -> Result<Query, TranslatorError> {
+        // Process with first
+        if let Some(with) = &query.with {
+            if with.recursive {
+                return Err(translation_err!(
+                    UnsupportedSQL,
+                    "Recursive queries are not supported"
+                ));
+            }
+
+            for cte in &with.cte_tables {
+                let mut translator = Translator::new_with_outer(
+                    self.db_id,
+                    &self.catalog_ref,
+                    &self.ctes_ref,
+                    &self.enabled_rules,
+                    &self.col_id_gen,
+                    &self.env,
+                );
+                let query = translator.process_query(&cte.query)?;
+                self.ctes_ref.add(&format!("{}", cte.alias), query);
+            }
+        }
+
         let select = match query.body.as_ref() {
             sqlparser::ast::SetExpr::Select(select) => select,
             _ => {
@@ -170,7 +224,6 @@ impl Translator {
                 ))
             }
         };
-
         let plan = self.process_from(&select.from)?;
         let plan = self.process_where(plan, &select.selection)?;
         let plan = self.process_projection(
@@ -346,6 +399,34 @@ impl Translator {
                     }
 
                     Ok((plan, false))
+                } else if let Some(query) = self.ctes_ref.get(&table_name) {
+                    // Found in CTEs.
+                    // Rename the columns and add them to the environment.
+                    let plan = query.plan.clone();
+                    let (plan, mut new_col_ids) =
+                        plan.rename(&self.enabled_rules, &self.col_id_gen);
+
+                    for (old_col_id, new_col_id) in new_col_ids.drain() {
+                        // get the name of the column
+                        let names = query.env.get_names(old_col_id);
+                        for name in names {
+                            self.env.set(&name, new_col_id); // Overwrite the old column id with the new one
+
+                            // If there is an alias, additionally set the alias in the current environment
+                            if let Some(alias) = alias {
+                                if is_valid_alias(&alias.name.value) {
+                                    self.env.set(&format!("{}.{}", alias, name), new_col_id);
+                                } else {
+                                    return Err(translation_err!(
+                                        InvalidSQL,
+                                        "Invalid alias name: {}",
+                                        alias.name.value
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Ok((plan, false)) // CTEs are not subqueries
                 } else {
                     Err(translation_err!(TableNotFound, "{}", table_name))
                 }
@@ -356,6 +437,7 @@ impl Translator {
                 let mut translator = Translator::new_with_outer(
                     self.db_id,
                     &self.catalog_ref,
+                    &self.ctes_ref,
                     &self.enabled_rules,
                     &self.col_id_gen,
                     &self.env,
@@ -745,6 +827,7 @@ impl Translator {
                 let mut translator = Translator::new_with_outer(
                     self.db_id,
                     &self.catalog_ref,
+                    &self.ctes_ref,
                     &self.enabled_rules,
                     &self.col_id_gen,
                     &self.env,
@@ -1011,6 +1094,7 @@ impl Translator {
                 let mut translator = Translator::new_with_outer(
                     self.db_id,
                     &self.catalog_ref,
+                    &self.ctes_ref,
                     &self.enabled_rules,
                     &self.col_id_gen,
                     &self.env,
@@ -1302,6 +1386,7 @@ fn process_exist(
     let mut new_translator = Translator::new_with_outer(
         translator.db_id,
         &translator.catalog_ref,
+        &translator.ctes_ref,
         &translator.enabled_rules,
         &translator.col_id_gen,
         &translator.env,
@@ -1734,12 +1819,3 @@ mod tests {
     //     println!("{}", get_plan(sql));
     // }
 }
-
-// Subquery types
-// 1. Select clause
-//   a. Scalar subquery. A subquery that returns a single row.
-//   b. EXISTS subquery. Subquery can return multiple rows.
-//   c. ANY subquery. Subquery can return multiple rows.
-// 2. From clause
-//   a. Subquery can return multiple rows.
-//
