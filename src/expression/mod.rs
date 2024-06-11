@@ -188,6 +188,11 @@ pub enum Expression<P: PlanTrait> {
     Not {
         expr: Box<Expression<P>>,
     },
+    Substring {
+        expr: Box<Expression<P>>,
+        start: usize,
+        len: usize,
+    },
     Subquery {
         expr: Box<P>,
     },
@@ -283,6 +288,22 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn eq(self, other: Expression<P>) -> Expression<P> {
+        Expression::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(self),
+            right: Box::new(other),
+        }
+    }
+
+    pub fn add(self, other: Expression<P>) -> Expression<P> {
+        Expression::Binary {
+            op: BinaryOp::Add,
+            left: Box::new(self),
+            right: Box::new(other),
+        }
+    }
+
     pub fn extract(self, field: DateField) -> Expression<P> {
         Expression::Extract {
             field,
@@ -330,19 +351,11 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
-    pub fn eq(self, other: Expression<P>) -> Expression<P> {
-        Expression::Binary {
-            op: BinaryOp::Eq,
-            left: Box::new(self),
-            right: Box::new(other),
-        }
-    }
-
-    pub fn add(self, other: Expression<P>) -> Expression<P> {
-        Expression::Binary {
-            op: BinaryOp::Add,
-            left: Box::new(self),
-            right: Box::new(other),
+    pub fn substring(self, start: usize, len: usize) -> Expression<P> {
+        Expression::Substring {
+            expr: Box::new(self),
+            start,
+            len,
         }
     }
 
@@ -405,46 +418,10 @@ impl<P: PlanTrait> Expression<P> {
                 expr.has_subquery() || list.iter().any(|expr| expr.has_subquery())
             }
             Expression::Not { expr } => expr.has_subquery(),
+            Expression::Substring { expr, start, len } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
             Expression::UncorrelatedAny { left, comp, right } => true,
             Expression::UncorrelatedExists { expr } => true,
-        }
-    }
-
-    pub fn has_is_null(&self) -> bool {
-        match self {
-            Expression::ColRef { id: _ } => false,
-            Expression::Field { val: _ } => false,
-            Expression::IsNull { expr: _ } => true,
-            Expression::Binary { left, right, .. } => left.has_is_null() || right.has_is_null(),
-            Expression::Case {
-                expr,
-                whens,
-                else_expr,
-            } => {
-                expr.as_ref().map_or(false, |expr| expr.has_is_null())
-                    || whens
-                        .iter()
-                        .any(|(when, then)| when.has_is_null() || then.has_is_null())
-                    || else_expr.as_ref().map_or(false, |expr| expr.has_is_null())
-            }
-            Expression::Between { expr, lower, upper } => {
-                expr.has_is_null() || lower.has_is_null() || upper.has_is_null()
-            }
-            Expression::Extract { field: _, expr } => expr.has_is_null(),
-            Expression::Like {
-                expr,
-                pattern,
-                escape,
-            } => expr.has_is_null(),
-            Expression::Cast { expr, to_type } => expr.has_is_null(),
-            Expression::InList { expr, list } => {
-                expr.has_is_null() || list.iter().any(|expr| expr.has_is_null())
-            }
-            Expression::Not { expr } => expr.has_is_null(),
-            Expression::Subquery { expr: _ } => false,
-            Expression::UncorrelatedAny { left, comp, right } => left.has_is_null(),
-            Expression::UncorrelatedExists { expr } => false,
         }
     }
 
@@ -548,6 +525,11 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Not { expr } => Expression::Not {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
+            Expression::Substring { expr, start, len } => Expression::Substring {
+                expr: Box::new(expr.replace_variables(src_to_dest)),
+                start,
+                len,
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(expr.replace_variables(src_to_dest)),
             },
@@ -638,6 +620,11 @@ impl<P: PlanTrait> Expression<P> {
             }
             Expression::Not { expr } => Expression::Not {
                 expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+            },
+            Expression::Substring { expr, start, len } => Expression::Substring {
+                expr: Box::new(expr.replace_variables_with_exprs(src_to_dest)),
+                start,
+                len,
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 // Do nothing for subquery
@@ -744,6 +731,11 @@ impl<P: PlanTrait> Expression<P> {
                 out.push_str("not ");
                 expr.print_inner(indent, out);
             }
+            Expression::Substring { expr, start, len } => {
+                out.push_str("substring(");
+                expr.print_inner(indent, out);
+                out.push_str(&format!(", {}, {})", start, len));
+            }
             Expression::Subquery { expr } => {
                 out.push_str(&format!("λ.{:?}(\n", expr.free()));
                 expr.print_inner(indent + 6, out);
@@ -828,6 +820,7 @@ impl<P: PlanTrait> Expression<P> {
                 set
             }
             Expression::Not { expr } => expr.free(),
+            Expression::Substring { expr, .. } => expr.free(),
             Expression::Subquery { expr } => expr.free(),
             Expression::UncorrelatedAny { left, right, .. } => {
                 let mut set = left.free();

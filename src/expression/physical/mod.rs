@@ -767,6 +767,11 @@ impl LogicalToPhysicalExpression {
             Expression::Not { expr } => Expression::Not {
                 expr: Box::new(self.to_physical(expr)),
             },
+            Expression::Substring { expr, start, len } => Expression::Substring {
+                expr: Box::new(self.to_physical(expr)),
+                start: start.clone(),
+                len: len.clone(),
+            },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },

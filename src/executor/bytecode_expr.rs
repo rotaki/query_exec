@@ -52,45 +52,11 @@ pub enum ByteCodes {
     Like,
     // CAST
     Cast,
+    // SUBSTRING
+    Substring,
 }
 
-impl From<usize> for ByteCodes {
-    fn from(code: usize) -> Self {
-        match code {
-            0 => ByteCodes::PushLit,
-            1 => ByteCodes::PushField,
-            2 => ByteCodes::Pop,
-            3 => ByteCodes::Jump,
-            4 => ByteCodes::JumpIfTrue,
-            5 => ByteCodes::JumpIfFalse,
-            6 => ByteCodes::JumpIfFalseOrNull,
-            7 => ByteCodes::Duplicate,
-            8 => ByteCodes::Add,
-            9 => ByteCodes::Sub,
-            10 => ByteCodes::Mul,
-            11 => ByteCodes::Div,
-            12 => ByteCodes::Eq,
-            13 => ByteCodes::Neq,
-            14 => ByteCodes::Lt,
-            15 => ByteCodes::Gt,
-            16 => ByteCodes::Lte,
-            17 => ByteCodes::Gte,
-            18 => ByteCodes::And,
-            19 => ByteCodes::Or,
-            20 => ByteCodes::Not,
-            21 => ByteCodes::IsNull,
-            22 => ByteCodes::IsBetween,
-            23 => ByteCodes::ExtractYear,
-            24 => ByteCodes::ExtractMonth,
-            25 => ByteCodes::ExtractDay,
-            26 => ByteCodes::Like,
-            27 => ByteCodes::Cast,
-            _ => panic!("Invalid bytecode"),
-        }
-    }
-}
-
-const STATIC_DISPATCHER: [DispatchFn; 28] = [
+const STATIC_DISPATCHER: [DispatchFn; 29] = [
     // CONTROL FLOW
     PUSH_LIT_FN,
     PUSH_FIELD_FN,
@@ -130,6 +96,8 @@ const STATIC_DISPATCHER: [DispatchFn; 28] = [
     LIKE_FN,
     // CAST
     CAST_FN,
+    // SUBSTRING
+    SUBSTRING_FN,
 ];
 
 // Utility functions
@@ -237,6 +205,7 @@ const EXTRACT_MONTH_FN: DispatchFn = extract_month;
 const EXTRACT_DAY_FN: DispatchFn = extract_day;
 const LIKE_FN: DispatchFn = like;
 const CAST_FN: DispatchFn = cast;
+const SUBSTRING_FN: DispatchFn = substring;
 
 fn push_field(
     bytecodes: &[ByteCodeType],
@@ -657,6 +626,23 @@ fn cast(
     Ok(())
 }
 
+fn substring(
+    bytecodes: &[ByteCodeType],
+    i: &mut ByteCodeType,
+    stack: &mut Vec<Field>,
+    _literals: &[Field],
+    _record: &[Field],
+) -> Result<(), ExecError> {
+    let field = stack.pop().unwrap();
+    let start = bytecodes[*i as usize] as usize;
+    *i += 1;
+    let len = bytecodes[*i as usize] as usize;
+    *i += 1;
+    let result = field.substring(start, len)?;
+    stack.push(result);
+    Ok(())
+}
+
 // Helper function to check if a field matches a LIKE pattern
 fn is_like(field: &str, pattern: &str, escape_str: &Option<String>) -> bool {
     if pattern.is_empty() {
@@ -939,6 +925,12 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
         Expression::Not { expr } => {
             convert_expr_to_bytecode(expr, bytecode_expr)?;
             bytecode_expr.add_code(ByteCodes::Not as usize);
+        }
+        Expression::Substring { expr, start, len } => {
+            convert_expr_to_bytecode(expr, bytecode_expr)?;
+            bytecode_expr.add_code(ByteCodes::Substring as usize);
+            bytecode_expr.add_code(*start);
+            bytecode_expr.add_code(*len);
         }
         Expression::Subquery { .. }
         | Expression::UncorrelatedAny { .. }
@@ -1523,5 +1515,60 @@ mod tests {
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::Boolean(None));
+    }
+
+    #[test]
+    fn test_substring() {
+        let tuple = Tuple::from_fields(vec!["hello world".into()]);
+        // Substring idx0 from 0 to 5
+        let expr = Expression::<PhysicalRelExpr>::Substring {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            start: 0,
+            len: 5,
+        };
+        let col_id_to_idx = HashMap::new();
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::String(Some("hello".to_string())));
+
+        // Substring idx0 from 6 to 5
+        let expr = Expression::<PhysicalRelExpr>::Substring {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            start: 6,
+            len: 5,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::String(Some("world".to_string())));
+
+        // Substring idx0 from 6 to 100
+        let expr = Expression::<PhysicalRelExpr>::Substring {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            start: 6,
+            len: 100,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::String(Some("world".to_string())));
+
+        // Substring idx0 from 100 to 5
+        let expr = Expression::<PhysicalRelExpr>::Substring {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            start: 100,
+            len: 5,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::String(Some("".to_string())));
+
+        // Substring idx0 from 0 to 100
+        let expr = Expression::<PhysicalRelExpr>::Substring {
+            expr: Box::new(Expression::ColRef { id: 0 }),
+            start: 0,
+            len: 100,
+        };
+        let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
+        let result = bytecode_expr.eval(&tuple).unwrap();
+        assert_eq!(result, Field::String(Some("hello world".to_string())));
     }
 }

@@ -567,6 +567,20 @@ impl Field {
             (_, DataType::Unknown) => Err(ExecError::FieldOp("Unknown data type".to_string())),
         }
     }
+
+    pub fn substring(&self, start: usize, len: usize) -> Result<Field, ExecError> {
+        match self {
+            Field::String(val) => {
+                let val = val.as_ref().map(|v| {
+                    let start = start.min(v.len());
+                    let end = (start + len).min(v.len());
+                    v[start..end].to_string()
+                });
+                Ok(Field::String(val))
+            }
+            _ => Err(ExecError::FieldOp("Field is not a string".to_string())),
+        }
+    }
 }
 
 impl std::fmt::Display for Field {

@@ -1187,6 +1187,45 @@ impl Translator {
                     Ok(expr)
                 }
             }
+            sqlparser::ast::Expr::Substring {
+                expr,
+                substring_from,
+                substring_for,
+                special: _,
+            } => {
+                let expr = self.process_expr(expr, distance)?;
+                let start: usize = match substring_from {
+                    Some(expr) => match self.process_expr(expr, distance)? {
+                        Expression::Field {
+                            val: Field::Int(Some(i)),
+                        } if i >= 1 => i as usize - 1, // SQL substring is 1-based
+                        _ => {
+                            return Err(translation_err!(
+                                UnsupportedSQL,
+                                "Unsupported expression: {:?} for substring_from",
+                                expr
+                            ));
+                        }
+                    },
+                    None => 0,
+                };
+                let len: usize = match substring_for {
+                    Some(expr) => match self.process_expr(expr, distance)? {
+                        Expression::Field {
+                            val: Field::Int(Some(i)),
+                        } if i >= 0 => i as usize,
+                        _ => {
+                            return Err(translation_err!(
+                                UnsupportedSQL,
+                                "Unsupported expression: {:?} for substring_for",
+                                expr
+                            ));
+                        }
+                    },
+                    None => usize::MAX,
+                };
+                Ok(expr.substring(start, len))
+            }
             other => Err(translation_err!(
                 UnsupportedSQL,
                 "Unsupported expression: {:?} matched {:?}",
@@ -1226,6 +1265,16 @@ fn has_agg(expr: &sqlparser::ast::Expr) -> bool {
         Nested(expr) => has_agg(expr),
         Extract { .. } => false,
         Cast { expr, .. } => has_agg(expr),
+        Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            has_agg(expr)
+                || substring_for.as_ref().map_or(false, |e| has_agg(e))
+                || substring_from.as_ref().map_or(false, |e| has_agg(e))
+        }
         _ => unimplemented!("Unsupported expression: {:?}", expr),
     }
 }
