@@ -62,14 +62,14 @@ impl From<Status> for QueryExecutorError {
     }
 }
 
-pub struct QueryExecutor<T: TxnStorageTrait> {
+pub struct QueryExecutor<T: for<'a> TxnStorageTrait<'a>> {
     pub db_id: DatabaseId,
     pub catalog_ref: CatalogRef,
     pub storage: Arc<T>,
     pub logical_rules: HeuristicRulesRef,
 }
 
-impl<T: TxnStorageTrait> QueryExecutor<T> {
+impl<T: for<'a> TxnStorageTrait<'a>> QueryExecutor<T> {
     pub fn new(db_id: DatabaseId, catalog_ref: CatalogRef, storage: Arc<T>) -> Self {
         let logical_rules = HeuristicRules::new();
         logical_rules.enable(HeuristicRule::Hoist);
@@ -134,7 +134,9 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
         physical_plan
     }
 
-    pub fn to_executable<E: Executor<T>>(&self, physical_plan: PhysicalRelExpr) -> E {
+    // Specifies a specific lifetime for the executor.
+    // The storage ensures that the iterator lives as long as the executor.
+    pub fn to_executable<'a, E: Executor<'a, T>>(&self, physical_plan: PhysicalRelExpr) -> E {
         E::new(
             self.catalog_ref.clone(),
             self.storage.clone(),
@@ -142,7 +144,11 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
         )
     }
 
-    pub fn execute<E: Executor<T>>(&self, mut exec: E) -> Result<Vec<Tuple>, QueryExecutorError> {
+    // Executes the query and returns the result.
+    pub fn execute<'a, E: Executor<'a, T>>(
+        &self,
+        mut exec: E,
+    ) -> Result<Vec<Tuple>, QueryExecutorError> {
         let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
         let result = exec.execute(&txn)?;
         self.storage.commit_txn(&txn, false)?;
@@ -332,7 +338,7 @@ mod tests {
         Arc::new(InMemStorage::new())
     }
 
-    fn setup_employees_table<T: TxnStorageTrait>(
+    fn setup_employees_table<'a, T: TxnStorageTrait<'a>>(
         storage: impl AsRef<T>,
         db_id: DatabaseId,
         catalog: &Catalog,
@@ -401,7 +407,7 @@ mod tests {
         c_id
     }
 
-    fn setup_departments_table<T: TxnStorageTrait>(
+    fn setup_departments_table<'a, T: TxnStorageTrait<'a>>(
         storage: impl AsRef<T>,
         db_id: DatabaseId,
         catalog: &Catalog,
@@ -485,7 +491,7 @@ mod tests {
         );
     }
 
-    fn setup_executor<T: TxnStorageTrait>(storage: Arc<T>) -> QueryExecutor<T> {
+    fn setup_executor<T: for<'a> TxnStorageTrait<'a>>(storage: Arc<T>) -> QueryExecutor<T> {
         let catalog = Catalog::new();
         let db_id = storage.as_ref().open_db(DBOptions::new("test_db")).unwrap();
 
@@ -497,7 +503,7 @@ mod tests {
         QueryExecutor::new(db_id, Arc::new(catalog), storage)
     }
 
-    fn run_query<T: TxnStorageTrait>(
+    fn run_query<T: for<'a> TxnStorageTrait<'a>>(
         executor: &QueryExecutor<T>,
         sql_string: &str,
         verbose: bool,

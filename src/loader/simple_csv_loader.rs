@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, sync::Arc};
 
 use txn_storage::prelude::*;
 
@@ -9,18 +9,23 @@ use crate::{
     tuple::{Field, Tuple},
 };
 
-pub struct SimpleCsvLoader<R: std::io::Read, T: TxnStorageTrait> {
+pub struct SimpleCsvLoader<'a, R: std::io::Read, T: TxnStorageTrait<'a>> {
     rdr: csv::Reader<R>,
     storage: Arc<T>,
+    phantom: PhantomData<&'a T>,
 }
 
-impl<R: std::io::Read, T: TxnStorageTrait> SimpleCsvLoader<R, T> {
+impl<'a, R: std::io::Read, T: TxnStorageTrait<'a>> SimpleCsvLoader<'a, R, T> {
     pub fn new(rdr: csv::Reader<R>, storage: Arc<T>) -> Self {
-        Self { rdr, storage }
+        Self {
+            rdr,
+            storage,
+            phantom: PhantomData,
+        }
     }
 }
 
-impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> {
+impl<'a, R: std::io::Read, T: TxnStorageTrait<'a>> DataLoader for SimpleCsvLoader<'a, R, T> {
     fn load_data(
         &mut self,
         schema_ref: SchemaRef,
@@ -88,7 +93,7 @@ mod tests {
         Arc::new(txn_storage::InMemStorage::new())
     }
 
-    fn setup_table_and_schema<T: TxnStorageTrait>(
+    fn setup_table_and_schema<'a, T: TxnStorageTrait<'a>>(
         storage: impl AsRef<T>,
     ) -> (DatabaseId, ContainerId, SchemaRef) {
         let storage = storage.as_ref();

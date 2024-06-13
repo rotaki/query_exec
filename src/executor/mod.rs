@@ -14,7 +14,9 @@ pub mod prelude {
     pub use super::Executor;
 }
 
-pub trait Executor<T: TxnStorageTrait> {
+// 'a is the lifetime of the iterator
+// This ensures that the iterator lives as long as the executor
+pub trait Executor<'a, T: TxnStorageTrait<'a>> {
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self;
     fn to_pretty_string(&self) -> String;
     fn execute(&mut self, txn: &T::TxnHandle) -> Result<Vec<Tuple>, ExecError>;
