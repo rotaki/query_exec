@@ -27,7 +27,7 @@ impl Pipeline {
     pub fn execute(&mut self) -> Result<Arc<dyn ResultBufferTrait>, ExecError> {
         match &self.scanner {
             Scanner::TableScan(scanner) => {
-                let iter = scanner.to_iter();
+                let iter = scanner.iter_all();
                 while let Some(tuple) = iter.next() {
                     self.output.insert(tuple);
                 }
@@ -38,7 +38,7 @@ impl Pipeline {
                     .iter()
                     .enumerate()
                     .map(|(i, (scanner, sort_cols))| {
-                        let iter = scanner.to_iter();
+                        let iter = scanner.iter_all();
                         if let Some(tuple) = iter.next() {
                             heap.push(Reverse((
                                 tuple.to_normalized_key_bytes(sort_cols),
@@ -60,7 +60,7 @@ impl Pipeline {
                 }
             }
             Scanner::HashJoinScan(build_side, probe_side, join_exprs) => {
-                let probe_iter = probe_side.to_iter();
+                let probe_iter = probe_side.iter_all();
                 while let Some(tuple) = probe_iter.next() {
                     let key = join_exprs
                         .iter()
@@ -81,7 +81,7 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use crate::{
-        executor::{bytecode_expr::colidx_expr, ResultIterator},
+        executor::{bytecode_expr::colidx_expr, HashTable, ResultIterator, TupleResults},
         tuple::Tuple,
         Field,
     };
@@ -96,109 +96,6 @@ mod tests {
         },
     };
 
-    pub struct TupleResults {
-        latch: RwLock<()>,
-        tuples: UnsafeCell<Vec<Tuple>>,
-    }
-
-    impl TupleResults {
-        pub fn new() -> Self {
-            Self {
-                latch: RwLock::new(()),
-                tuples: UnsafeCell::new(Vec::new()),
-            }
-        }
-    }
-
-    impl ResultBufferTrait for TupleResults {
-        fn insert(&self, tuple: Tuple) {
-            let _guard = self.latch.write().unwrap();
-            unsafe {
-                (*self.tuples.get()).push(tuple);
-            }
-        }
-
-        fn get(&self, key: Vec<crate::Field>) -> Vec<Tuple> {
-            unimplemented!("get not implemented for TupleResults")
-        }
-
-        fn to_iter<'a>(&'a self) -> Box<dyn ResultIterator<'a> + 'a> {
-            let _guard = self.latch.read().unwrap();
-            Box::new(TupleResultsIter {
-                _buffer_guard: self.latch.read().unwrap(),
-                tuples: unsafe { &*self.tuples.get() },
-                current: AtomicUsize::new(0),
-            })
-        }
-    }
-
-    pub struct TupleResultsIter<'a> {
-        _buffer_guard: RwLockReadGuard<'a, ()>,
-        tuples: &'a Vec<Tuple>,
-        current: AtomicUsize,
-    }
-
-    impl<'a> ResultIterator<'a> for TupleResultsIter<'a> {
-        fn next(&self) -> Option<Tuple> {
-            let current = self.current.fetch_add(1, Ordering::AcqRel);
-            if current < self.tuples.len() {
-                Some(self.tuples[current].copy())
-            } else {
-                None
-            }
-        }
-    }
-
-    pub struct HashTable {
-        latch: RwLock<()>,
-        exprs: Vec<ByteCodeExpr>,
-        table: UnsafeCell<HashMap<Vec<Field>, Vec<Tuple>>>,
-    }
-
-    impl HashTable {
-        pub fn new(exprs: Vec<ByteCodeExpr>) -> Self {
-            Self {
-                latch: RwLock::new(()),
-                exprs,
-                table: UnsafeCell::new(HashMap::new()),
-            }
-        }
-    }
-
-    impl ResultBufferTrait for HashTable {
-        fn insert(&self, tuple: Tuple) {
-            let _guard = self.latch.write().unwrap();
-            let key = self
-                .exprs
-                .iter()
-                .map(|expr| expr.eval(&tuple))
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-            let table = unsafe { &mut *self.table.get() };
-            match table.entry(key) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().push(tuple);
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(vec![tuple]);
-                }
-            }
-        }
-
-        fn get(&self, key: Vec<crate::Field>) -> Vec<Tuple> {
-            let _guard = self.latch.read().unwrap();
-            let table = unsafe { &*self.table.get() };
-            table
-                .get(&key)
-                .map(|v| v.iter().map(|t| t.copy()).collect())
-                .unwrap_or_default()
-        }
-
-        fn to_iter<'a>(&'a self) -> Box<dyn ResultIterator<'a> + 'a> {
-            unimplemented!("to_iter not implemented for HashTable")
-        }
-    }
-
     fn check_result(
         result: Arc<dyn ResultBufferTrait>,
         expected: &mut [Tuple],
@@ -206,7 +103,7 @@ mod tests {
         verbose: bool,
     ) {
         let mut vec = Vec::new();
-        let result = result.to_iter();
+        let result = result.iter_all();
         while let Some(t) = result.next() {
             vec.push(t);
         }

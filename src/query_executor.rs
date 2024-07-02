@@ -22,7 +22,7 @@ use crate::tuple::Tuple;
 
 pub fn print_tuples(mut tuples: impl ResultBufferTrait) {
     let mut count = 0;
-    let tuples = tuples.to_iter();
+    let tuples = tuples.iter_all();
     while let Some(t) = tuples.next() {
         count += 1;
         println!("{}", t.to_pretty_string());
@@ -478,7 +478,7 @@ mod tests {
         verbose: bool,
     ) {
         let mut vec = Vec::new();
-        let result = result.to_iter();
+        let result = result.iter_all();
         while let Some(t) = result.next() {
             vec.push(t);
         }

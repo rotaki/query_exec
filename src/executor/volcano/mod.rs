@@ -23,7 +23,9 @@ use crate::{
     ColumnId, Field,
 };
 
-use super::{bytecode_expr::ByteCodeExpr, Executor, ResultBufferTrait, ResultIterator};
+use super::{
+    bytecode_expr::ByteCodeExpr, Executor, ResultBufferTrait, ResultIterator, TupleResults,
+};
 
 type Key = Vec<u8>;
 
@@ -39,59 +41,6 @@ pub enum VolcanoIterator<'a, T: TxnStorageTrait<'a>> {
     Limit(LimitIter<'a, T>),
     HashJoin(HashJoinIter<'a, T>),
     NestedLoopJoin(NestedLoopJoin<'a, T>),
-}
-
-pub struct TupleResults {
-    latch: RwLock<()>,
-    tuples: UnsafeCell<Vec<Tuple>>,
-}
-
-impl TupleResults {
-    pub fn new() -> Self {
-        Self {
-            latch: RwLock::new(()),
-            tuples: UnsafeCell::new(Vec::new()),
-        }
-    }
-}
-
-impl ResultBufferTrait for TupleResults {
-    fn insert(&self, tuple: Tuple) {
-        let _guard = self.latch.write().unwrap();
-        unsafe {
-            (*self.tuples.get()).push(tuple);
-        }
-    }
-
-    fn get(&self, key: Vec<Field>) -> Vec<Tuple> {
-        unimplemented!("TupleResults does not support get")
-    }
-
-    fn to_iter<'a>(&'a self) -> Box<dyn ResultIterator<'a> + 'a> {
-        let _guard = self.latch.read().unwrap();
-        Box::new(TupleResultsIter {
-            _buffer_guard: self.latch.read().unwrap(),
-            tuples: unsafe { &*self.tuples.get() },
-            current: AtomicUsize::new(0),
-        })
-    }
-}
-
-pub struct TupleResultsIter<'a> {
-    _buffer_guard: RwLockReadGuard<'a, ()>,
-    tuples: &'a Vec<Tuple>,
-    current: AtomicUsize,
-}
-
-impl<'a> ResultIterator<'a> for TupleResultsIter<'a> {
-    fn next(&self) -> Option<Tuple> {
-        let current = self.current.fetch_add(1, Ordering::AcqRel);
-        if current < self.tuples.len() {
-            Some(self.tuples[current].copy())
-        } else {
-            None
-        }
-    }
 }
 
 impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for VolcanoIterator<'a, T> {
