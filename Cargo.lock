@@ -233,6 +233,23 @@ checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 [[package]]
 name = "fbtree"
 version = "0.1.0"
+source = "git+https://github.com/rotaki/FosterBtree.git?branch=master#2a2648ec97bcc8ec8bb436b9030ff855d4823c9f"
+dependencies = [
+ "chrono",
+ "clap",
+ "getrandom",
+ "io-uring",
+ "lazy_static",
+ "libc",
+ "rand",
+ "serde",
+ "tempfile",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "fbtree"
+version = "0.1.0"
 source = "git+https://github.com/rotaki/FosterBtree.git#2a2648ec97bcc8ec8bb436b9030ff855d4823c9f"
 dependencies = [
  "chrono",
@@ -526,6 +543,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "fbtree 0.1.0 (git+https://github.com/rotaki/FosterBtree.git?branch=master)",
  "regex",
  "serde",
  "sqlparser",
@@ -759,7 +777,7 @@ name = "txn_storage"
 version = "0.1.0"
 source = "git+https://github.com/rotaki/txn_storage.git?branch=master#768ffd6201c104bea99bd2a0ca675dec50e8223f"
 dependencies = [
- "fbtree",
+ "fbtree 0.1.0 (git+https://github.com/rotaki/FosterBtree.git)",
  "rstest",
 ]
 

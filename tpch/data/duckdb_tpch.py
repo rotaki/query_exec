@@ -34,17 +34,21 @@ def get_query_string(query):
         query_string = query_string[:-1]
     return query_string
 
-query_string = get_query_string(q)
+# query_string = get_query_string(q)
+# Some complicated update scan queries
+query_string = """
+UPDATE lineitem SET l_comment = 'hello' WHERE l_orderkey IN (SELECT o_orderkey FROM orders WHERE o_orderkey < 1000)
+"""
 
 explain = con.execute("EXPLAIN {}".format(query_string))
 result = explain.fetchall()
 for row in result:
     print(row[1])
 
-result = con.execute(query_string)
-result = result.fetchall()
-for row in result:
-    print(row)
-print("Number of rows: {}".format(len(result)))
+# result = con.execute(query_string)
+# result = result.fetchall()
+# for row in result:
+#     print(row)
+# print("Number of rows: {}".format(len(result)))
 
 con.close()

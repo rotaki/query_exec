@@ -9,7 +9,7 @@ use txn_storage::{
 
 use crate::catalog::CatalogRef;
 use crate::error::ExecError;
-use crate::executor::Executor;
+use crate::executor::{Executor, ResultBufferTrait, ResultIterator};
 use crate::expression::prelude::{
     HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr, LogicalToPhysicalRelExpr,
     PhysicalRelExpr,
@@ -20,10 +20,14 @@ use crate::parser::{Translator, TranslatorError};
 use crate::prelude::{ColumnDef, DataType, Schema, SchemaRef, Table};
 use crate::tuple::Tuple;
 
-pub fn print_tuples(tuples: &[Tuple]) {
-    for tuple in tuples {
-        println!("{}", tuple.to_pretty_string());
+pub fn print_tuples(mut tuples: impl ResultBufferTrait) {
+    let mut count = 0;
+    let tuples = tuples.to_iter();
+    while let Some(t) = tuples.next() {
+        count += 1;
+        println!("{}", t.to_pretty_string());
     }
+    println!("Total tuples: {}", count);
 }
 
 #[derive(Debug)]
@@ -148,7 +152,7 @@ impl<T: for<'a> TxnStorageTrait<'a>> QueryExecutor<T> {
     pub fn execute<'a, E: Executor<'a, T>>(
         &self,
         mut exec: E,
-    ) -> Result<Vec<Tuple>, QueryExecutorError> {
+    ) -> Result<E::Buffer, QueryExecutorError> {
         let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
         let result = exec.execute(&txn)?;
         self.storage.commit_txn(&txn, false)?;
@@ -327,7 +331,7 @@ mod tests {
 
     use crate::{
         catalog::{self, Catalog, ColumnDef, DataType, Schema, SchemaRef, Table},
-        executor::prelude::VolcanoIterator,
+        executor::{prelude::VolcanoIterator, ResultBufferTrait, ResultIterator},
         tuple::Tuple,
         Field,
     };
@@ -467,9 +471,22 @@ mod tests {
         c_id
     }
 
-    fn check_result(result: &mut [Tuple], expected: &mut [Tuple], verbose: bool) {
-        result.sort();
-        expected.sort();
+    fn check_result(
+        result: impl ResultBufferTrait,
+        expected: &mut [Tuple],
+        sorted: bool,
+        verbose: bool,
+    ) {
+        let mut vec = Vec::new();
+        let result = result.to_iter();
+        while let Some(t) = result.next() {
+            vec.push(t);
+        }
+        let mut result = vec;
+        if sorted {
+            result.sort();
+            expected.sort();
+        }
         let result_string = result
             .iter()
             .map(|t| t.to_pretty_string())
@@ -507,7 +524,7 @@ mod tests {
         executor: &QueryExecutor<T>,
         sql_string: &str,
         verbose: bool,
-    ) -> Vec<Tuple> {
+    ) -> impl ResultBufferTrait {
         let logical_plan = executor.to_logical(sql_string).unwrap();
         if verbose {
             println!("=== Logical Plan ===");
@@ -539,23 +556,14 @@ mod tests {
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT name, age FROM Employees";
         let result = run_query(&executor, sql_string, true);
-        let expected = vec![
+        let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
             Tuple::from_fields(vec!["David".into(), 28.into()]),
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
         ];
-        assert_eq!(
-            result,
-            expected,
-            "Result: \n{}\n",
-            result
-                .iter()
-                .map(|t| t.to_pretty_string())
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -563,7 +571,7 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT name, age + 1 FROM Employees";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 31.into()]),
             Tuple::from_fields(vec!["Bob".into(), 23.into()]),
@@ -571,7 +579,7 @@ mod tests {
             Tuple::from_fields(vec!["David".into(), 29.into()]),
             Tuple::from_fields(vec!["Eva".into(), 41.into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -579,12 +587,12 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT name, age FROM Employees WHERE age > 30";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -592,14 +600,14 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT e.name, e.age, d.name AS department FROM Employees e JOIN Departments d ON e.department_id = d.id";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into(), "Engineering".into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into(), "HR".into()]),
             Tuple::from_fields(vec!["David".into(), 28.into(), "Engineering".into()]),
         ];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -607,13 +615,13 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name, sum(e.age) FROM Departments d LEFT OUTER JOIN Employees e ON e.department_id = d.id GROUP BY d.name";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
             Tuple::from_fields(vec!["Marketing".into(), Field::Int(None)]),
         ];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -621,13 +629,13 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string =  "SELECT d.name, sum(e.age) FROM Employees e RIGHT OUTER JOIN Departments d ON e.department_id = d.id GROUP BY d.name";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
             Tuple::from_fields(vec!["Marketing".into(), Field::Int(None)]),
         ];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -636,12 +644,12 @@ mod tests {
         let executor = setup_executor(storage.clone());
         let sql_string =
             "SELECT d.name FROM Departments d LEFT SEMI JOIN Employees e ON e.department_id = d.id";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
         ];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -649,12 +657,12 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name FROM Employees e RIGHT SEMI JOIN Departments d ON e.department_id = d.id";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
         ];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -663,9 +671,9 @@ mod tests {
         let executor = setup_executor(storage.clone());
         let sql_string =
             "SELECT d.name FROM Departments d LEFT ANTI JOIN Employees e ON e.department_id = d.id";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![Tuple::from_fields(vec!["Marketing".into()])];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -673,9 +681,9 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name FROM Employees e RIGHT ANTI JOIN Departments d ON e.department_id = d.id";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![Tuple::from_fields(vec!["Marketing".into()])];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -684,7 +692,7 @@ mod tests {
         let executor = setup_executor(storage.clone());
         let sql_string =
             "SELECT e.name, e.age, d.name AS department FROM Employees e, Departments d";
-        let mut result = run_query(&executor, sql_string, false);
+        let result = run_query(&executor, sql_string, false);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "Engineering".into()]),
@@ -702,7 +710,7 @@ mod tests {
             Tuple::from_fields(vec!["Eva".into(), 40.into(), "Engineering".into()]),
             Tuple::from_fields(vec!["Eva".into(), 40.into(), "Marketing".into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -710,9 +718,9 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT COUNT(*), AVG(age) FROM Employees";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![Tuple::from_fields(vec![5.into(), 31.0.into()])];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -720,12 +728,12 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name;";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 32.5.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 25.0.into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -733,9 +741,9 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name HAVING AVG(e.age) > 30";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![Tuple::from_fields(vec!["HR".into(), 32.5.into()])];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 
     #[test]
@@ -744,13 +752,13 @@ mod tests {
         let executor = setup_executor(storage.clone());
         // For each department, count the number of employees and sum of their ages
         let sql_string = "SELECT d.name, cnt, sum_age FROM Departments d, (SELECT department_id, COUNT(*) AS cnt, SUM(age) AS sum_age FROM Employees e WHERE e.department_id = d.id)";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 2.into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 2.into(), 50.into()]),
             Tuple::from_fields(vec!["Marketing".into(), 0.into(), Field::Int(None)]),
         ];
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -758,14 +766,12 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
         ];
-        result.sort();
-        expected.sort();
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -774,15 +780,13 @@ mod tests {
         let executor = setup_executor(storage.clone());
         let sql_string =
             "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees ); ";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
             Tuple::from_fields(vec!["Marketing".into()]),
         ];
-        result.sort();
-        expected.sort();
-        check_result(&mut result, &mut expected, true);
+        check_result(result, &mut expected, true, true);
     }
 
     #[test]
@@ -790,7 +794,7 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT name, age FROM Employees ORDER BY age DESC, name ASC";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
@@ -798,7 +802,7 @@ mod tests {
             Tuple::from_fields(vec!["David".into(), 28.into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, false, false);
     }
 
     #[test]
@@ -806,7 +810,7 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT name, age FROM Employees ORDER BY age + 1 DESC";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
@@ -814,7 +818,7 @@ mod tests {
             Tuple::from_fields(vec!["David".into(), 28.into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, false, false);
     }
 
     #[test]
@@ -822,12 +826,12 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name ORDER BY average_age DESC";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 32.5.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 25.0.into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, false, false);
     }
 
     #[test]
@@ -835,25 +839,25 @@ mod tests {
         let storage = get_in_mem_storage();
         let executor = setup_executor(storage.clone());
         let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'HR')";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into()]),
             Tuple::from_fields(vec!["Charlie".into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
 
         let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'Marketing')";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
 
         let sql_string =
             "SELECT name FROM Departments WHERE id IN (SELECT department_id FROM Employees)";
-        let mut result = run_query(&executor, sql_string, true);
+        let result = run_query(&executor, sql_string, true);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
         ];
-        check_result(&mut result, &mut expected, false);
+        check_result(result, &mut expected, true, false);
     }
 }

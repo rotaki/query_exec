@@ -296,6 +296,14 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
+    pub fn neq(self, other: Expression<P>) -> Expression<P> {
+        Expression::Binary {
+            op: BinaryOp::Neq,
+            left: Box::new(self),
+            right: Box::new(other),
+        }
+    }
+
     pub fn add(self, other: Expression<P>) -> Expression<P> {
         Expression::Binary {
             op: BinaryOp::Add,

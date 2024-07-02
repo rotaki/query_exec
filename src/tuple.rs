@@ -33,6 +33,13 @@ pub struct Tuple {
 }
 
 impl Tuple {
+    pub fn copy(&self) -> Self {
+        // We don't use Copy trait because we don't want implicit copying of the tuples.
+        Tuple {
+            fields: self.fields.clone(),
+        }
+    }
+
     pub fn to_pretty_string(&self) -> String {
         // Each field has a fixed width of 20 characters.
         let width = 20;

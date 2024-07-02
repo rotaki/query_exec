@@ -1,4 +1,12 @@
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use std::{
+    cell::UnsafeCell,
+    collections::HashMap,
+    marker::PhantomData,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock, RwLockReadGuard,
+    },
+};
 
 use txn_storage::prelude::*;
 
@@ -15,7 +23,7 @@ use crate::{
     ColumnId, Field,
 };
 
-use super::{bytecode_expr::ByteCodeExpr, Executor};
+use super::{bytecode_expr::ByteCodeExpr, Executor, ResultBufferTrait, ResultIterator};
 
 type Key = Vec<u8>;
 
@@ -33,7 +41,58 @@ pub enum VolcanoIterator<'a, T: TxnStorageTrait<'a>> {
     NestedLoopJoin(NestedLoopJoin<'a, T>),
 }
 
+pub struct TupleResults {
+    latch: RwLock<()>,
+    tuples: UnsafeCell<Vec<Tuple>>,
+}
+
+impl TupleResults {
+    pub fn new() -> Self {
+        Self {
+            latch: RwLock::new(()),
+            tuples: UnsafeCell::new(Vec::new()),
+        }
+    }
+}
+
+impl ResultBufferTrait for TupleResults {
+    fn push(&self, tuple: Tuple) {
+        let _guard = self.latch.write().unwrap();
+        unsafe {
+            (*self.tuples.get()).push(tuple);
+        }
+    }
+
+    fn to_iter<'a>(&'a self) -> Box<dyn ResultIterator<'a> + 'a> {
+        let _guard = self.latch.read().unwrap();
+        Box::new(TupleResultsIter {
+            _buffer_guard: self.latch.read().unwrap(),
+            tuples: unsafe { &*self.tuples.get() },
+            current: AtomicUsize::new(0),
+        })
+    }
+}
+
+pub struct TupleResultsIter<'a> {
+    _buffer_guard: RwLockReadGuard<'a, ()>,
+    tuples: &'a Vec<Tuple>,
+    current: AtomicUsize,
+}
+
+impl<'a> ResultIterator<'a> for TupleResultsIter<'a> {
+    fn next(&self) -> Option<Tuple> {
+        let current = self.current.fetch_add(1, Ordering::AcqRel);
+        if current < self.tuples.len() {
+            Some(self.tuples[current].copy())
+        } else {
+            None
+        }
+    }
+}
+
 impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for VolcanoIterator<'a, T> {
+    type Buffer = TupleResults;
+
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
         let mut physical_to_op = PhysicalRelExprToOpIter::new(storage);
         physical_to_op.to_executable(catalog, physical_plan)
@@ -45,8 +104,8 @@ impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for VolcanoIterator<'a, T>
         out
     }
 
-    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Vec<Tuple>, ExecError> {
-        let mut results = Vec::new();
+    fn execute(&mut self, txn: &T::TxnHandle) -> Result<TupleResults, ExecError> {
+        let results = TupleResults::new();
         loop {
             log_trace!("------------ VolcanoIterator::next ------------");
             match self.next(txn)? {

@@ -82,6 +82,5 @@ fn main() {
     println!("{}", exec.to_pretty_string());
     let result = query_executor.execute(exec).unwrap();
 
-    print_tuples(&result);
-    println!("Count: {}", result.len());
+    print_tuples(result);
 }
