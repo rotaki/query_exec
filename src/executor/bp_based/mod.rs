@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{cmp::Reverse, collections::BinaryHeap, sync::Arc};
 
 use super::ResultBufferTrait;
 
-use crate::{log, log_info};
+use crate::{log, log_info, ColumnId};
 
 pub struct Pipeline {
     scanner: Scanner,
@@ -11,6 +11,7 @@ pub struct Pipeline {
 
 pub enum Scanner {
     TableScan(Arc<dyn ResultBufferTrait>),
+    MergeScan(Vec<(Arc<dyn ResultBufferTrait>, Vec<(ColumnId, bool, bool)>)>), // (scanner, Vec((col_id, asc, nulls_first)))
 }
 
 impl Pipeline {
@@ -24,6 +25,33 @@ impl Pipeline {
                 let iter = scanner.to_iter();
                 while let Some(tuple) = iter.next() {
                     self.output.push(tuple);
+                }
+            }
+            Scanner::MergeScan(scanners) => {
+                let mut heap = BinaryHeap::new();
+                let iters = scanners
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (scanner, sort_cols))| {
+                        let iter = scanner.to_iter();
+                        if let Some(tuple) = iter.next() {
+                            heap.push(Reverse((
+                                tuple.to_normalized_key_bytes(sort_cols),
+                                (i, tuple),
+                            )));
+                        }
+                        (iter, sort_cols)
+                    })
+                    .collect::<Vec<_>>();
+                while let Some(Reverse((_, (i, tuple)))) = heap.pop() {
+                    self.output.push(tuple);
+                    let (iter, sort_cols) = &iters[i];
+                    if let Some(tuple) = iter.next() {
+                        heap.push(Reverse((
+                            tuple.to_normalized_key_bytes(sort_cols),
+                            (i, tuple),
+                        )));
+                    }
                 }
             }
         }
@@ -134,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline() {
+    fn test_scan_pipeline() {
         let input = Arc::new(TupleResults::new());
         let mut expected = Vec::new();
         expected.push(Tuple::from_fields(vec![1.into(), "hello".into()]));
@@ -149,6 +177,92 @@ mod tests {
         pipeline.execute();
 
         let output = pipeline.get_output();
+        check_result(output, &mut expected, false, false);
+    }
+
+    #[test]
+    fn test_sort_merge_pipeline_2_inputs() {
+        let input1 = Arc::new(TupleResults::new());
+        let mut expected1 = Vec::new();
+        expected1.push(Tuple::from_fields(vec![1.into(), "hello".into()]));
+        expected1.push(Tuple::from_fields(vec![3.into(), "world".into()]));
+        expected1.push(Tuple::from_fields(vec![5.into(), "foo".into()]));
+
+        for tuple in &expected1 {
+            input1.push(tuple.copy());
+        }
+
+        let input2 = Arc::new(TupleResults::new());
+        let mut expected2 = Vec::new();
+        expected2.push(Tuple::from_fields(vec![2.into(), "world".into()]));
+        expected2.push(Tuple::from_fields(vec![4.into(), "hello".into()]));
+        expected2.push(Tuple::from_fields(vec![6.into(), "bar".into()]));
+
+        for tuple in &expected2 {
+            input2.push(tuple.copy());
+        }
+
+        let scanner = Scanner::MergeScan(vec![
+            (input1.clone(), vec![(0, true, false)]),
+            (input2.clone(), vec![(0, true, false)]),
+        ]);
+        let output = Arc::new(TupleResults::new());
+        let mut pipeline = Pipeline::new(scanner, output);
+        pipeline.execute();
+
+        let output: Arc<dyn ResultBufferTrait> = pipeline.get_output();
+        let mut expected = expected1;
+        expected.extend(expected2);
+        expected.sort();
+        check_result(output, &mut expected, false, false);
+    }
+
+    #[test]
+    fn test_sort_merge_pipeline_3_inputs() {
+        let input1 = Arc::new(TupleResults::new());
+        let mut expected1 = Vec::new();
+        expected1.push(Tuple::from_fields(vec![1.into(), "hello".into()]));
+        expected1.push(Tuple::from_fields(vec![3.into(), "bar".into()]));
+        expected1.push(Tuple::from_fields(vec![3.into(), "world".into()]));
+
+        for tuple in &expected1 {
+            input1.push(tuple.copy());
+        }
+
+        let input2 = Arc::new(TupleResults::new());
+        let mut expected2 = Vec::new();
+        expected2.push(Tuple::from_fields(vec![2.into(), "world".into()]));
+        expected2.push(Tuple::from_fields(vec![3.into(), "bar".into()]));
+        expected2.push(Tuple::from_fields(vec![3.into(), "foo".into()]));
+
+        for tuple in &expected2 {
+            input2.push(tuple.copy());
+        }
+
+        let input3 = Arc::new(TupleResults::new());
+        let mut expected3 = Vec::new();
+        expected3.push(Tuple::from_fields(vec![7.into(), "baz".into()]));
+        expected3.push(Tuple::from_fields(vec![8.into(), "qux".into()]));
+        expected3.push(Tuple::from_fields(vec![9.into(), "quux".into()]));
+
+        for tuple in &expected3 {
+            input3.push(tuple.copy());
+        }
+
+        let scanner = Scanner::MergeScan(vec![
+            (input1.clone(), vec![(0, true, false), (1, true, false)]),
+            (input2.clone(), vec![(0, true, false), (1, true, false)]),
+            (input3.clone(), vec![(0, true, false), (1, true, false)]),
+        ]);
+        let output = Arc::new(TupleResults::new());
+        let mut pipeline = Pipeline::new(scanner, output);
+        pipeline.execute();
+
+        let output: Arc<dyn ResultBufferTrait> = pipeline.get_output();
+        let mut expected = expected1;
+        expected.extend(expected2);
+        expected.extend(expected3);
+        expected.sort();
         check_result(output, &mut expected, false, false);
     }
 }
