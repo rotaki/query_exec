@@ -56,11 +56,15 @@ impl TupleResults {
 }
 
 impl ResultBufferTrait for TupleResults {
-    fn push(&self, tuple: Tuple) {
+    fn insert(&self, tuple: Tuple) {
         let _guard = self.latch.write().unwrap();
         unsafe {
             (*self.tuples.get()).push(tuple);
         }
+    }
+
+    fn get(&self, key: Vec<Field>) -> Vec<Tuple> {
+        unimplemented!("TupleResults does not support get")
     }
 
     fn to_iter<'a>(&'a self) -> Box<dyn ResultIterator<'a> + 'a> {
@@ -110,7 +114,7 @@ impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for VolcanoIterator<'a, T>
             log_trace!("------------ VolcanoIterator::next ------------");
             match self.next(txn)? {
                 Some((_, tuple)) => {
-                    results.push(tuple);
+                    results.insert(tuple);
                 }
                 None => {
                     return Ok(results);

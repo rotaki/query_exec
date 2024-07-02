@@ -4,6 +4,7 @@ use txn_storage::TxnStorageTrait;
 
 use crate::{
     catalog::CatalogRef, error::ExecError, expression::prelude::PhysicalRelExpr, tuple::Tuple,
+    Field,
 };
 
 mod bp_based;
@@ -26,7 +27,8 @@ pub trait Executor<'a, T: TxnStorageTrait<'a>> {
 }
 
 pub trait ResultBufferTrait {
-    fn push(&self, tuple: Tuple);
+    fn insert(&self, tuple: Tuple);
+    fn get(&self, key: Vec<Field>) -> Vec<Tuple>;
     fn to_iter<'a>(&'a self) -> Box<dyn ResultIterator<'a> + 'a>;
 }
 
