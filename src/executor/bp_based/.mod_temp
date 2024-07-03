@@ -1,0 +1,321 @@
+use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+
+// BP based execution engine
+use fbtree::bp::{prelude::LRUEvictionPolicy, BufferPool, FrameReadGuard, FrameWriteGuard, PageFrameKey};
+use txn_storage::{ContainerId, TxnStorageTrait};
+
+use crate::{catalog, error::ExecError, expression::AggOp, optimizer::PhysicalRelExpr, prelude::CatalogRef, tuple::Tuple, ColumnId, Field};
+
+use super::{bytecode_expr::ByteCodeExpr, Executor, ResultIterator};
+
+pub struct PhysicalRelExprToPipelineGraph<'a, T: TxnStorageTrait<'a>> {
+    pub storage: Arc<T>,
+    phantom: PhantomData<&'a T>,
+}
+
+type ColIdToIdx = HashMap<ColumnId, usize>;
+
+impl<'a, T: TxnStorageTrait<'a>> PhysicalRelExprToPipelineGraph<'a, T> {
+    pub fn new(storage: Arc<T>) -> Self {
+        Self {
+            storage,
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn to_pipeline_graph(
+        &mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> PipelineGraph<'a> {
+
+    }
+
+    fn to_pipeline_graph_inner(
+        &mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> Result<(PipelineGraph<'a>, ColIdToIdx), ExecError> {
+        match expr {
+            PhysicalRelExpr::Scan {
+                db_id: _,
+                c_id,
+                table_name: _,
+                column_indices,
+            } => {
+                let col_id_to_idx = column_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, &col_id)| (col_id, idx))
+                    .collect();
+                let schema = catalog.get_table_schema(c_id)?;
+
+            }
+        }
+    }
+}
+
+// Execution model:
+// 1. The plan is converted into a series of pipelines
+// 2. Each pipeline will read from the result buffer
+//    of the previous pipeline and write to the result buffer
+// 3. The first pipeline will read from the storage
+//    using an access method (e.g. index scan, full scan)
+// 4. Once the pipeline is finished, push the next pipeline
+//    to the executor queue
+
+type PipelineId = usize;
+
+pub struct PipelineGraph<'a> {
+    pipelines: HashMap<PipelineId, Option<Pipeline<'a>>>, // PipelineId -> Pipeline
+    dependencies: HashMap<PipelineId, Vec<PipelineId>>, // PipelineId -> list of dependent pipelines
+}
+
+impl<'a> PipelineGraph<'a> {
+    fn new() -> Self {
+        Self {
+            pipelines: HashMap::new(),
+            dependencies: HashMap::new(),
+        }
+    }
+    
+    /// Add a pipeline to the graph
+    /// 
+    /// # Arguments
+    ///     
+    /// * `pipeline_id` - The id of the pipeline
+    /// * `pipeline` - The pipeline
+    /// * `dependencies` - The list of pipeline ids that this pipeline depends on
+    fn add_pipeline(&mut self, pipeline_id: PipelineId, pipeline: Pipeline<'a>, dependencies: Vec<PipelineId>) {
+        self.pipelines.insert(pipeline_id, Some(pipeline));
+        self.dependencies.insert(pipeline_id, Vec::new());
+        for dep in dependencies {
+            self.dependencies.get_mut(&dep).unwrap().push(pipeline_id);
+        }
+    }
+
+    fn get_ready_pipelines(&self) -> Vec<PipelineId> {
+        // Return the pipelines that do not have any dependencies
+        self.pipelines.keys().filter(|&pipeline_id| {
+            self.dependencies.get(pipeline_id).map_or(true, |deps| deps.is_empty())
+        }).cloned().collect()
+    }
+
+    fn get_pipeline(&mut self, pipeline_id: PipelineId) -> Pipeline<'a> {
+        self.pipelines.get_mut(&pipeline_id).unwrap().take().unwrap()
+    }
+
+    fn remove_pipeline(&mut self, pipeline_id: PipelineId) {
+        self.pipelines.remove(&pipeline_id);
+        self.dependencies.remove(&pipeline_id);
+    }
+}
+
+pub struct PipelineExecutor<'a> {
+    piplines: Vec<Pipeline<'a>>,
+}
+
+impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for PipelineExecutor<'a> {
+    type Iter = ResultBuffer<'a>;
+
+    fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
+        // Convert the physical plan into a series of pipelines
+    }
+
+    fn to_pretty_string(&self) -> String {
+        "Not implemented yet".to_string()
+    }
+
+    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Self::Iter, ExecError> {
+        // Return the result buffer of the last pipeline in the executor
+        // A pipeline might have dependent pipelines that need to be executed.
+        // In such cases, after executing the pipeline, the dependent pipelines
+        // are pushed to the executor queue.
+        // The dependent pipelines are ma
+    }
+}
+
+
+// ResultBuffer:
+// 1. Result buffer is holds the results of a pipeline
+//    in pages. 
+// 2. It holds 1 page and a reference to all the pages
+//    that are being used by the pipeline. Once the page
+//    is full, it will return the frame to the BufferPool
+//    and get a new frame. The BufferPool will then do a
+//    asynchronous write to the disk depending on the
+//    eviction policy.
+// 3. The result buffer will hold all the (page_id, frame_id)
+//    pairs that are being used by the pipeline. We need to
+//    keep track of these pairs so that we can pass them to
+//    the next pipeline. The question is whether to write
+//    this information in a page. 
+
+// Pipeline:
+// 1. A pipeline is a series of operators that does not require
+//    any materialization of records except for the final operator.
+// 2. A pipeline will have a computation space that will be used
+//    to store the intermediate results of the operators.
+// 3. The computation space is also allocated in pages from the
+//    BufferPool. Once the computation is over, those pages are
+//    returned to the BufferPool as a clean page that does not
+//    need to be written back to the disk.
+// 4. The number of pages that are allocated to the computation
+//    is a research question. As a baseline, we allocate a fixed
+//    number of pages to the computation space. In Postgres, the 
+//    default value is 4MB. We can start with a similar value.
+
+
+pub struct ResultBuffer<'a> {
+    bp: Arc<BufferPool<LRUEvictionPolicy>>,
+    // The page_id and frame_id of the pages that are being used
+    // by the pipeline
+    pages: Vec<PageFrameKey>,
+    // The current page that is being used by the pipeline
+    current_page: Option<FrameWriteGuard<'a, LRUEvictionPolicy>>,
+    // Iter page that is being used by the pipeline
+    iter_page: Option<FrameReadGuard<'a, LRUEvictionPolicy>>,
+}
+
+impl<'a> ResultIterator for ResultBuffer<'a> {
+    fn next(&mut self) -> Option<Tuple> {
+        if let Some(page) = &mut self.iter_page {
+            
+        } else {
+            // Get the next page from the BufferPool
+            // If there are no more pages, return None
+            // If there are more pages, return the next tuple
+        }
+    }
+}
+
+
+
+pub struct Pipeline<'a> {
+    // The input buffer that will be used by the pipeline
+    // Anything that implements the PageIterator trait. 
+    input: Vec<Arc<dyn ResultIterator>>,
+
+    // The output buffer that will be used by the pipeline
+    output: Arc<ResultBuffer<'a>>,
+
+    // The computation space that will be used by the pipeline
+    // to store the intermediate results of the operators
+    computation_space: Vec<FrameWriteGuard<'a, LRUEvictionPolicy>>,
+
+    // Tuple processing expressions
+    exprs_vec: Vec<(StreamProcessing, Vec<ByteCodeExpr>)>,
+}
+
+impl<'a> Pipeline<'a> {
+    fn scan(input: )
+}
+
+enum BlockingProcessing {
+    Sort(Vec<(ColumnId, bool, bool)>), // ColumnId, Ascending, NullsFirst
+    Merge,
+    HashTableConstruction,
+    HashAggregation(Vec<ColumnId>, Vec<(AggOp, ColumnId)>)
+}
+
+enum StreamProcessing {
+    Transformation,
+    Filtering,
+}
+
+pub fn process_tuple(tuple: Tuple, exprs_vec: &Vec<(StreamProcessing, Vec<ByteCodeExpr>)>) -> Result<Option<Tuple>, ExecError> {
+    let mut new_tuple = tuple;
+    for (sp, exprs) in exprs_vec {
+        match sp {
+            StreamProcessing::Transformation => {
+                let mut result = Vec::with_capacity(exprs.len());
+                for expr in exprs {
+                    result.push(expr.eval(&new_tuple)?);
+                }
+                new_tuple = Tuple::from_fields(result);
+            }
+            StreamProcessing::Filtering => {
+                let mut keep = true;
+                for expr in exprs {
+                    let Field::Boolean(b) = expr.eval(&new_tuple)? else {
+                        return Err(ExecError::FieldOp("Filtering expression did not return a boolean".to_string()));
+                    };
+                    if !b.unwrap_or(false) {
+                        keep = false;
+                        break;
+                    }
+                }
+                if !keep {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    Ok(Some(new_tuple))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::{expression::{BinaryOp, Expression}, optimizer::PhysicalRelExpr, tuple::Tuple};
+
+
+    #[test]
+    fn test_process_tuples() {
+        // Multiple process multiple tuples
+        let tuples = vec![
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]),
+            Tuple::from_fields(vec![4.into(), 5.into(), 6.into()]),
+            Tuple::from_fields(vec![7.into(), 8.into(), 9.into()]),
+        ];
+
+        // Filter out the tuples if the first field is 4
+        // Transform the second field by adding 1
+        // Transform all the fields by summing them
+        let filter_expr = Expression::<PhysicalRelExpr>::neq(
+            Expression::col_ref(0),
+            Expression::int(4),
+        );
+        let transform1 = Expression::<PhysicalRelExpr>::binary(
+            BinaryOp::Add,
+            Expression::col_ref(1),
+            Expression::int(1),
+        );
+        let transform2 = Expression::<PhysicalRelExpr>::binary(
+            BinaryOp::Add,
+            Expression::col_ref(0),
+            Expression::binary(
+                BinaryOp::Add,
+                Expression::col_ref(1),
+                Expression::col_ref(2),
+            ),
+        );
+        let col_id_to_idx = HashMap::new();
+        let exprs_vec = vec![
+            (StreamProcessing::Filtering, vec![ByteCodeExpr::from_ast(filter_expr, &col_id_to_idx).unwrap()]),
+            (StreamProcessing::Transformation, vec![
+                ByteCodeExpr::from_ast(Expression::<PhysicalRelExpr>::col_ref(0), &col_id_to_idx).unwrap(),
+                ByteCodeExpr::from_ast(transform1, &col_id_to_idx).unwrap(),
+                ByteCodeExpr::from_ast(Expression::<PhysicalRelExpr>::col_ref(2), &col_id_to_idx).unwrap(),
+            ]),
+            (StreamProcessing::Transformation, vec![ByteCodeExpr::from_ast(transform2, &col_id_to_idx).unwrap()]),
+        ];
+
+        let mut new_tuples = Vec::new();
+        for tuple in tuples {
+            match process_tuple(tuple, &exprs_vec) {
+                Ok(Some(new_tuple)) => new_tuples.push(new_tuple),
+                Ok(None) => (),
+                Err(e) => panic!("Error processing tuple: {:?}", e),
+            }
+        }
+
+        assert_eq!(new_tuples.len(), 2);
+        assert_eq!(new_tuples[0], Tuple::from_fields(vec![7.into()])); // 1 + (2 + 1) + 3 = 7
+        assert_eq!(new_tuples[1], Tuple::from_fields(vec![25.into()])); // 7 + (8 + 1) + 9 = 25
+        
+    }
+}
