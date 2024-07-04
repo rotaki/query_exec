@@ -5,7 +5,11 @@ use std::{
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
-use crate::{error::ExecError, tuple::{FromBool, Tuple}, ColumnId, Field};
+use crate::{
+    error::ExecError,
+    tuple::{FromBool, Tuple},
+    ColumnId, Field,
+};
 
 use super::{bytecode_expr::ByteCodeExpr, ResultBufferTrait};
 
@@ -15,6 +19,11 @@ pub enum TupleBuffer {
         Arc<RwLock<()>>,
         UnsafeCell<Vec<(Arc<TupleBuffer>, Vec<(ColumnId, bool, bool)>)>>,
     ), // column_id, ascending, nulls_first
+    HashTable(
+        Arc<RwLock<()>>,
+        Vec<ByteCodeExpr>, // Hash key expressions
+        UnsafeCell<HashMap<Vec<Field>, Vec<Tuple>>>,
+    ),
 }
 
 impl TupleBuffer {
@@ -26,6 +35,14 @@ impl TupleBuffer {
         TupleBuffer::Runs(Arc::new(RwLock::new(())), UnsafeCell::new(runs))
     }
 
+    pub fn hash_table(exprs: Vec<ByteCodeExpr>) -> Self {
+        TupleBuffer::HashTable(
+            Arc::new(RwLock::new(())),
+            exprs,
+            UnsafeCell::new(HashMap::new()),
+        )
+    }
+
     pub fn push(&self, tuple: Tuple) {
         match self {
             TupleBuffer::TupleVec(lock, vec) => {
@@ -35,6 +52,41 @@ impl TupleBuffer {
             TupleBuffer::Runs(_, _) => {
                 panic!("TupleBuffer::push() is not supported for TupleBuffer::Runs")
             }
+            TupleBuffer::HashTable(lock, exprs, table) => {
+                let _guard = lock.write().unwrap();
+                let key = exprs
+                    .iter()
+                    .map(|expr| expr.eval(&tuple))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let table = unsafe { &mut *table.get() };
+                match table.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().push(tuple);
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(vec![tuple]);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn iter_key(&self, key: Vec<Field>) -> TupleBufferIter {
+        match self {
+            TupleBuffer::TupleVec(_, _) => {
+                panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TupleVec")
+            }
+            TupleBuffer::Runs(_, _) => {
+                panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::Runs")
+            }
+            TupleBuffer::HashTable(lock, _, table) => {
+                let _guard = lock.read().unwrap();
+                // SAFETY: The lock ensures that the reference is valid.
+                let table = unsafe { &*table.get() };
+                let iter = table.get(&key).map(|tuples| tuples.iter());
+                TupleBufferIter::vec(_guard, iter.unwrap_or_default())
+            }
         }
     }
 
@@ -42,10 +94,12 @@ impl TupleBuffer {
         match self {
             TupleBuffer::TupleVec(lock, vec) => {
                 let _guard = lock.read().unwrap();
+                // SAFETY: The lock ensures that the reference is valid.
                 TupleBufferIter::vec(_guard, unsafe { &*vec.get() }.iter())
             }
             TupleBuffer::Runs(lock, runs) => {
                 let _guard = lock.read().unwrap();
+                // SAFETY: The lock ensures that the reference is valid.
                 let runs = unsafe { &*runs.get() };
                 let runs = runs
                     .iter()
@@ -53,15 +107,27 @@ impl TupleBuffer {
                     .collect();
                 TupleBufferIter::merge(_guard, runs)
             }
+            TupleBuffer::HashTable(lock, _, table) => {
+                let _guard = lock.read().unwrap();
+                // SAFETY: The lock ensures that the reference is valid.
+                let table = unsafe { &*table.get() };
+                TupleBufferIter::hash_table(_guard, table.iter())
+            }
         }
     }
 }
 
 pub enum TupleBufferIter<'a> {
     TupleVec(RwLockReadGuard<'a, ()>, Mutex<std::slice::Iter<'a, Tuple>>),
+    HashTable(
+        RwLockReadGuard<'a, ()>,
+        Mutex<()>, // Guard to ensure that the iterator is mutable by many threads
+        UnsafeCell<Option<(&'a Vec<Tuple>, usize)>>, // Current tuples and index
+        UnsafeCell<std::collections::hash_map::Iter<'a, Vec<Field>, Vec<Tuple>>>,
+    ),
     MergeScan(
         RwLockReadGuard<'a, ()>, // Guard to ensure that the runs are not modified during the merge
-        Mutex<BinaryHeap<Reverse<(Vec<u8>, usize, Tuple)>>>,
+        Mutex<BinaryHeap<Reverse<(Vec<u8>, usize, Tuple)>>>, // Guard to ensure that the iterator is mutable by many threads
         Vec<(TupleBufferIter<'a>, Vec<(ColumnId, bool, bool)>)>,
     ),
 }
@@ -69,6 +135,18 @@ pub enum TupleBufferIter<'a> {
 impl<'a> TupleBufferIter<'a> {
     pub fn vec(guard: RwLockReadGuard<'a, ()>, iter: std::slice::Iter<'a, Tuple>) -> Self {
         TupleBufferIter::TupleVec(guard, Mutex::new(iter))
+    }
+
+    pub fn hash_table(
+        guard: RwLockReadGuard<'a, ()>,
+        table: std::collections::hash_map::Iter<'a, Vec<Field>, Vec<Tuple>>,
+    ) -> Self {
+        TupleBufferIter::HashTable(
+            guard,
+            Mutex::new(()),
+            UnsafeCell::new(None),
+            UnsafeCell::new(table),
+        )
     }
 
     pub fn merge(
@@ -101,6 +179,37 @@ impl<'a> TupleBufferIter<'a> {
                     None
                 }
             }
+            TupleBufferIter::HashTable(_, mutex, current_vec, table) => {
+                let _guard = mutex.lock().unwrap();
+                // SAFETY: The lock ensures that the reference is valid.
+                let current_vec = unsafe { &mut *current_vec.get() };
+                let table = unsafe { &mut *table.get() };
+                if current_vec.is_none() {
+                    *current_vec = table.next().map(|(_, tuples)| (tuples, 0));
+                }
+                if let Some((tuples, i)) = current_vec {
+                    if let Some(tuple) = tuples.get(*i) {
+                        *i += 1;
+                        Some(tuple.copy())
+                    } else {
+                        // Here, we do not simply call self.next() here to avoid a deadlock on the mutex.
+                        *current_vec = table.next().map(|(_, tuples)| (tuples, 0));
+                        if let Some((tuples, i)) = current_vec {
+                            if let Some(tuple) = tuples.get(*i) {
+                                *i += 1;
+                                Some(tuple.copy())
+                            } else {
+                                unreachable!("The new tuples vector should not be empty")
+                            }
+                        } else {
+                            // There is no more tuples in the hash table.
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
         }
     }
 }
@@ -110,6 +219,7 @@ pub enum PipelineIterator<'a> {
     Filter(PFilterIter<'a>),
     Project(PProjectIter<'a>),
     Map(PMapIter<'a>),
+    HashJoin(PHashJoinIter<'a>),
 }
 
 impl<'a> PipelineIterator<'a> {
@@ -119,18 +229,11 @@ impl<'a> PipelineIterator<'a> {
     ) -> Result<Option<Tuple>, ExecError> {
         let context = unsafe { std::mem::transmute(context) };
         match self {
-            PipelineIterator::Scan(iter) => {
-                iter.next(context)
-            }
-            PipelineIterator::Filter(iter) => {
-                iter.next(context)
-            }
-            PipelineIterator::Project(iter) => {
-                iter.next(context)
-            }
-            PipelineIterator::Map(iter) => {
-                iter.next(context)
-            }
+            PipelineIterator::Scan(iter) => iter.next(context),
+            PipelineIterator::Filter(iter) => iter.next(context),
+            PipelineIterator::Project(iter) => iter.next(context),
+            PipelineIterator::Map(iter) => iter.next(context),
+            PipelineIterator::HashJoin(iter) => iter.next(context),
         }
     }
 }
@@ -232,6 +335,63 @@ impl<'a> PMapIter<'a> {
     }
 }
 
+pub enum PHashJoinIter<'a> {
+    Inner(PHashJoinInnerIter<'a>),
+    // RightOuter(PHashJoinOuterIter<'a>),
+    // RightSemi(PHashJoinSemiIter<'a>),
+    // RightAnti(PHashJoinAntiIter<'a>),
+    // RightMark(PHashJoinMarkIter<'a>),
+}
+
+impl<'a> PHashJoinIter<'a> {
+    pub fn next(
+        &mut self,
+        context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.next(context),
+            // PHashJoinIter::RightOuter(iter) => iter.next(context),
+            // PHashJoinIter::RightSemi(iter) => iter.next(context),
+            // PHashJoinIter::RightAnti(iter) => iter.next(context),
+            // PHashJoinIter::RightMark(iter) => iter.next(context),
+        }
+    }
+}
+
+pub struct PHashJoinInnerIter<'a> {
+    input: Box<PipelineIterator<'a>>,
+    build: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+    current: Option<(Tuple, TupleBufferIter<'a>)>,
+}
+
+impl PHashJoinInnerIter<'_> {
+    pub fn next(
+        &mut self,
+        context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        if let Some((probe, build_iter)) = &mut self.current {
+            if let Some(build) = build_iter.next() {
+                let result = build.merge_mut(&probe);
+                return Ok(Some(result));
+            }
+        }
+        // Reset the current tuple and build iterator.
+        if let Some(probe) = self.input.next(context)? {
+            let key = self
+                .exprs
+                .iter()
+                .map(|expr| expr.eval(&probe))
+                .collect::<Result<Vec<_>, _>>()?;
+            let build_iter = context.get(&self.build).unwrap().iter_key(key);
+            self.current = Some((probe, build_iter));
+            self.next(context)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 pub type PipelineID = u16;
 
 pub struct Pipeline<'a> {
@@ -270,9 +430,16 @@ impl<'a> Pipeline<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{executor::bytecode_expr::colidx_expr, tuple};
+
     use super::*;
 
-    fn check_result(actual: &mut Vec<Tuple>, expected: &mut Vec<Tuple>, sorted: bool, verbose: bool) {
+    fn check_result(
+        actual: &mut Vec<Tuple>,
+        expected: &mut Vec<Tuple>,
+        sorted: bool,
+        verbose: bool,
+    ) {
         if sorted {
             actual.sort();
             expected.sort();
@@ -422,5 +589,136 @@ mod tests {
         expected1.append(&mut expected3);
 
         check_result(&mut actual, &mut expected1, true, true);
+    }
+
+    #[test]
+    fn test_hash_table_iter_key() {
+        let exprs = vec![colidx_expr(0)];
+        let input = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec!["a".into(), 1.into()]);
+        let tuple2 = Tuple::from_fields(vec!["b".into(), 2.into()]);
+        let tuple3 = Tuple::from_fields(vec!["a".into(), 3.into()]);
+        let tuple4 = Tuple::from_fields(vec!["b".into(), 4.into()]);
+        input.push(tuple1.copy());
+        input.push(tuple2.copy());
+        input.push(tuple3.copy());
+        input.push(tuple4.copy());
+
+        let iter_key = input.iter_key(vec!["a".into()]);
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter_key.next() {
+            actual.push(tuple);
+        }
+        let mut expected = vec![tuple1.copy(), tuple3.copy()];
+        check_result(&mut actual, &mut expected, true, true);
+
+        let iter_key = input.iter_key(vec!["b".into()]);
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter_key.next() {
+            actual.push(tuple);
+        }
+        let mut expected = vec![tuple2.copy(), tuple4.copy()];
+        check_result(&mut actual, &mut expected, true, true);
+
+        let iter_key = input.iter_key(vec!["c".into()]);
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter_key.next() {
+            actual.push(tuple);
+        }
+        let mut expected = Vec::new();
+        check_result(&mut actual, &mut expected, true, true);
+
+        let iter_all = input.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter_all.next() {
+            actual.push(tuple);
+        }
+        let mut expected = vec![tuple1, tuple2, tuple3, tuple4];
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_hash_table_iter_all() {
+        let exprs = vec![colidx_expr(0)];
+        let input = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec![1.into(), 2.into()]);
+        let tuple2 = Tuple::from_fields(vec![3.into(), 4.into()]);
+        let tuple3 = Tuple::from_fields(vec![1.into(), 2.into()]);
+        let tuple4 = Tuple::from_fields(vec![3.into(), 4.into()]);
+        input.push(tuple1.copy());
+        input.push(tuple2.copy());
+        input.push(tuple3.copy());
+        input.push(tuple4.copy());
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(1, PipelineIterator::Scan(PScanIter::new(0)), output);
+        pipeline.set_context(0, input);
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+        let mut expected = vec![tuple1, tuple3, tuple2, tuple4];
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_hashjoin() {
+        let exprs = vec![colidx_expr(0)];
+        // Build input
+        let input1 = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
+        let tuple2 = Tuple::from_fields(vec![3.into(), "b".into()]);
+        let tuple3 = Tuple::from_fields(vec![1.into(), "c".into()]);
+        let tuple4 = Tuple::from_fields(vec![3.into(), "d".into()]);
+        input1.push(tuple1.copy());
+        input1.push(tuple2.copy());
+        input1.push(tuple3.copy());
+        input1.push(tuple4.copy());
+
+        // Probe input
+        let input0 = Arc::new(TupleBuffer::vec());
+        let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple8 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        input0.push(tuple5.copy());
+        input0.push(tuple6.copy());
+        input0.push(tuple7.copy());
+        input0.push(tuple8.copy());
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(
+            2,
+            PipelineIterator::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter {
+                input: Box::new(PipelineIterator::Scan(PScanIter::new(0))),
+                build: 1,
+                exprs: vec![colidx_expr(0)],
+                current: None,
+            })),
+            output,
+        );
+        pipeline.set_context(0, input0); // Probe input
+        pipeline.set_context(1, input1); // Build input
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+        let mut expected = vec![
+            Tuple::from_fields(vec![1.into(), "a".into(), 1.into(), 2.into(), 3.into()]),
+            Tuple::from_fields(vec![1.into(), "a".into(), 1.into(), 2.into(), 3.into()]),
+            Tuple::from_fields(vec![3.into(), "b".into(), 3.into(), 4.into(), 5.into()]),
+            Tuple::from_fields(vec![3.into(), "b".into(), 3.into(), 4.into(), 5.into()]),
+            Tuple::from_fields(vec![1.into(), "c".into(), 1.into(), 2.into(), 3.into()]),
+            Tuple::from_fields(vec![1.into(), "c".into(), 1.into(), 2.into(), 3.into()]),
+            Tuple::from_fields(vec![3.into(), "d".into(), 3.into(), 4.into(), 5.into()]),
+            Tuple::from_fields(vec![3.into(), "d".into(), 3.into(), 4.into(), 5.into()]),
+        ];
+        check_result(&mut actual, &mut expected, true, true);
     }
 }
