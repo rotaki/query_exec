@@ -15,12 +15,12 @@ use crate::{
 use super::bytecode_expr::ByteCodeExpr;
 
 pub enum TupleBuffer {
-    TupleVec(Arc<RwLock<()>>, UnsafeCell<Vec<Tuple>>),
+    InMemTupleVec(Arc<RwLock<()>>, UnsafeCell<Vec<Tuple>>),
     Runs(
         Arc<RwLock<()>>,
         UnsafeCell<Vec<(Arc<TupleBuffer>, Vec<(ColumnId, bool, bool)>)>>,
     ), // column_id, ascending, nulls_first
-    HashTable(
+    InMemHashTable(
         Arc<RwLock<()>>,
         Vec<ByteCodeExpr>, // Hash key expressions
         UnsafeCell<bool>,  // Has Nulls. Used in mark join.
@@ -30,7 +30,7 @@ pub enum TupleBuffer {
 
 impl TupleBuffer {
     pub fn vec() -> Self {
-        TupleBuffer::TupleVec(Arc::new(RwLock::new(())), UnsafeCell::new(Vec::new()))
+        TupleBuffer::InMemTupleVec(Arc::new(RwLock::new(())), UnsafeCell::new(Vec::new()))
     }
 
     pub fn runs(runs: Vec<(Arc<TupleBuffer>, Vec<(ColumnId, bool, bool)>)>) -> Self {
@@ -38,7 +38,7 @@ impl TupleBuffer {
     }
 
     pub fn hash_table(exprs: Vec<ByteCodeExpr>) -> Self {
-        TupleBuffer::HashTable(
+        TupleBuffer::InMemHashTable(
             Arc::new(RwLock::new(())),
             exprs,
             UnsafeCell::new(false),
@@ -48,9 +48,9 @@ impl TupleBuffer {
 
     pub fn has_null(&self) -> bool {
         match self {
-            TupleBuffer::TupleVec(_, _) => false,
+            TupleBuffer::InMemTupleVec(_, _) => false,
             TupleBuffer::Runs(_, _) => false,
-            TupleBuffer::HashTable(lock, _, has_null, _) => {
+            TupleBuffer::InMemHashTable(lock, _, has_null, _) => {
                 let _guard = lock.read().unwrap();
                 // SAFETY: The lock ensures that the reference is valid.
                 unsafe { *has_null.get() }
@@ -60,14 +60,14 @@ impl TupleBuffer {
 
     pub fn push(&self, tuple: Tuple) {
         match self {
-            TupleBuffer::TupleVec(lock, vec) => {
+            TupleBuffer::InMemTupleVec(lock, vec) => {
                 let _guard = lock.write().unwrap();
                 unsafe { &mut *vec.get() }.push(tuple);
             }
             TupleBuffer::Runs(_, _) => {
                 panic!("TupleBuffer::push() is not supported for TupleBuffer::Runs")
             }
-            TupleBuffer::HashTable(lock, exprs, has_null, table) => {
+            TupleBuffer::InMemHashTable(lock, exprs, has_null, table) => {
                 let _guard = lock.write().unwrap();
                 let key = exprs
                     .iter()
@@ -92,13 +92,13 @@ impl TupleBuffer {
 
     pub fn iter_key(&self, key: Vec<Field>) -> Option<TupleBufferIter> {
         match self {
-            TupleBuffer::TupleVec(_, _) => {
+            TupleBuffer::InMemTupleVec(_, _) => {
                 panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TupleVec")
             }
             TupleBuffer::Runs(_, _) => {
                 panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::Runs")
             }
-            TupleBuffer::HashTable(lock, _, _, table) => {
+            TupleBuffer::InMemHashTable(lock, _, _, table) => {
                 let _guard = lock.read().unwrap();
                 // SAFETY: The lock ensures that the reference is valid.
                 let table = unsafe { &*table.get() };
@@ -114,7 +114,7 @@ impl TupleBuffer {
 
     pub fn iter_all(&self) -> TupleBufferIter {
         match self {
-            TupleBuffer::TupleVec(lock, vec) => {
+            TupleBuffer::InMemTupleVec(lock, vec) => {
                 let _guard = lock.read().unwrap();
                 // SAFETY: The lock ensures that the reference is valid.
                 TupleBufferIter::vec(_guard, unsafe { &*vec.get() }.iter())
@@ -129,7 +129,7 @@ impl TupleBuffer {
                     .collect();
                 TupleBufferIter::merge(_guard, runs)
             }
-            TupleBuffer::HashTable(lock, _, _, table) => {
+            TupleBuffer::InMemHashTable(lock, _, _, table) => {
                 let _guard = lock.read().unwrap();
                 // SAFETY: The lock ensures that the reference is valid.
                 let table = unsafe { &*table.get() };
