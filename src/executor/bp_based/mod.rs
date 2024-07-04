@@ -7,12 +7,12 @@ use std::{
 
 use crate::{
     error::ExecError,
-    prelude::SchemaRef,
-    tuple::{FromBool, Tuple},
+    prelude::{DataType, SchemaRef},
+    tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
 };
 
-use super::{bytecode_expr::ByteCodeExpr, ResultBufferTrait};
+use super::bytecode_expr::ByteCodeExpr;
 
 pub enum TupleBuffer {
     TupleVec(Arc<RwLock<()>>, UnsafeCell<Vec<Tuple>>),
@@ -23,6 +23,7 @@ pub enum TupleBuffer {
     HashTable(
         Arc<RwLock<()>>,
         Vec<ByteCodeExpr>, // Hash key expressions
+        UnsafeCell<bool>,  // Has Nulls. Used in mark join.
         UnsafeCell<HashMap<Vec<Field>, Vec<Tuple>>>,
     ),
 }
@@ -40,8 +41,21 @@ impl TupleBuffer {
         TupleBuffer::HashTable(
             Arc::new(RwLock::new(())),
             exprs,
+            UnsafeCell::new(false),
             UnsafeCell::new(HashMap::new()),
         )
+    }
+
+    pub fn has_null(&self) -> bool {
+        match self {
+            TupleBuffer::TupleVec(_, _) => false,
+            TupleBuffer::Runs(_, _) => false,
+            TupleBuffer::HashTable(lock, _, has_null, _) => {
+                let _guard = lock.read().unwrap();
+                // SAFETY: The lock ensures that the reference is valid.
+                unsafe { *has_null.get() }
+            }
+        }
     }
 
     pub fn push(&self, tuple: Tuple) {
@@ -53,13 +67,16 @@ impl TupleBuffer {
             TupleBuffer::Runs(_, _) => {
                 panic!("TupleBuffer::push() is not supported for TupleBuffer::Runs")
             }
-            TupleBuffer::HashTable(lock, exprs, table) => {
+            TupleBuffer::HashTable(lock, exprs, has_null, table) => {
                 let _guard = lock.write().unwrap();
                 let key = exprs
                     .iter()
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()
                     .unwrap();
+                if key.iter().any(|f| f.is_null()) {
+                    *unsafe { &mut *has_null.get() } = true;
+                }
                 let table = unsafe { &mut *table.get() };
                 match table.entry(key) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
@@ -73,7 +90,7 @@ impl TupleBuffer {
         }
     }
 
-    pub fn iter_key(&self, key: Vec<Field>) -> TupleBufferIter {
+    pub fn iter_key(&self, key: Vec<Field>) -> Option<TupleBufferIter> {
         match self {
             TupleBuffer::TupleVec(_, _) => {
                 panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TupleVec")
@@ -81,12 +98,16 @@ impl TupleBuffer {
             TupleBuffer::Runs(_, _) => {
                 panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::Runs")
             }
-            TupleBuffer::HashTable(lock, _, table) => {
+            TupleBuffer::HashTable(lock, _, _, table) => {
                 let _guard = lock.read().unwrap();
                 // SAFETY: The lock ensures that the reference is valid.
                 let table = unsafe { &*table.get() };
-                let iter = table.get(&key).map(|tuples| tuples.iter());
-                TupleBufferIter::vec(_guard, iter.unwrap_or_default())
+                if let Some(tuples) = table.get(&key) {
+                    let iter = tuples.iter();
+                    Some(TupleBufferIter::vec(_guard, iter))
+                } else {
+                    None
+                }
             }
         }
     }
@@ -108,7 +129,7 @@ impl TupleBuffer {
                     .collect();
                 TupleBufferIter::merge(_guard, runs)
             }
-            TupleBuffer::HashTable(lock, _, table) => {
+            TupleBuffer::HashTable(lock, _, _, table) => {
                 let _guard = lock.read().unwrap();
                 // SAFETY: The lock ensures that the reference is valid.
                 let table = unsafe { &*table.get() };
@@ -339,9 +360,9 @@ impl<'a> PMapIter<'a> {
 pub enum PHashJoinIter<'a> {
     Inner(PHashJoinInnerIter<'a>),
     RightOuter(PHashJoinRightOuterIter<'a>), // Probe side is the right
-                                             // RightSemi(PHashJoinRightSemiIter<'a>),
-                                             // RightAnti(PHashJoinRightAntiIter<'a>),
-                                             // RightMark(PHashJoinRightMarkIter<'a>),
+    RightSemi(PHashJoinRightSemiIter<'a>),   // Probe side is the right
+    RightAnti(PHashJoinRightAntiIter<'a>),   // Probe side is the right
+    RightMark(PHashJoinRightMarkIter<'a>),   // Probe side is the right
 }
 
 impl<'a> PHashJoinIter<'a> {
@@ -352,9 +373,9 @@ impl<'a> PHashJoinIter<'a> {
         match self {
             PHashJoinIter::Inner(iter) => iter.next(context),
             PHashJoinIter::RightOuter(iter) => iter.next(context),
-            // PHashJoinIter::RightSemi(iter) => iter.next(context),
-            // PHashJoinIter::RightAnti(iter) => iter.next(context),
-            // PHashJoinIter::RightMark(iter) => iter.next(context),
+            PHashJoinIter::RightSemi(iter) => iter.next(context),
+            PHashJoinIter::RightAnti(iter) => iter.next(context),
+            PHashJoinIter::RightMark(iter) => iter.next(context),
         }
     }
 }
@@ -378,17 +399,30 @@ impl PHashJoinInnerIter<'_> {
             }
         }
         // Reset the current tuple and build iterator.
-        if let Some(probe) = self.probe_side.next(context)? {
-            let key = self
-                .exprs
-                .iter()
-                .map(|expr| expr.eval(&probe))
-                .collect::<Result<Vec<_>, _>>()?;
-            let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
-            self.current = Some((probe, build_iter));
-            self.next(context)
-        } else {
-            Ok(None)
+        loop {
+            // Iterate the probe side until a match is found.
+            // If match is found
+            if let Some(probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                if let Some(iter) = build_iter {
+                    // There should be at least one tuple in the build side iterator.
+                    if let Some(build) = iter.next() {
+                        let result = build.merge_mut(&probe);
+                        self.current = Some((probe, iter));
+                        return Ok(Some(result));
+                    } else {
+                        unreachable!("The build side returned an empty iterator")
+                    }
+                }
+                // No match found. Continue to the next probe tuple.
+            } else {
+                return Ok(None);
+            }
         }
     }
 }
@@ -421,10 +455,16 @@ impl PHashJoinRightOuterIter<'_> {
                 .collect::<Result<Vec<_>, _>>()?;
 
             let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
-            // Try to iterate the build side once to check if there is any match.
-            let result = if let Some(build) = build_iter.next() {
-                let result = build.merge_mut(&probe);
-                self.current = Some((probe, build_iter));
+            let result = if let Some(iter) = build_iter {
+                // Try to iterate the build side once to check if there is any match.
+                let result = if let Some(build) = iter.next() {
+                    let result = build.merge_mut(&probe);
+                    self.current = Some((probe, iter));
+                    result
+                } else {
+                    // There should be at least one tuple in the build side iterator.
+                    unreachable!("The build side returned an empty iterator");
+                };
                 result
             } else {
                 self.current = None;
@@ -434,6 +474,120 @@ impl PHashJoinRightOuterIter<'_> {
             Ok(Some(result))
         } else {
             Ok(None)
+        }
+    }
+}
+
+pub struct PHashJoinRightSemiIter<'a> {
+    probe_side: Box<PipelineIterator<'a>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl PHashJoinRightSemiIter<'_> {
+    pub fn next(
+        &mut self,
+        context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        // If there is a match in the build side, output the probe tuple.
+        // Otherwise go to the next probe tuple
+        loop {
+            if let Some(probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                if let Some(iter) = build_iter {
+                    if iter.next().is_some() {
+                        return Ok(Some(probe));
+                    } else {
+                        unreachable!("The build side returned an empty iterator")
+                    }
+                }
+                // No match found. Continue to the next probe tuple.
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+pub struct PHashJoinRightAntiIter<'a> {
+    probe_side: Box<PipelineIterator<'a>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl PHashJoinRightAntiIter<'_> {
+    pub fn next(
+        &mut self,
+        context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        // If there is no match in the build side, output the probe tuple.
+        // Otherwise go to the next probe tuple
+        loop {
+            if let Some(probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                if let Some(_iter) = build_iter {
+                    // Match found. Continue to the next probe tuple.
+                } else {
+                    return Ok(Some(probe));
+                }
+                // No match found. Continue to the next probe tuple.
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+pub struct PHashJoinRightMarkIter<'a> {
+    probe_side: Box<PipelineIterator<'a>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl PHashJoinRightMarkIter<'_> {
+    pub fn next(
+        &mut self,
+        context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        // If there is a match in the build side, output the probe tuple.
+        // Otherwise go to the next probe tuple
+        let build_side = context.get(&self.build_side).unwrap();
+        loop {
+            if let Some(mut probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = build_side.iter_key(key);
+                let mark = if let Some(iter) = build_iter {
+                    if iter.next().is_some() {
+                        Field::from_bool(true)
+                    } else {
+                        unreachable!("The build side returned an empty iterator")
+                    }
+                } else {
+                    if build_side.has_null() {
+                        Field::null(&DataType::Boolean)
+                    } else {
+                        Field::from_bool(false)
+                    }
+                };
+                probe.push(mark);
+                return Ok(Some(probe));
+            } else {
+                return Ok(None);
+            }
         }
     }
 }
@@ -660,7 +814,7 @@ mod tests {
         input.push(tuple3.copy());
         input.push(tuple4.copy());
 
-        let iter_key = input.iter_key(vec!["a".into()]);
+        let iter_key = input.iter_key(vec!["a".into()]).unwrap();
         let mut actual = Vec::new();
         while let Some(tuple) = iter_key.next() {
             actual.push(tuple);
@@ -668,7 +822,7 @@ mod tests {
         let mut expected = vec![tuple1.copy(), tuple3.copy()];
         check_result(&mut actual, &mut expected, true, true);
 
-        let iter_key = input.iter_key(vec!["b".into()]);
+        let iter_key = input.iter_key(vec!["b".into()]).unwrap();
         let mut actual = Vec::new();
         while let Some(tuple) = iter_key.next() {
             actual.push(tuple);
@@ -676,13 +830,7 @@ mod tests {
         let mut expected = vec![tuple2.copy(), tuple4.copy()];
         check_result(&mut actual, &mut expected, true, true);
 
-        let iter_key = input.iter_key(vec!["c".into()]);
-        let mut actual = Vec::new();
-        while let Some(tuple) = iter_key.next() {
-            actual.push(tuple);
-        }
-        let mut expected = Vec::new();
-        check_result(&mut actual, &mut expected, true, true);
+        assert!(input.iter_key(vec!["c".into()]).is_none());
 
         let iter_all = input.iter_all();
         let mut actual = Vec::new();
@@ -838,6 +986,220 @@ mod tests {
                 4.into(),
                 5.into(),
             ]),
+        ];
+
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_hashjoin_semi() {
+        let exprs = vec![colidx_expr(0)];
+        // Build input
+        let input1 = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into(), "b".into()]);
+        input1.push(tuple1.copy());
+        input1.push(tuple2.copy());
+
+        // Probe input
+        let input0 = Arc::new(TupleBuffer::vec());
+        let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple8 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        input0.push(tuple5.copy());
+        input0.push(tuple6.copy());
+        input0.push(tuple7.copy());
+        input0.push(tuple8.copy());
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(
+            2,
+            PipelineIterator::HashJoin(PHashJoinIter::RightSemi(PHashJoinRightSemiIter {
+                probe_side: Box::new(PipelineIterator::Scan(PScanIter::new(0))),
+                build_side: 1,
+                exprs: vec![colidx_expr(0)],
+            })),
+            output,
+        );
+        pipeline.set_context(0, input0); // Probe input
+        pipeline.set_context(1, input1); // Build input
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+
+        let mut expected = vec![
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]),
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]),
+        ];
+
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_hashjoin_anti() {
+        let exprs = vec![colidx_expr(0)];
+        // Build input
+        let input1 = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into(), "b".into()]);
+        input1.push(tuple1.copy());
+        input1.push(tuple2.copy());
+
+        // Probe input
+        let input0 = Arc::new(TupleBuffer::vec());
+        let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple8 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        input0.push(tuple5.copy());
+        input0.push(tuple6.copy());
+        input0.push(tuple7.copy());
+        input0.push(tuple8.copy());
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(
+            2,
+            PipelineIterator::HashJoin(PHashJoinIter::RightAnti(PHashJoinRightAntiIter {
+                probe_side: Box::new(PipelineIterator::Scan(PScanIter::new(0))),
+                build_side: 1,
+                exprs: vec![colidx_expr(0)],
+            })),
+            output,
+        );
+        pipeline.set_context(0, input0); // Probe input
+        pipeline.set_context(1, input1); // Build input
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+
+        let mut expected = vec![
+            Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]),
+            Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]),
+        ];
+
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_hashjoin_mark_without_nulls() {
+        // Mark join is similar to semi/anti join.
+        // It returns all the probe side tuples with an additional mark at the end of the tuple.
+        // If there is a matching tuple, the mark is true.
+        // If there is no matching tuple, if the build side has nulls, the mark is null.
+        // Otherwise, the mark is false.
+
+        let exprs = vec![colidx_expr(0)];
+        // Build input
+        let input1 = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into(), "b".into()]);
+        input1.push(tuple1.copy());
+        input1.push(tuple2.copy());
+
+        // Probe input
+        let input0 = Arc::new(TupleBuffer::vec());
+        let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple8 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        input0.push(tuple5.copy());
+        input0.push(tuple6.copy());
+        input0.push(tuple7.copy());
+        input0.push(tuple8.copy());
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(
+            2,
+            PipelineIterator::HashJoin(PHashJoinIter::RightMark(PHashJoinRightMarkIter {
+                probe_side: Box::new(PipelineIterator::Scan(PScanIter::new(0))),
+                build_side: 1,
+                exprs: vec![colidx_expr(0)],
+            })),
+            output,
+        );
+        pipeline.set_context(0, input0); // Probe input
+        pipeline.set_context(1, input1); // Build input
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+
+        let mut expected = vec![
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into(), Field::from_bool(true)]),
+            Tuple::from_fields(vec![3.into(), 4.into(), 5.into(), Field::from_bool(false)]),
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into(), Field::from_bool(true)]),
+            Tuple::from_fields(vec![3.into(), 4.into(), 5.into(), Field::from_bool(false)]),
+        ];
+
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_hashjoin_mark_with_nulls() {
+        // Mark join is similar to semi/anti join.
+        // It returns all the probe side tuples with an additional mark at the end of the tuple.
+        // If there is a matching tuple, the mark is true.
+        // If there is no matching tuple, if the build side has nulls, the mark is null.
+        // Otherwise, the mark is false.
+
+        let exprs = vec![colidx_expr(0)];
+        // Build input
+        let input1 = Arc::new(TupleBuffer::hash_table(exprs));
+        let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into(), "b".into()]);
+        let tuple3 = Tuple::from_fields(vec![Field::Int(None), "c".into()]);
+        input1.push(tuple1.copy());
+        input1.push(tuple2.copy());
+        input1.push(tuple3.copy());
+
+        // Probe input
+        let input0 = Arc::new(TupleBuffer::vec());
+        let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
+        let tuple8 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
+        input0.push(tuple5.copy());
+        input0.push(tuple6.copy());
+        input0.push(tuple7.copy());
+        input0.push(tuple8.copy());
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(
+            2,
+            PipelineIterator::HashJoin(PHashJoinIter::RightMark(PHashJoinRightMarkIter {
+                probe_side: Box::new(PipelineIterator::Scan(PScanIter::new(0))),
+                build_side: 1,
+                exprs: vec![colidx_expr(0)],
+            })),
+            output,
+        );
+        pipeline.set_context(0, input0); // Probe input
+        pipeline.set_context(1, input1); // Build input
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+
+        let mut expected = vec![
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into(), Field::from_bool(true)]),
+            Tuple::from_fields(vec![3.into(), 4.into(), 5.into(), Field::Boolean(None)]),
+            Tuple::from_fields(vec![1.into(), 2.into(), 3.into(), Field::from_bool(true)]),
+            Tuple::from_fields(vec![3.into(), 4.into(), 5.into(), Field::Boolean(None)]),
         ];
 
         check_result(&mut actual, &mut expected, true, true);
