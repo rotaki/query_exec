@@ -413,9 +413,21 @@ pub enum PipelineNonBlocking<'a> {
     Project(PProjectIter<'a>),
     Map(PMapIter<'a>),
     HashJoin(PHashJoinIter<'a>),
+    NestedLoopJoin(PNestedLoopJoinIter<'a>),
 }
 
 impl<'a> PipelineNonBlocking<'a> {
+    pub fn rewind(&mut self) {
+        match self {
+            PipelineNonBlocking::Scan(iter) => iter.rewind(),
+            PipelineNonBlocking::Filter(iter) => iter.rewind(),
+            PipelineNonBlocking::Project(iter) => iter.rewind(),
+            PipelineNonBlocking::Map(iter) => iter.rewind(),
+            PipelineNonBlocking::HashJoin(iter) => iter.rewind(),
+            PipelineNonBlocking::NestedLoopJoin(iter) => iter.rewind(),
+        }
+    }
+
     pub fn next(
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -427,6 +439,7 @@ impl<'a> PipelineNonBlocking<'a> {
             PipelineNonBlocking::Project(iter) => iter.next(context),
             PipelineNonBlocking::Map(iter) => iter.next(context),
             PipelineNonBlocking::HashJoin(iter) => iter.next(context),
+            PipelineNonBlocking::NestedLoopJoin(iter) => iter.next(context),
         }
     }
 }
@@ -439,6 +452,10 @@ pub struct PScanIter<'a> {
 impl<'a> PScanIter<'a> {
     pub fn new(id: PipelineID) -> Self {
         Self { id, iter: None }
+    }
+
+    pub fn rewind(&mut self) {
+        self.iter = None;
     }
 
     pub fn next(
@@ -462,6 +479,10 @@ pub struct PFilterIter<'a> {
 impl<'a> PFilterIter<'a> {
     pub fn new(input: Box<PipelineNonBlocking<'a>>, expr: ByteCodeExpr) -> Self {
         Self { input, expr }
+    }
+
+    pub fn rewind(&mut self) {
+        self.input.rewind();
     }
 
     pub fn next(
@@ -490,6 +511,10 @@ impl<'a> PProjectIter<'a> {
         }
     }
 
+    pub fn rewind(&mut self) {
+        self.input.rewind();
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -511,6 +536,10 @@ pub struct PMapIter<'a> {
 impl<'a> PMapIter<'a> {
     pub fn new(input: Box<PipelineNonBlocking<'a>>, exprs: Vec<ByteCodeExpr>) -> Self {
         Self { input, exprs }
+    }
+
+    pub fn rewind(&mut self) {
+        self.input.rewind();
     }
 
     pub fn next(
@@ -537,6 +566,16 @@ pub enum PHashJoinIter<'a> {
 }
 
 impl<'a> PHashJoinIter<'a> {
+    pub fn rewind(&mut self) {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.rewind(),
+            PHashJoinIter::RightOuter(iter) => iter.rewind(),
+            PHashJoinIter::RightSemi(iter) => iter.rewind(),
+            PHashJoinIter::RightAnti(iter) => iter.rewind(),
+            PHashJoinIter::RightMark(iter) => iter.rewind(),
+        }
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -558,7 +597,25 @@ pub struct PHashJoinInnerIter<'a> {
     current: Option<(Tuple, TupleBufferIter<'a>)>,
 }
 
-impl PHashJoinInnerIter<'_> {
+impl<'a> PHashJoinInnerIter<'a> {
+    pub fn new(
+        probe_side: Box<PipelineNonBlocking<'a>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            probe_side,
+            build_side,
+            exprs,
+            current: None,
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+        self.current = None;
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -606,7 +663,27 @@ pub struct PHashJoinRightOuterIter<'a> {
     nulls: Tuple,
 }
 
-impl PHashJoinRightOuterIter<'_> {
+impl<'a> PHashJoinRightOuterIter<'a> {
+    pub fn new(
+        probe_side: Box<PipelineNonBlocking<'a>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+        nulls: Tuple,
+    ) -> Self {
+        Self {
+            probe_side,
+            build_side,
+            exprs,
+            current: None,
+            nulls,
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+        self.current = None;
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -655,7 +732,23 @@ pub struct PHashJoinRightSemiIter<'a> {
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PHashJoinRightSemiIter<'_> {
+impl<'a> PHashJoinRightSemiIter<'a> {
+    pub fn new(
+        probe_side: Box<PipelineNonBlocking<'a>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            probe_side,
+            build_side,
+            exprs,
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -691,7 +784,23 @@ pub struct PHashJoinRightAntiIter<'a> {
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PHashJoinRightAntiIter<'_> {
+impl<'a> PHashJoinRightAntiIter<'a> {
+    pub fn new(
+        probe_side: Box<PipelineNonBlocking<'a>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            probe_side,
+            build_side,
+            exprs,
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -730,7 +839,23 @@ pub struct PHashJoinRightMarkIter<'a> {
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PHashJoinRightMarkIter<'_> {
+impl<'a> PHashJoinRightMarkIter<'a> {
+    pub fn new(
+        probe_side: Box<PipelineNonBlocking<'a>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            probe_side,
+            build_side,
+            exprs,
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+    }
+
     pub fn next(
         &mut self,
         context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
@@ -764,6 +889,70 @@ impl PHashJoinRightMarkIter<'_> {
             } else {
                 return Ok(None);
             }
+        }
+    }
+}
+
+pub struct PNestedLoopJoinIter<'a> {
+    outer: Box<PipelineNonBlocking<'a>>, // Outer loop of NLJ
+    inner: Box<PipelineNonBlocking<'a>>, // Inner loop of NLJ
+    current_outer: Option<Tuple>,
+    current_inner: Option<Tuple>,
+}
+
+impl<'a> PNestedLoopJoinIter<'a> {
+    pub fn new(outer: Box<PipelineNonBlocking<'a>>, inner: Box<PipelineNonBlocking<'a>>) -> Self {
+        Self {
+            outer,
+            inner,
+            current_outer: None,
+            current_inner: None,
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        self.outer.rewind();
+        self.inner.rewind();
+        self.current_outer = None;
+        self.current_inner = None;
+    }
+
+    pub fn next(
+        &mut self,
+        context: &'static HashMap<PipelineID, Arc<TupleBuffer>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        loop {
+            // Set the outer
+            if self.current_outer.is_none() {
+                match self.outer.next(context)? {
+                    Some(tuple) => {
+                        self.current_outer = Some(tuple);
+                        self.inner.rewind();
+                    }
+                    None => return Ok(None),
+                }
+            }
+            // Set the inner
+            if self.current_inner.is_none() {
+                match self.inner.next(context)? {
+                    Some(tuple) => {
+                        self.current_inner = Some(tuple);
+                    }
+                    None => {
+                        self.current_outer = None;
+                        continue;
+                    }
+                }
+            }
+
+            // Outer and inner are set. Merge the tuples.
+            let result = self
+                .current_outer
+                .as_ref()
+                .unwrap()
+                .merge(self.current_inner.as_ref().unwrap());
+            self.current_inner = None;
+            return Ok(Some(result));
         }
     }
 }
@@ -1673,6 +1862,49 @@ mod tests {
         let mut expected = vec![
             Tuple::from_fields(vec![1.into(), 20.into(), 2.into()]),
             Tuple::from_fields(vec![2.into(), 20.into(), 0.into()]),
+        ];
+        check_result(&mut actual, &mut expected, true, true);
+    }
+
+    #[test]
+    fn test_pipeline_nested_loop_join() {
+        let input1 = Arc::new(TupleBuffer::vec());
+        let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
+        let tuple2 = Tuple::from_fields(vec![2.into(), "b".into()]);
+        input1.append(tuple1.copy()).unwrap();
+        input1.append(tuple2.copy()).unwrap();
+
+        let input2 = Arc::new(TupleBuffer::vec());
+        let tuple3 = Tuple::from_fields(vec![1.into(), 10.into()]);
+        let tuple4 = Tuple::from_fields(vec![2.into(), 20.into()]);
+        input2.append(tuple3.copy()).unwrap();
+        input2.append(tuple4.copy()).unwrap();
+
+        let output = Arc::new(TupleBuffer::vec());
+        let mut pipeline = Pipeline::new(
+            2,
+            PipelineNonBlocking::NestedLoopJoin(PNestedLoopJoinIter::new(
+                Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+                Box::new(PipelineNonBlocking::Scan(PScanIter::new(1))),
+            ))
+            .into(),
+            output,
+        );
+        pipeline.set_context(0, input1);
+        pipeline.set_context(1, input2);
+
+        let result = pipeline.execute().unwrap();
+        let iter = result.iter_all();
+        let mut actual = Vec::new();
+        while let Some(tuple) = iter.next() {
+            actual.push(tuple);
+        }
+
+        let mut expected = vec![
+            Tuple::from_fields(vec![1.into(), "a".into(), 1.into(), 10.into()]),
+            Tuple::from_fields(vec![2.into(), "b".into(), 1.into(), 10.into()]),
+            Tuple::from_fields(vec![1.into(), "a".into(), 2.into(), 20.into()]),
+            Tuple::from_fields(vec![2.into(), "b".into(), 2.into(), 20.into()]),
         ];
         check_result(&mut actual, &mut expected, true, true);
     }
