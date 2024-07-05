@@ -8,14 +8,14 @@ use crate::{catalog, error::ExecError, expression::AggOp, optimizer::PhysicalRel
 
 use super::{bytecode_expr::ByteCodeExpr, Executor, ResultIterator};
 
-pub struct PhysicalRelExprToPipelineGraph<'a, T: TxnStorageTrait<'a>> {
+pub struct PhysicalRelExprToPipelineGraph<T: TxnStorageTrait> {
     pub storage: Arc<T>,
     phantom: PhantomData<&'a T>,
 }
 
 type ColIdToIdx = HashMap<ColumnId, usize>;
 
-impl<'a, T: TxnStorageTrait<'a>> PhysicalRelExprToPipelineGraph<'a, T> {
+impl<T: TxnStorageTrait> PhysicalRelExprToPipelineGraph<T> {
     pub fn new(storage: Arc<T>) -> Self {
         Self {
             storage,
@@ -115,7 +115,7 @@ pub struct PipelineExecutor<'a> {
     piplines: Vec<Pipeline<'a>>,
 }
 
-impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for PipelineExecutor<'a> {
+impl<T: TxnStorageTrait + 'a> Executor<T> for PipelineExecutor<'a> {
     type Iter = ResultBuffer<'a>;
 
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {

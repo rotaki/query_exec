@@ -10,12 +10,12 @@ use crate::{
     query_executor::QueryExecutor,
 };
 
-pub struct DatabaseEngine<T: for<'a> TxnStorageTrait<'a>> {
+pub struct DatabaseEngine<T: TxnStorageTrait> {
     pub storage: Arc<T>,
     pub catalogs: Mutex<HashMap<DatabaseId, CatalogRef>>,
 }
 
-impl<T: for<'a> TxnStorageTrait<'a>> DatabaseEngine<T> {
+impl<T: TxnStorageTrait> DatabaseEngine<T> {
     pub fn new(storage: Arc<T>) -> Self {
         Self {
             storage,

@@ -29,21 +29,19 @@ use super::{
 
 type Key = Vec<u8>;
 
-// 'a is the lifetime of the iterator over the storage
-// This ensures that the iterator lives as long as the VolcanoIterator
-pub enum VolcanoIterator<'a, T: TxnStorageTrait<'a>> {
-    Scan(ScanIter<'a, T>),
-    Filter(FilterIter<'a, T>),
-    Project(ProjectIter<'a, T>),
-    Map(MapIter<'a, T>),
-    HashAggregate(HashAggregateIter<'a, T>),
-    Sort(SortIter<'a, T>),
-    Limit(LimitIter<'a, T>),
-    HashJoin(HashJoinIter<'a, T>),
-    NestedLoopJoin(NestedLoopJoin<'a, T>),
+pub enum VolcanoIterator<T: TxnStorageTrait> {
+    Scan(ScanIter<T>),
+    Filter(FilterIter<T>),
+    Project(ProjectIter<T>),
+    Map(MapIter<T>),
+    HashAggregate(HashAggregateIter<T>),
+    Sort(SortIter<T>),
+    Limit(LimitIter<T>),
+    HashJoin(HashJoinIter<T>),
+    NestedLoopJoin(NestedLoopJoin<T>),
 }
 
-impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for VolcanoIterator<'a, T> {
+impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
     type Buffer = TupleResults;
 
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
@@ -73,7 +71,7 @@ impl<'a, T: TxnStorageTrait<'a> + 'a> Executor<'a, T> for VolcanoIterator<'a, T>
     }
 }
 
-impl<'a, T: TxnStorageTrait<'a>> VolcanoIterator<'a, T> {
+impl<T: TxnStorageTrait> VolcanoIterator<T> {
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
         // (key, tuple)
         match self {
@@ -146,7 +144,7 @@ impl<'a, T: TxnStorageTrait<'a>> VolcanoIterator<'a, T> {
     }
 }
 
-pub struct ScanIter<'a, T: TxnStorageTrait<'a>> {
+pub struct ScanIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
     pub storage: Arc<T>,
     pub c_id: ContainerId,
@@ -154,7 +152,7 @@ pub struct ScanIter<'a, T: TxnStorageTrait<'a>> {
     pub iter: Option<T::IteratorHandle>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> ScanIter<'a, T> {
+impl<T: TxnStorageTrait> ScanIter<T> {
     pub fn new(
         schema: SchemaRef,
         storage: Arc<T>,
@@ -212,14 +210,14 @@ impl<'a, T: TxnStorageTrait<'a>> ScanIter<'a, T> {
     }
 }
 
-pub struct FilterIter<'a, T: TxnStorageTrait<'a>> {
+pub struct FilterIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<VolcanoIterator<'a, T>>,
+    pub input: Box<VolcanoIterator<T>>,
     pub expr: ByteCodeExpr,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> FilterIter<'a, T> {
-    pub fn new(schema: SchemaRef, input: Box<VolcanoIterator<'a, T>>, expr: ByteCodeExpr) -> Self {
+impl<T: TxnStorageTrait> FilterIter<T> {
+    pub fn new(schema: SchemaRef, input: Box<VolcanoIterator<T>>, expr: ByteCodeExpr) -> Self {
         Self {
             schema,
             input,
@@ -255,16 +253,16 @@ impl<'a, T: TxnStorageTrait<'a>> FilterIter<'a, T> {
     }
 }
 
-pub struct ProjectIter<'a, T: TxnStorageTrait<'a>> {
+pub struct ProjectIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<VolcanoIterator<'a, T>>,
+    pub input: Box<VolcanoIterator<T>>,
     pub column_indices: Vec<ColumnId>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> ProjectIter<'a, T> {
+impl<T: TxnStorageTrait> ProjectIter<T> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<VolcanoIterator<'a, T>>,
+        input: Box<VolcanoIterator<T>>,
         column_indices: Vec<ColumnId>,
     ) -> Self {
         Self {
@@ -306,16 +304,16 @@ impl<'a, T: TxnStorageTrait<'a>> ProjectIter<'a, T> {
     }
 }
 
-pub struct MapIter<'a, T: TxnStorageTrait<'a>> {
+pub struct MapIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<VolcanoIterator<'a, T>>,
+    pub input: Box<VolcanoIterator<T>>,
     pub exprs: Vec<ByteCodeExpr>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> MapIter<'a, T> {
+impl<T: TxnStorageTrait> MapIter<T> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<VolcanoIterator<'a, T>>,
+        input: Box<VolcanoIterator<T>>,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
@@ -359,18 +357,18 @@ impl<'a, T: TxnStorageTrait<'a>> MapIter<'a, T> {
     }
 }
 
-pub struct HashAggregateIter<'a, T: TxnStorageTrait<'a>> {
+pub struct HashAggregateIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<VolcanoIterator<'a, T>>,
+    pub input: Box<VolcanoIterator<T>>,
     pub group_by: Vec<ColumnId>,
     pub agg_op: Vec<(AggOp, ColumnId)>,
     pub agg_result: Option<Vec<Tuple>>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashAggregateIter<'a, T> {
+impl<T: TxnStorageTrait> HashAggregateIter<T> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<VolcanoIterator<'a, T>>,
+        input: Box<VolcanoIterator<T>>,
         group_by: Vec<ColumnId>,
         agg_op: Vec<(AggOp, ColumnId)>,
     ) -> Self {
@@ -515,17 +513,17 @@ impl<'a, T: TxnStorageTrait<'a>> HashAggregateIter<'a, T> {
     }
 }
 
-pub struct SortIter<'a, T: TxnStorageTrait<'a>> {
+pub struct SortIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<VolcanoIterator<'a, T>>,
+    pub input: Box<VolcanoIterator<T>>,
     pub sort_cols: Vec<(ColumnId, bool, bool)>, // (col_id, asc, nulls_first)
     pub buffer: Option<Vec<(Vec<u8>, Tuple)>>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> SortIter<'a, T> {
+impl<T: TxnStorageTrait> SortIter<T> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<VolcanoIterator<'a, T>>,
+        input: Box<VolcanoIterator<T>>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
     ) -> Self {
         Self {
@@ -586,15 +584,15 @@ impl<'a, T: TxnStorageTrait<'a>> SortIter<'a, T> {
     }
 }
 
-pub struct LimitIter<'a, T: TxnStorageTrait<'a>> {
+pub struct LimitIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<VolcanoIterator<'a, T>>,
+    pub input: Box<VolcanoIterator<T>>,
     pub limit: usize,
     pub current: Option<usize>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> LimitIter<'a, T> {
-    pub fn new(schema: SchemaRef, input: Box<VolcanoIterator<'a, T>>, limit: usize) -> Self {
+impl<T: TxnStorageTrait> LimitIter<T> {
+    pub fn new(schema: SchemaRef, input: Box<VolcanoIterator<T>>, limit: usize) -> Self {
         Self {
             schema,
             input,
@@ -628,20 +626,20 @@ impl<'a, T: TxnStorageTrait<'a>> LimitIter<'a, T> {
     }
 }
 
-pub enum HashJoinIter<'a, T: TxnStorageTrait<'a>> {
-    Inner(HashJoinInner<'a, T>),
-    RightOuter(HashJoinRightOuter<'a, T>),
-    RightSemi(HashJoinRightSemi<'a, T>),
-    RightAnti(HashJoinRightAnti<'a, T>),
-    RightMark(HashJoinRightMark<'a, T>),
+pub enum HashJoinIter<T: TxnStorageTrait> {
+    Inner(HashJoinInner<T>),
+    RightOuter(HashJoinRightOuter<T>),
+    RightSemi(HashJoinRightSemi<T>),
+    RightAnti(HashJoinRightAnti<T>),
+    RightMark(HashJoinRightMark<T>),
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashJoinIter<'a, T> {
+impl<T: TxnStorageTrait> HashJoinIter<T> {
     pub fn new(
         schema: SchemaRef,
         join_type: JoinType,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         left_exprs: Vec<ByteCodeExpr>,
         right_exprs: Vec<ByteCodeExpr>,
         filter: Option<ByteCodeExpr>,
@@ -724,10 +722,10 @@ impl<'a, T: TxnStorageTrait<'a>> HashJoinIter<'a, T> {
     }
 }
 
-pub struct HashJoinInner<'a, T: TxnStorageTrait<'a>> {
+pub struct HashJoinInner<T: TxnStorageTrait> {
     schema: SchemaRef,
-    left: Box<VolcanoIterator<'a, T>>,
-    right: Box<VolcanoIterator<'a, T>>,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
     left_exprs: Vec<ByteCodeExpr>,
     right_exprs: Vec<ByteCodeExpr>,
     filter: Option<ByteCodeExpr>,
@@ -737,11 +735,11 @@ pub struct HashJoinInner<'a, T: TxnStorageTrait<'a>> {
     current_idx: Option<usize>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashJoinInner<'a, T> {
+impl<T: TxnStorageTrait> HashJoinInner<T> {
     fn new(
         schema: SchemaRef,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         left_exprs: Vec<ByteCodeExpr>,
         right_exprs: Vec<ByteCodeExpr>,
         filter: Option<ByteCodeExpr>,
@@ -864,10 +862,10 @@ impl<'a, T: TxnStorageTrait<'a>> HashJoinInner<'a, T> {
     }
 }
 
-pub struct HashJoinRightOuter<'a, T: TxnStorageTrait<'a>> {
+pub struct HashJoinRightOuter<T: TxnStorageTrait> {
     schema: SchemaRef,
-    left: Box<VolcanoIterator<'a, T>>,
-    right: Box<VolcanoIterator<'a, T>>,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
     left_exprs: Vec<ByteCodeExpr>,
     right_exprs: Vec<ByteCodeExpr>,
     filter: Option<ByteCodeExpr>,
@@ -878,11 +876,11 @@ pub struct HashJoinRightOuter<'a, T: TxnStorageTrait<'a>> {
     null_tuple: Option<Tuple>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashJoinRightOuter<'a, T> {
+impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
     fn new(
         schema: SchemaRef,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         left_exprs: Vec<ByteCodeExpr>,
         right_exprs: Vec<ByteCodeExpr>,
         filter: Option<ByteCodeExpr>,
@@ -1035,21 +1033,21 @@ impl<'a, T: TxnStorageTrait<'a>> HashJoinRightOuter<'a, T> {
     }
 }
 
-pub struct HashJoinRightSemi<'a, T: TxnStorageTrait<'a>> {
+pub struct HashJoinRightSemi<T: TxnStorageTrait> {
     schema: SchemaRef,
-    left: Box<VolcanoIterator<'a, T>>,
-    right: Box<VolcanoIterator<'a, T>>,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
     left_exprs: Vec<ByteCodeExpr>,
     right_exprs: Vec<ByteCodeExpr>,
     filter: Option<ByteCodeExpr>,
     buffer: Option<HashMap<Vec<Field>, Vec<Tuple>>>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashJoinRightSemi<'a, T> {
+impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
     fn new(
         schema: SchemaRef,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         left_exprs: Vec<ByteCodeExpr>,
         right_exprs: Vec<ByteCodeExpr>,
         filter: Option<ByteCodeExpr>,
@@ -1145,21 +1143,21 @@ impl<'a, T: TxnStorageTrait<'a>> HashJoinRightSemi<'a, T> {
     }
 }
 
-pub struct HashJoinRightAnti<'a, T: TxnStorageTrait<'a>> {
+pub struct HashJoinRightAnti<T: TxnStorageTrait> {
     schema: SchemaRef,
-    left: Box<VolcanoIterator<'a, T>>,
-    right: Box<VolcanoIterator<'a, T>>,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
     left_exprs: Vec<ByteCodeExpr>,
     right_exprs: Vec<ByteCodeExpr>,
     filter: Option<ByteCodeExpr>,
     buffer: Option<HashMap<Vec<Field>, Vec<Tuple>>>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashJoinRightAnti<'a, T> {
+impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
     fn new(
         schema: SchemaRef,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         left_exprs: Vec<ByteCodeExpr>,
         right_exprs: Vec<ByteCodeExpr>,
         filter: Option<ByteCodeExpr>,
@@ -1258,10 +1256,10 @@ impl<'a, T: TxnStorageTrait<'a>> HashJoinRightAnti<'a, T> {
     }
 }
 
-pub struct HashJoinRightMark<'a, T: TxnStorageTrait<'a>> {
+pub struct HashJoinRightMark<T: TxnStorageTrait> {
     schema: SchemaRef,
-    left: Box<VolcanoIterator<'a, T>>,
-    right: Box<VolcanoIterator<'a, T>>,
+    left: Box<VolcanoIterator<T>>,
+    right: Box<VolcanoIterator<T>>,
     left_exprs: Vec<ByteCodeExpr>,
     right_exprs: Vec<ByteCodeExpr>,
     filter: Option<ByteCodeExpr>,
@@ -1269,11 +1267,11 @@ pub struct HashJoinRightMark<'a, T: TxnStorageTrait<'a>> {
     null_in_left: bool,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> HashJoinRightMark<'a, T> {
+impl<T: TxnStorageTrait> HashJoinRightMark<T> {
     fn new(
         schema: SchemaRef,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         left_exprs: Vec<ByteCodeExpr>,
         right_exprs: Vec<ByteCodeExpr>,
         filter: Option<ByteCodeExpr>,
@@ -1380,22 +1378,22 @@ impl<'a, T: TxnStorageTrait<'a>> HashJoinRightMark<'a, T> {
     }
 }
 
-pub struct NestedLoopJoin<'a, T: TxnStorageTrait<'a>> {
+pub struct NestedLoopJoin<T: TxnStorageTrait> {
     pub schema: SchemaRef,
     pub join_type: JoinType,
-    pub left: Box<VolcanoIterator<'a, T>>,
-    pub right: Box<VolcanoIterator<'a, T>>,
+    pub left: Box<VolcanoIterator<T>>,
+    pub right: Box<VolcanoIterator<T>>,
     pub filter: Option<ByteCodeExpr>,
     pub current_left: Option<Tuple>,
     pub current_right: Option<Tuple>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> NestedLoopJoin<'a, T> {
+impl<T: TxnStorageTrait> NestedLoopJoin<T> {
     pub fn new(
         schema: SchemaRef,
         join_type: JoinType,
-        left: Box<VolcanoIterator<'a, T>>,
-        right: Box<VolcanoIterator<'a, T>>,
+        left: Box<VolcanoIterator<T>>,
+        right: Box<VolcanoIterator<T>>,
         filter: Option<ByteCodeExpr>,
     ) -> Self {
         Self {
@@ -1467,26 +1465,22 @@ impl<'a, T: TxnStorageTrait<'a>> NestedLoopJoin<'a, T> {
     }
 }
 
-pub struct PhysicalRelExprToOpIter<'a, T: TxnStorageTrait<'a>> {
+pub struct PhysicalRelExprToOpIter<T: TxnStorageTrait> {
     pub storage: Arc<T>,
-    phantom: PhantomData<&'a T>,
 }
 
 type ColIdToIdx = HashMap<ColumnId, usize>;
 
-impl<'a, T: TxnStorageTrait<'a>> PhysicalRelExprToOpIter<'a, T> {
+impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
     pub fn new(storage: Arc<T>) -> Self {
-        Self {
-            storage,
-            phantom: PhantomData,
-        }
+        Self { storage }
     }
 
     pub fn to_executable(
         &mut self,
         catalog: CatalogRef,
         expr: PhysicalRelExpr,
-    ) -> VolcanoIterator<'a, T> {
+    ) -> VolcanoIterator<T> {
         let (op, _col_id_to_idx) = self.to_executable_inner(catalog, expr).unwrap();
         op
     }
@@ -1495,7 +1489,7 @@ impl<'a, T: TxnStorageTrait<'a>> PhysicalRelExprToOpIter<'a, T> {
         &mut self,
         catalog: CatalogRef,
         expr: PhysicalRelExpr,
-    ) -> Result<(VolcanoIterator<'a, T>, ColIdToIdx), ExecError> {
+    ) -> Result<(VolcanoIterator<T>, ColIdToIdx), ExecError> {
         match expr {
             PhysicalRelExpr::Scan {
                 db_id: _,

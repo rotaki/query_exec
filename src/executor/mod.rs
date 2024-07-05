@@ -26,7 +26,7 @@ pub mod prelude {
 
 // 'a is the lifetime of the iterator
 // This ensures that the iterator lives as long as the executor
-pub trait Executor<'a, T: TxnStorageTrait<'a>> {
+pub trait Executor<T: TxnStorageTrait> {
     type Buffer: ResultBufferTrait;
 
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self;

@@ -11,17 +11,17 @@ pub struct Pipeline {
     output: Arc<dyn ResultBufferTrait>,
 }
 
-pub enum IntraPipelineIter<'a, T: TxnStorageTrait<'a>> {
-    Scan(PipelineScan<'a, T>),
-    HashJoin(PipelineHashJoinIter<'a, T>),
-    Filter(PipelineFilterIter<'a, T>),
-    Project(PIpelineProjectIter<'a, T>),
-    Map(PipelineMapIter<'a, T>),
+pub enum IntraPipelineIter<T: TxnStorageTrait> {
+    Scan(PipelineScan<T>),
+    HashJoin(PipelineHashJoinIter<T>),
+    Filter(PipelineFilterIter<T>),
+    Project(PIpelineProjectIter<T>),
+    Map(PipelineMapIter<T>),
 }
 
 type Key = Vec<u8>;
 
-impl<'a, T: TxnStorageTrait<'a>> IntraPipelineIter<'a, T> {
+impl<T: TxnStorageTrait> IntraPipelineIter<T> {
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
         // (key, tuple)
         match self {
@@ -70,19 +70,19 @@ impl<'a, T: TxnStorageTrait<'a>> IntraPipelineIter<'a, T> {
     }
 }
 
-pub struct PipelineScanIter<'a, T: TxnStorageTrait<'a>> {
+pub struct PipelineScanIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
     pub scanner: 
 }
 
-pub struct PipelineFilterIter<'a, T: TxnStorageTrait<'a>> {
+pub struct PipelineFilterIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<IntraPipelineIter<'a, T>>,
+    pub input: Box<IntraPipelineIter<T>>,
     pub expr: ByteCodeExpr,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> PipelineFilterIter<'a, T> {
-    pub fn new(schema: SchemaRef, input: Box<IntraPipelineIter<'a, T>>, expr: ByteCodeExpr) -> Self {
+impl<T: TxnStorageTrait> PipelineFilterIter<T> {
+    pub fn new(schema: SchemaRef, input: Box<IntraPipelineIter<T>>, expr: ByteCodeExpr) -> Self {
         Self {
             schema,
             input,
@@ -118,16 +118,16 @@ impl<'a, T: TxnStorageTrait<'a>> PipelineFilterIter<'a, T> {
     }
 }
 
-pub struct PipelineProjectIter<'a, T: TxnStorageTrait<'a>> {
+pub struct PipelineProjectIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<IntraPipelineIter<'a, T>>,
+    pub input: Box<IntraPipelineIter<T>>,
     pub column_indices: Vec<ColumnId>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> PipelineProjectIter<'a, T> {
+impl<T: TxnStorageTrait> PipelineProjectIter<T> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<IntraPipelineIter<'a, T>>,
+        input: Box<IntraPipelineIter<T>>,
         column_indices: Vec<ColumnId>,
     ) -> Self {
         Self {
@@ -169,16 +169,16 @@ impl<'a, T: TxnStorageTrait<'a>> PipelineProjectIter<'a, T> {
     }
 }
 
-pub struct PipelineMapIter<'a, T: TxnStorageTrait<'a>> {
+pub struct PipelineMapIter<T: TxnStorageTrait> {
     pub schema: SchemaRef,
-    pub input: Box<IntraPipelineIter<'a, T>>,
+    pub input: Box<IntraPipelineIter<T>>,
     pub exprs: Vec<ByteCodeExpr>,
 }
 
-impl<'a, T: TxnStorageTrait<'a>> PipelineMapIter<'a, T> {
+impl<T: TxnStorageTrait> PipelineMapIter<T> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<IntraPipelineIter<'a, T>>,
+        input: Box<IntraPipelineIter<T>>,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {

@@ -9,13 +9,13 @@ use crate::{
     tuple::{Field, Tuple},
 };
 
-pub struct SimpleCsvLoader<'a, R: std::io::Read, T: TxnStorageTrait<'a>> {
+pub struct SimpleCsvLoader<R: std::io::Read, T: TxnStorageTrait> {
     rdr: csv::Reader<R>,
     storage: Arc<T>,
-    phantom: PhantomData<&'a T>,
+    phantom: PhantomData<T>,
 }
 
-impl<'a, R: std::io::Read, T: TxnStorageTrait<'a>> SimpleCsvLoader<'a, R, T> {
+impl<R: std::io::Read, T: TxnStorageTrait> SimpleCsvLoader<R, T> {
     pub fn new(rdr: csv::Reader<R>, storage: Arc<T>) -> Self {
         Self {
             rdr,
@@ -25,7 +25,7 @@ impl<'a, R: std::io::Read, T: TxnStorageTrait<'a>> SimpleCsvLoader<'a, R, T> {
     }
 }
 
-impl<'a, R: std::io::Read, T: TxnStorageTrait<'a>> DataLoader for SimpleCsvLoader<'a, R, T> {
+impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> {
     fn load_data(
         &mut self,
         schema_ref: SchemaRef,
@@ -93,7 +93,7 @@ mod tests {
         Arc::new(txn_storage::InMemStorage::new())
     }
 
-    fn setup_table_and_schema<'a, T: TxnStorageTrait<'a>>(
+    fn setup_table_and_schema<T: TxnStorageTrait>(
         storage: impl AsRef<T>,
     ) -> (DatabaseId, ContainerId, SchemaRef) {
         let storage = storage.as_ref();
