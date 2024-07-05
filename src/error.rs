@@ -6,6 +6,7 @@ pub enum ExecError {
     Conversion(String),
     Catalog(String),
     Storage(String),
+    Pipeline(String),
 }
 
 impl From<Status> for ExecError {
