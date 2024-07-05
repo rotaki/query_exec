@@ -8,6 +8,7 @@ mod logger;
 mod optimizer;
 mod parser;
 mod query_executor;
+mod rwlatch;
 mod tuple;
 
 use logger::log;
