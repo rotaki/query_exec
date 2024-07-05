@@ -1235,7 +1235,7 @@ mod tests {
     fn test_pipeline_scan() {
         let input = Arc::new(TupleBuffer::vec());
         let tuple = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
-        input.append(tuple.copy());
+        input.append(tuple.copy()).unwrap();
 
         let mut pipeline = Pipeline::new(1, PipelineNonBlocking::Scan(PScanIter::new(0)).into());
         pipeline.set_context(0, input);
