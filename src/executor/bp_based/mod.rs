@@ -6,6 +6,8 @@ use std::{
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
 
+use txn_storage::{ContainerId, DatabaseId, ScanOptions, TxnStorageTrait};
+
 use crate::{
     error::ExecError,
     expression::AggOp,
@@ -17,14 +19,20 @@ use crate::{
 
 use super::bytecode_expr::ByteCodeExpr;
 
-pub enum TupleBuffer {
+pub enum TupleBuffer<T: TxnStorageTrait> {
+    TxnStorage(
+        SchemaRef, // Schema of the container. Needed to find the primary key.
+        DatabaseId,
+        ContainerId,
+        Arc<T>,
+    ),
     InMemTupleVec(
         RwLatch, // Latch to protect the vector
         UnsafeCell<Vec<Tuple>>,
     ),
     Runs(
         RwLatch,
-        UnsafeCell<Vec<(Arc<TupleBuffer>, Vec<(ColumnId, bool, bool)>)>>,
+        UnsafeCell<Vec<(Arc<TupleBuffer<T>>, Vec<(ColumnId, bool, bool)>)>>,
     ), // column_id, ascending, nulls_first
     InMemHashTable(
         RwLatch,
@@ -41,9 +49,10 @@ pub enum TupleBuffer {
     ),
 }
 
-impl TupleBuffer {
+impl<T: TxnStorageTrait> TupleBuffer<T> {
     pub fn shared(&self) {
         match self {
+            TupleBuffer::TxnStorage(..) => {}
             TupleBuffer::InMemTupleVec(latch, _) => latch.shared(),
             TupleBuffer::Runs(latch, _) => latch.shared(),
             TupleBuffer::InMemHashTable(latch, _, _, _) => latch.shared(),
@@ -53,6 +62,7 @@ impl TupleBuffer {
 
     pub fn exclusive(&self) {
         match self {
+            TupleBuffer::TxnStorage(..) => {}
             TupleBuffer::InMemTupleVec(latch, _) => latch.exclusive(),
             TupleBuffer::Runs(latch, _) => latch.exclusive(),
             TupleBuffer::InMemHashTable(latch, _, _, _) => latch.exclusive(),
@@ -62,6 +72,7 @@ impl TupleBuffer {
 
     pub fn release_shared(&self) {
         match self {
+            TupleBuffer::TxnStorage(..) => {}
             TupleBuffer::InMemTupleVec(latch, _) => latch.release_shared(),
             TupleBuffer::Runs(latch, _) => latch.release_shared(),
             TupleBuffer::InMemHashTable(latch, _, _, _) => latch.release_shared(),
@@ -71,6 +82,7 @@ impl TupleBuffer {
 
     pub fn release_exclusive(&self) {
         match self {
+            TupleBuffer::TxnStorage(..) => {}
             TupleBuffer::InMemTupleVec(latch, _) => latch.release_exclusive(),
             TupleBuffer::Runs(latch, _) => latch.release_exclusive(),
             TupleBuffer::InMemHashTable(latch, _, _, _) => latch.release_exclusive(),
@@ -82,7 +94,7 @@ impl TupleBuffer {
         TupleBuffer::InMemTupleVec(RwLatch::default(), UnsafeCell::new(Vec::new()))
     }
 
-    pub fn runs(runs: Vec<(Arc<TupleBuffer>, Vec<(ColumnId, bool, bool)>)>) -> Self {
+    pub fn runs(runs: Vec<(Arc<TupleBuffer<T>>, Vec<(ColumnId, bool, bool)>)>) -> Self {
         TupleBuffer::Runs(RwLatch::default(), UnsafeCell::new(runs))
     }
 
@@ -108,6 +120,7 @@ impl TupleBuffer {
     pub fn has_null(&self) -> bool {
         self.shared();
         let result = match self {
+            TupleBuffer::TxnStorage(..) => false,
             TupleBuffer::InMemTupleVec(_, _) => false,
             TupleBuffer::Runs(_, _) => false,
             TupleBuffer::InMemHashTable(_, _, has_null, _) => unsafe { *has_null.get() },
@@ -122,6 +135,9 @@ impl TupleBuffer {
     pub fn append(&self, tuple: Tuple) -> Result<(), ExecError> {
         self.exclusive();
         match self {
+            TupleBuffer::TxnStorage(..) => {
+                panic!("TupleBuffer::append() is not supported for TupleBuffer::TxnStorage")
+            }
             TupleBuffer::InMemTupleVec(_, vec) => {
                 unsafe { &mut *vec.get() }.push(tuple);
             }
@@ -210,9 +226,12 @@ impl TupleBuffer {
         Ok(())
     }
 
-    pub fn iter_key(self: &Arc<Self>, key: Vec<Field>) -> Option<TupleBufferIter> {
+    pub fn iter_key(self: &Arc<Self>, key: Vec<Field>) -> Option<TupleBufferIter<T>> {
         self.shared(); // Shared latch must be released when iterator is dropped.
         match self.as_ref() {
+            TupleBuffer::TxnStorage(..) => {
+                panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TxnStorage")
+            }
             TupleBuffer::InMemTupleVec(_, _) => {
                 panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TupleVec")
             }
@@ -236,9 +255,16 @@ impl TupleBuffer {
         }
     }
 
-    pub fn iter_all(self: &Arc<Self>) -> TupleBufferIter {
+    pub fn iter_all(self: &Arc<Self>) -> TupleBufferIter<T> {
         self.shared(); // Shared latch must be released when iterator is dropped.
         match self.as_ref() {
+            TupleBuffer::TxnStorage(_, db_id, c_id, storage) => {
+                let txn = storage.begin_txn(&db_id, Default::default()).unwrap();
+                let iter = storage
+                    .scan_range(&txn, c_id, ScanOptions::default())
+                    .unwrap();
+                TupleBufferIter::scan(storage.clone(), txn, iter)
+            }
             TupleBuffer::InMemTupleVec(_, vec) => {
                 TupleBufferIter::vec(Arc::clone(self), unsafe { &*vec.get() }.iter())
             }
@@ -267,19 +293,20 @@ impl TupleBuffer {
     }
 }
 
-pub enum TupleBufferIter {
+pub enum TupleBufferIter<T: TxnStorageTrait> {
+    TxnStorage(Arc<T>, T::TxnHandle, T::IteratorHandle),
     TupleVec(
-        Arc<TupleBuffer>, // Buffer with shared latch
+        Arc<TupleBuffer<T>>, // Buffer with shared latch
         Mutex<std::slice::Iter<'static, Tuple>>,
     ),
     HashTable(
-        Arc<TupleBuffer>,                                 // Buffer with shared latch
+        Arc<TupleBuffer<T>>,                              // Buffer with shared latch
         Mutex<()>, // Guard to ensure that the iterator is mutable by many threads
         UnsafeCell<Option<(&'static Vec<Tuple>, usize)>>, // Current tuples and index
         UnsafeCell<std::collections::hash_map::Iter<'static, Vec<Field>, Vec<Tuple>>>,
     ),
     HashAggregateTable(
-        Arc<TupleBuffer>,       // Buffer with shared latch
+        Arc<TupleBuffer<T>>,    // Buffer with shared latch
         Mutex<()>,              // Guard to ensure that the iterator is mutable by many threads
         UnsafeCell<bool>, // Has output. Used to return a single tuple of NULLs if there is no output.
         Vec<ColumnId>,    // Group by columns. Required to create NULL tuples.
@@ -287,31 +314,42 @@ pub enum TupleBufferIter {
         UnsafeCell<std::collections::hash_map::Iter<'static, Vec<Field>, (usize, Vec<Field>)>>,
     ),
     MergeScan(
-        Arc<TupleBuffer>,                                    // Buffer with shared latch
+        Arc<TupleBuffer<T>>,                                 // Buffer with shared latch
         Mutex<BinaryHeap<Reverse<(Vec<u8>, usize, Tuple)>>>, // Guard to ensure that the iterator is mutable by many threads
-        Vec<(TupleBufferIter, Vec<(ColumnId, bool, bool)>)>,
+        Vec<(TupleBufferIter<T>, Vec<(ColumnId, bool, bool)>)>,
     ),
 }
 
-impl Drop for TupleBufferIter {
+impl<T: TxnStorageTrait> Drop for TupleBufferIter<T> {
     fn drop(&mut self) {
-        let latched_buffer = match self {
-            TupleBufferIter::TupleVec(latched_buffer, _) => latched_buffer,
-            TupleBufferIter::HashTable(latched_buffer, _, _, _) => latched_buffer,
-            TupleBufferIter::HashAggregateTable(latched_buffer, _, _, _, _, _) => latched_buffer,
-            TupleBufferIter::MergeScan(latched_buffer, _, _) => latched_buffer,
-        };
-        latched_buffer.release_shared();
+        match self {
+            TupleBufferIter::TxnStorage(storage, txn, _) => {
+                storage.commit_txn(txn, false).unwrap();
+            }
+            TupleBufferIter::TupleVec(latched_buffer, ..)
+            | TupleBufferIter::HashTable(latched_buffer, ..)
+            | TupleBufferIter::HashAggregateTable(latched_buffer, ..)
+            | TupleBufferIter::MergeScan(latched_buffer, ..) => {
+                latched_buffer.release_shared();
+            }
+        }
     }
 }
 
-impl TupleBufferIter {
-    pub fn vec(latched_buffer: Arc<TupleBuffer>, iter: std::slice::Iter<'static, Tuple>) -> Self {
+impl<T: TxnStorageTrait> TupleBufferIter<T> {
+    pub fn scan(storage: Arc<T>, txn: T::TxnHandle, iter: T::IteratorHandle) -> Self {
+        TupleBufferIter::TxnStorage(storage, txn, iter)
+    }
+
+    pub fn vec(
+        latched_buffer: Arc<TupleBuffer<T>>,
+        iter: std::slice::Iter<'static, Tuple>,
+    ) -> Self {
         TupleBufferIter::TupleVec(latched_buffer, Mutex::new(iter))
     }
 
     pub fn hash_table(
-        latched_buffer: Arc<TupleBuffer>,
+        latched_buffer: Arc<TupleBuffer<T>>,
         table: std::collections::hash_map::Iter<'static, Vec<Field>, Vec<Tuple>>,
     ) -> Self {
         TupleBufferIter::HashTable(
@@ -323,7 +361,7 @@ impl TupleBufferIter {
     }
 
     pub fn hash_aggregate_table(
-        latched_buffer: Arc<TupleBuffer>,
+        latched_buffer: Arc<TupleBuffer<T>>,
         group_by: Vec<ColumnId>,
         agg_op: Vec<(AggOp, ColumnId)>,
         table: std::collections::hash_map::Iter<'static, Vec<Field>, (usize, Vec<Field>)>,
@@ -339,8 +377,8 @@ impl TupleBufferIter {
     }
 
     pub fn merge(
-        latched_buffer: Arc<TupleBuffer>,
-        runs: Vec<(TupleBufferIter, Vec<(ColumnId, bool, bool)>)>,
+        latched_buffer: Arc<TupleBuffer<T>>,
+        runs: Vec<(TupleBufferIter<T>, Vec<(ColumnId, bool, bool)>)>,
     ) -> Self {
         let mut heap = BinaryHeap::new();
         for (i, (iter, sort_cols)) in runs.iter().enumerate() {
@@ -354,6 +392,12 @@ impl TupleBufferIter {
 
     pub fn next(&self) -> Option<Tuple> {
         match self {
+            TupleBufferIter::TxnStorage(storage, _, iter) => {
+                storage.iter_next(iter).unwrap().map(|(_, val)| {
+                    let tuple = Tuple::from_bytes(&val);
+                    tuple
+                })
+            }
             TupleBufferIter::TupleVec(_, iter) => iter.lock().unwrap().next().map(|t| t.copy()),
             TupleBufferIter::MergeScan(_, heap, runs) => {
                 let heap = &mut *heap.lock().unwrap();
@@ -450,16 +494,16 @@ impl TupleBufferIter {
 }
 
 // Pipeline iterators are non-blocking.
-pub enum PipelineNonBlocking {
-    Scan(PScanIter),
-    Filter(PFilterIter),
-    Project(PProjectIter),
-    Map(PMapIter),
-    HashJoin(PHashJoinIter),
-    NestedLoopJoin(PNestedLoopJoinIter),
+pub enum PipelineNonBlocking<T: TxnStorageTrait> {
+    Scan(PScanIter<T>),
+    Filter(PFilterIter<T>),
+    Project(PProjectIter<T>),
+    Map(PMapIter<T>),
+    HashJoin(PHashJoinIter<T>),
+    NestedLoopJoin(PNestedLoopJoinIter<T>),
 }
 
-impl PipelineNonBlocking {
+impl<T: TxnStorageTrait> PipelineNonBlocking<T> {
     pub fn rewind(&mut self) {
         match self {
             PipelineNonBlocking::Scan(iter) => iter.rewind(),
@@ -473,7 +517,7 @@ impl PipelineNonBlocking {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         match self {
             PipelineNonBlocking::Scan(iter) => iter.next(context),
@@ -486,12 +530,12 @@ impl PipelineNonBlocking {
     }
 }
 
-pub struct PScanIter {
+pub struct PScanIter<T: TxnStorageTrait> {
     id: PipelineID,
-    iter: Option<TupleBufferIter>,
+    iter: Option<TupleBufferIter<T>>,
 }
 
-impl PScanIter {
+impl<T: TxnStorageTrait> PScanIter<T> {
     pub fn new(id: PipelineID) -> Self {
         Self { id, iter: None }
     }
@@ -502,7 +546,7 @@ impl PScanIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         if let Some(iter) = &mut self.iter {
             Ok(iter.next())
@@ -513,13 +557,13 @@ impl PScanIter {
     }
 }
 
-pub struct PFilterIter {
-    input: Box<PipelineNonBlocking>,
+pub struct PFilterIter<T: TxnStorageTrait> {
+    input: Box<PipelineNonBlocking<T>>,
     expr: ByteCodeExpr,
 }
 
-impl PFilterIter {
-    pub fn new(input: Box<PipelineNonBlocking>, expr: ByteCodeExpr) -> Self {
+impl<T: TxnStorageTrait> PFilterIter<T> {
+    pub fn new(input: Box<PipelineNonBlocking<T>>, expr: ByteCodeExpr) -> Self {
         Self { input, expr }
     }
 
@@ -529,7 +573,7 @@ impl PFilterIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         while let Some(tuple) = self.input.next(context)? {
             if self.expr.eval(&tuple)? == Field::from_bool(true) {
@@ -540,13 +584,13 @@ impl PFilterIter {
     }
 }
 
-pub struct PProjectIter {
-    input: Box<PipelineNonBlocking>,
+pub struct PProjectIter<T: TxnStorageTrait> {
+    input: Box<PipelineNonBlocking<T>>,
     column_indices: Vec<ColumnId>,
 }
 
-impl PProjectIter {
-    pub fn new(input: Box<PipelineNonBlocking>, column_indices: Vec<ColumnId>) -> Self {
+impl<T: TxnStorageTrait> PProjectIter<T> {
+    pub fn new(input: Box<PipelineNonBlocking<T>>, column_indices: Vec<ColumnId>) -> Self {
         Self {
             input,
             column_indices,
@@ -559,7 +603,7 @@ impl PProjectIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         if let Some(tuple) = self.input.next(context)? {
             let new_tuple = tuple.project(&self.column_indices);
@@ -570,13 +614,13 @@ impl PProjectIter {
     }
 }
 
-pub struct PMapIter {
-    input: Box<PipelineNonBlocking>,
+pub struct PMapIter<T: TxnStorageTrait> {
+    input: Box<PipelineNonBlocking<T>>,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PMapIter {
-    pub fn new(input: Box<PipelineNonBlocking>, exprs: Vec<ByteCodeExpr>) -> Self {
+impl<T: TxnStorageTrait> PMapIter<T> {
+    pub fn new(input: Box<PipelineNonBlocking<T>>, exprs: Vec<ByteCodeExpr>) -> Self {
         Self { input, exprs }
     }
 
@@ -586,7 +630,7 @@ impl PMapIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         if let Some(mut tuple) = self.input.next(context)? {
             for expr in &self.exprs {
@@ -599,15 +643,15 @@ impl PMapIter {
     }
 }
 
-pub enum PHashJoinIter {
-    Inner(PHashJoinInnerIter),
-    RightOuter(PHashJoinRightOuterIter), // Probe side is the right
-    RightSemi(PHashJoinRightSemiIter),   // Probe side is the right
-    RightAnti(PHashJoinRightAntiIter),   // Probe side is the right
-    RightMark(PHashJoinRightMarkIter),   // Probe side is the right
+pub enum PHashJoinIter<T: TxnStorageTrait> {
+    Inner(PHashJoinInnerIter<T>),
+    RightOuter(PHashJoinRightOuterIter<T>), // Probe side is the right
+    RightSemi(PHashJoinRightSemiIter<T>),   // Probe side is the right
+    RightAnti(PHashJoinRightAntiIter<T>),   // Probe side is the right
+    RightMark(PHashJoinRightMarkIter<T>),   // Probe side is the right
 }
 
-impl PHashJoinIter {
+impl<T: TxnStorageTrait> PHashJoinIter<T> {
     pub fn rewind(&mut self) {
         match self {
             PHashJoinIter::Inner(iter) => iter.rewind(),
@@ -620,7 +664,7 @@ impl PHashJoinIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         match self {
             PHashJoinIter::Inner(iter) => iter.next(context),
@@ -632,16 +676,16 @@ impl PHashJoinIter {
     }
 }
 
-pub struct PHashJoinInnerIter {
-    probe_side: Box<PipelineNonBlocking>,
+pub struct PHashJoinInnerIter<T: TxnStorageTrait> {
+    probe_side: Box<PipelineNonBlocking<T>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, TupleBufferIter)>,
+    current: Option<(Tuple, TupleBufferIter<T>)>,
 }
 
-impl PHashJoinInnerIter {
+impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking>,
+        probe_side: Box<PipelineNonBlocking<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -660,7 +704,7 @@ impl PHashJoinInnerIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
@@ -697,17 +741,17 @@ impl PHashJoinInnerIter {
     }
 }
 
-pub struct PHashJoinRightOuterIter {
-    probe_side: Box<PipelineNonBlocking>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightOuterIter<T: TxnStorageTrait> {
+    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, TupleBufferIter)>,
+    current: Option<(Tuple, TupleBufferIter<T>)>,
     nulls: Tuple,
 }
 
-impl PHashJoinRightOuterIter {
+impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking>,
+        probe_side: Box<PipelineNonBlocking<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
         nulls: Tuple,
@@ -728,7 +772,7 @@ impl PHashJoinRightOuterIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
@@ -768,15 +812,15 @@ impl PHashJoinRightOuterIter {
     }
 }
 
-pub struct PHashJoinRightSemiIter {
-    probe_side: Box<PipelineNonBlocking>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightSemiIter<T: TxnStorageTrait> {
+    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PHashJoinRightSemiIter {
+impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking>,
+        probe_side: Box<PipelineNonBlocking<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -793,7 +837,7 @@ impl PHashJoinRightSemiIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
@@ -820,15 +864,15 @@ impl PHashJoinRightSemiIter {
     }
 }
 
-pub struct PHashJoinRightAntiIter {
-    probe_side: Box<PipelineNonBlocking>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightAntiIter<T: TxnStorageTrait> {
+    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PHashJoinRightAntiIter {
+impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking>,
+        probe_side: Box<PipelineNonBlocking<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -845,7 +889,7 @@ impl PHashJoinRightAntiIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         // If there is no match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
@@ -875,15 +919,15 @@ impl PHashJoinRightAntiIter {
 // If there is a matching tuple, the mark is true.
 // If there is no matching tuple, if the build side has nulls, the mark is null.
 // Otherwise, the mark is false.
-pub struct PHashJoinRightMarkIter {
-    probe_side: Box<PipelineNonBlocking>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightMarkIter<T: TxnStorageTrait> {
+    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl PHashJoinRightMarkIter {
+impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking>,
+        probe_side: Box<PipelineNonBlocking<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -900,7 +944,7 @@ impl PHashJoinRightMarkIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
@@ -935,15 +979,15 @@ impl PHashJoinRightMarkIter {
     }
 }
 
-pub struct PNestedLoopJoinIter {
-    outer: Box<PipelineNonBlocking>, // Outer loop of NLJ
-    inner: Box<PipelineNonBlocking>, // Inner loop of NLJ
+pub struct PNestedLoopJoinIter<T: TxnStorageTrait> {
+    outer: Box<PipelineNonBlocking<T>>, // Outer loop of NLJ
+    inner: Box<PipelineNonBlocking<T>>, // Inner loop of NLJ
     current_outer: Option<Tuple>,
     current_inner: Option<Tuple>,
 }
 
-impl PNestedLoopJoinIter {
-    pub fn new(outer: Box<PipelineNonBlocking>, inner: Box<PipelineNonBlocking>) -> Self {
+impl<T: TxnStorageTrait> PNestedLoopJoinIter<T> {
+    pub fn new(outer: Box<PipelineNonBlocking<T>>, inner: Box<PipelineNonBlocking<T>>) -> Self {
         Self {
             outer,
             inner,
@@ -961,7 +1005,7 @@ impl PNestedLoopJoinIter {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         loop {
             // Set the outer
@@ -999,20 +1043,20 @@ impl PNestedLoopJoinIter {
     }
 }
 
-pub enum PipelineBlocking {
-    Dummy(PipelineNonBlocking),
-    InMemSort(InMemSort),
-    InMemHashTableCreation(InMemHashTableCreation),
-    InMemHashAggregate(InMemHashAggregation),
+pub enum PipelineBlocking<T: TxnStorageTrait> {
+    Dummy(PipelineNonBlocking<T>),
+    InMemSort(InMemSort<T>),
+    InMemHashTableCreation(InMemHashTableCreation<T>),
+    InMemHashAggregate(InMemHashAggregation<T>),
 }
 
-impl PipelineBlocking {
-    pub fn dummy(exec_plan: PipelineNonBlocking) -> Self {
+impl<T: TxnStorageTrait> PipelineBlocking<T> {
+    pub fn dummy(exec_plan: PipelineNonBlocking<T>) -> Self {
         PipelineBlocking::Dummy(exec_plan)
     }
 
     pub fn in_mem_sort(
-        exec_plan: PipelineNonBlocking,
+        exec_plan: PipelineNonBlocking<T>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
     ) -> Self {
         PipelineBlocking::InMemSort(InMemSort {
@@ -1022,7 +1066,7 @@ impl PipelineBlocking {
     }
 
     pub fn in_mem_hash_table_creation(
-        exec_plan: PipelineNonBlocking,
+        exec_plan: PipelineNonBlocking<T>,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         PipelineBlocking::InMemHashTableCreation(InMemHashTableCreation { exec_plan, exprs })
@@ -1030,8 +1074,8 @@ impl PipelineBlocking {
 
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
-    ) -> Result<Arc<TupleBuffer>, ExecError> {
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+    ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         match self {
             PipelineBlocking::Dummy(plan) => {
                 let output = Arc::new(TupleBuffer::vec());
@@ -1047,22 +1091,22 @@ impl PipelineBlocking {
     }
 }
 
-impl From<PipelineNonBlocking> for PipelineBlocking {
-    fn from(plan: PipelineNonBlocking) -> Self {
+impl<T: TxnStorageTrait> From<PipelineNonBlocking<T>> for PipelineBlocking<T> {
+    fn from(plan: PipelineNonBlocking<T>) -> Self {
         PipelineBlocking::Dummy(plan)
     }
 }
 
-pub struct InMemSort {
-    exec_plan: PipelineNonBlocking,
+pub struct InMemSort<T: TxnStorageTrait> {
+    exec_plan: PipelineNonBlocking<T>,
     sort_cols: Vec<(ColumnId, bool, bool)>, // ColumnId, ascending, nulls_first
 }
 
-impl InMemSort {
+impl<T: TxnStorageTrait> InMemSort<T> {
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
-    ) -> Result<Arc<TupleBuffer>, ExecError> {
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+    ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let output = Arc::new(TupleBuffer::vec());
         let mut tuples = Vec::new();
         while let Some(tuple) = self.exec_plan.next(&context)? {
@@ -1079,16 +1123,16 @@ impl InMemSort {
     }
 }
 
-pub struct InMemHashTableCreation {
-    exec_plan: PipelineNonBlocking,
+pub struct InMemHashTableCreation<T: TxnStorageTrait> {
+    exec_plan: PipelineNonBlocking<T>,
     exprs: Vec<ByteCodeExpr>, // Hash key expressions
 }
 
-impl InMemHashTableCreation {
+impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
-    ) -> Result<Arc<TupleBuffer>, ExecError> {
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+    ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let output = Arc::new(TupleBuffer::hash_table(self.exprs.clone()));
         while let Some(tuple) = self.exec_plan.next(&context)? {
             output.append(tuple)?;
@@ -1097,17 +1141,17 @@ impl InMemHashTableCreation {
     }
 }
 
-pub struct InMemHashAggregation {
-    exec_plan: PipelineNonBlocking,
+pub struct InMemHashAggregation<T: TxnStorageTrait> {
+    exec_plan: PipelineNonBlocking<T>,
     group_by: Vec<ColumnId>,
     agg_op: Vec<(AggOp, ColumnId)>,
 }
 
-impl InMemHashAggregation {
+impl<T: TxnStorageTrait> InMemHashAggregation<T> {
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<TupleBuffer>>,
-    ) -> Result<Arc<TupleBuffer>, ExecError> {
+        context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+    ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let output = Arc::new(TupleBuffer::hash_aggregate_table(
             self.group_by.clone(),
             self.agg_op.clone(),
@@ -1121,14 +1165,14 @@ impl InMemHashAggregation {
 
 pub type PipelineID = u16;
 
-pub struct Pipeline {
+pub struct Pipeline<T: TxnStorageTrait> {
     id: PipelineID,
-    context: HashMap<PipelineID, Arc<TupleBuffer>>,
-    exec_plan: PipelineBlocking,
+    context: HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+    exec_plan: PipelineBlocking<T>,
 }
 
-impl Pipeline {
-    pub fn new(id: PipelineID, execution_plan: PipelineBlocking) -> Self {
+impl<T: TxnStorageTrait> Pipeline<T> {
+    pub fn new(id: PipelineID, execution_plan: PipelineBlocking<T>) -> Self {
         Self {
             id,
             context: HashMap::new(),
@@ -1141,22 +1185,22 @@ impl Pipeline {
     }
 
     /// Set context
-    pub fn set_context(&mut self, id: PipelineID, buffer: Arc<TupleBuffer>) {
+    pub fn set_context(&mut self, id: PipelineID, buffer: Arc<TupleBuffer<T>>) {
         self.context.insert(id, buffer);
     }
 
-    pub fn execute(&mut self) -> Result<Arc<TupleBuffer>, ExecError> {
+    pub fn execute(&mut self) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         self.exec_plan.execute(&self.context)
     }
 }
 
-pub struct PipelineQueue {
-    pipelines: HashMap<PipelineID, Pipeline>,
+pub struct PipelineQueue<T: TxnStorageTrait> {
+    pipelines: HashMap<PipelineID, Pipeline<T>>,
     dependencies: HashMap<PipelineID, HashSet<PipelineID>>, // PipelineID depends on the set of PipelineIDs
     queue: VecDeque<PipelineID>,
 }
 
-impl PipelineQueue {
+impl<T: TxnStorageTrait> PipelineQueue<T> {
     pub fn new() -> Self {
         Self {
             pipelines: HashMap::new(),
@@ -1165,7 +1209,7 @@ impl PipelineQueue {
         }
     }
 
-    pub fn add_pipeline(&mut self, pipeline: Pipeline) {
+    pub fn add_pipeline(&mut self, pipeline: Pipeline<T>) {
         let id = pipeline.get_id();
         self.pipelines.insert(id, pipeline);
         self.dependencies.entry(id).or_insert_with(HashSet::new);
@@ -1199,7 +1243,7 @@ impl PipelineQueue {
 
     // Remove the completed pipeline from the dependencies of other pipelines
     // Set the output of the completed pipeline as the input of the dependent pipelines
-    fn notify_dependencies(&mut self, id: PipelineID, output: Arc<TupleBuffer>) {
+    fn notify_dependencies(&mut self, id: PipelineID, output: Arc<TupleBuffer<T>>) {
         for (other_id, deps) in self.dependencies.iter_mut() {
             if deps.remove(&id) {
                 // The pipeline depends on the completed pipeline
@@ -1209,7 +1253,7 @@ impl PipelineQueue {
         }
     }
 
-    pub fn execute(&mut self) -> Result<Arc<TupleBuffer>, ExecError> {
+    pub fn execute(&mut self) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         while let Some(id) = self.queue.pop_front() {
@@ -1228,6 +1272,8 @@ impl PipelineQueue {
 
 #[cfg(test)]
 mod tests {
+    use txn_storage::InMemStorage;
+
     use crate::{executor::bytecode_expr::colidx_expr, tuple};
 
     use super::*;
@@ -1273,9 +1319,17 @@ mod tests {
         );
     }
 
+    fn vec_buffer() -> Arc<TupleBuffer<InMemStorage>> {
+        Arc::new(TupleBuffer::vec())
+    }
+
+    fn hash_table_buffer(exprs: Vec<ByteCodeExpr>) -> Arc<TupleBuffer<InMemStorage>> {
+        Arc::new(TupleBuffer::hash_table(exprs))
+    }
+
     #[test]
     fn test_pipeline_scan() {
-        let input = Arc::new(TupleBuffer::vec());
+        let input = vec_buffer();
         let tuple = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         input.append(tuple.copy()).unwrap();
 
@@ -1296,7 +1350,7 @@ mod tests {
     #[test]
     fn test_pipeline_merge_scan() {
         // Prepare two sorted inputs.
-        let input1 = Arc::new(TupleBuffer::vec());
+        let input1 = vec_buffer();
         let mut expected1 = vec![
             Tuple::from_fields(vec![1.into(), "a".into()]),
             Tuple::from_fields(vec![3.into(), "b".into()]),
@@ -1306,7 +1360,7 @@ mod tests {
             input1.append(tuple.copy()).unwrap();
         }
 
-        let input2 = Arc::new(TupleBuffer::vec());
+        let input2 = vec_buffer();
         let mut expected2 = vec![
             Tuple::from_fields(vec![2.into(), "d".into()]),
             Tuple::from_fields(vec![4.into(), "e".into()]),
@@ -1342,7 +1396,7 @@ mod tests {
     #[test]
     fn test_pipeline_merge_scan_with_3_inputs() {
         // Prepare three sorted inputs.
-        let input1 = Arc::new(TupleBuffer::vec());
+        let input1 = vec_buffer();
         let mut expected1 = vec![
             Tuple::from_fields(vec![1.into(), "a".into()]),
             Tuple::from_fields(vec![4.into(), "d".into()]),
@@ -1352,7 +1406,7 @@ mod tests {
             input1.append(tuple.copy()).unwrap();
         }
 
-        let input2 = Arc::new(TupleBuffer::vec());
+        let input2 = vec_buffer();
         let mut expected2 = vec![
             Tuple::from_fields(vec![2.into(), "b".into()]),
             Tuple::from_fields(vec![5.into(), "e".into()]),
@@ -1362,7 +1416,7 @@ mod tests {
             input2.append(tuple.copy()).unwrap();
         }
 
-        let input3 = Arc::new(TupleBuffer::vec());
+        let input3 = vec_buffer();
         let mut expected3 = vec![
             Tuple::from_fields(vec![3.into(), "c".into()]),
             Tuple::from_fields(vec![6.into(), "f".into()]),
@@ -1399,7 +1453,7 @@ mod tests {
     #[test]
     fn test_hash_table_iter_key() {
         let exprs = vec![colidx_expr(0)];
-        let input = Arc::new(TupleBuffer::hash_table(exprs));
+        let input = hash_table_buffer(exprs.clone());
         let tuple1 = Tuple::from_fields(vec!["a".into(), 1.into()]);
         let tuple2 = Tuple::from_fields(vec!["b".into(), 2.into()]);
         let tuple3 = Tuple::from_fields(vec!["a".into(), 3.into()]);
@@ -1439,7 +1493,7 @@ mod tests {
     #[test]
     fn test_pipeline_hash_table_iter_all() {
         let exprs = vec![colidx_expr(0)];
-        let input = Arc::new(TupleBuffer::hash_table(exprs));
+        let input = hash_table_buffer(exprs.clone());
         let tuple1 = Tuple::from_fields(vec![1.into(), 2.into()]);
         let tuple2 = Tuple::from_fields(vec![3.into(), 4.into()]);
         let tuple3 = Tuple::from_fields(vec![1.into(), 2.into()]);
@@ -1477,7 +1531,7 @@ mod tests {
         input1.append(tuple4.copy()).unwrap();
 
         // Probe input
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
         let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -1530,7 +1584,7 @@ mod tests {
         input1.append(tuple2.copy()).unwrap();
 
         // Probe input
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
         let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -1594,7 +1648,7 @@ mod tests {
         input1.append(tuple2.copy()).unwrap();
 
         // Probe input
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
         let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -1642,7 +1696,7 @@ mod tests {
         input1.append(tuple2.copy()).unwrap();
 
         // Probe input
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
         let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -1696,7 +1750,7 @@ mod tests {
         input1.append(tuple2.copy()).unwrap();
 
         // Probe input
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
         let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -1754,7 +1808,7 @@ mod tests {
         input1.append(tuple3.copy()).unwrap();
 
         // Probe input
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         let tuple6 = Tuple::from_fields(vec![3.into(), 4.into(), 5.into()]);
         let tuple7 = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -1795,7 +1849,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_in_mem_sort() {
-        let input = Arc::new(TupleBuffer::vec());
+        let input = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
         let tuple2 = Tuple::from_fields(vec![3.into(), "b".into()]);
         let tuple3 = Tuple::from_fields(vec![2.into(), "c".into()]);
@@ -1825,7 +1879,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_in_mem_hashtable_creation() {
-        let input = Arc::new(TupleBuffer::vec());
+        let input = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
         let tuple2 = Tuple::from_fields(vec![3.into(), "b".into()]);
         let tuple3 = Tuple::from_fields(vec![1.into(), "c".into()]);
@@ -1874,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_in_mem_hash_aggregation() {
-        let input = Arc::new(TupleBuffer::vec());
+        let input = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), 10.into(), "a".into()]);
         let tuple2 = Tuple::from_fields(vec![1.into(), 10.into(), "b".into()]);
         let tuple3 = Tuple::from_fields(vec![2.into(), 20.into(), "a".into()]);
@@ -1910,7 +1964,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_in_mem_hash_aggregation_with_null_group() {
-        let input = Arc::new(TupleBuffer::vec());
+        let input = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), 10.into(), "a".into()]);
         let tuple2 = Tuple::from_fields(vec![1.into(), 10.into(), "b".into()]);
         let tuple3 = Tuple::from_fields(vec![Field::Int(None), 20.into(), "a".into()]);
@@ -1946,13 +2000,13 @@ mod tests {
 
     #[test]
     fn test_pipeline_nested_loop_join() {
-        let input1 = Arc::new(TupleBuffer::vec());
+        let input1 = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
         let tuple2 = Tuple::from_fields(vec![2.into(), "b".into()]);
         input1.append(tuple1.copy()).unwrap();
         input1.append(tuple2.copy()).unwrap();
 
-        let input2 = Arc::new(TupleBuffer::vec());
+        let input2 = vec_buffer();
         let tuple3 = Tuple::from_fields(vec![1.into(), 10.into()]);
         let tuple4 = Tuple::from_fields(vec![2.into(), 20.into()]);
         input2.append(tuple3.copy()).unwrap();
@@ -1998,7 +2052,7 @@ mod tests {
         //      |             |
         //   input0         input1
 
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), "a".into()]);
         let tuple2 = Tuple::from_fields(vec![1.into(), "b".into()]);
         let tuple3 = Tuple::from_fields(vec![2.into(), "c".into()]);
@@ -2008,7 +2062,7 @@ mod tests {
         input0.append(tuple3.copy()).unwrap();
         input0.append(tuple4.copy()).unwrap();
 
-        let input1 = Arc::new(TupleBuffer::vec());
+        let input1 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec![1.into(), 10.into()]);
         let tuple6 = Tuple::from_fields(vec![2.into(), 20.into()]);
         input1.append(tuple5.copy()).unwrap();
@@ -2078,7 +2132,7 @@ mod tests {
         //            |
         //         input1
 
-        let input0 = Arc::new(TupleBuffer::vec());
+        let input0 = vec_buffer();
         let tuple1 = Tuple::from_fields(vec![1.into(), "aa".into()]);
         let tuple2 = Tuple::from_fields(vec![1.into(), "bb".into()]);
         let tuple3 = Tuple::from_fields(vec![2.into(), "cc".into()]);
@@ -2088,13 +2142,13 @@ mod tests {
         input0.append(tuple3.copy()).unwrap();
         input0.append(tuple4.copy()).unwrap();
 
-        let input1 = Arc::new(TupleBuffer::vec());
+        let input1 = vec_buffer();
         let tuple5 = Tuple::from_fields(vec!["a".into(), 1.into()]);
         let tuple6 = Tuple::from_fields(vec!["b".into(), 2.into()]);
         input1.append(tuple5.copy()).unwrap();
         input1.append(tuple6.copy()).unwrap();
 
-        let input2 = Arc::new(TupleBuffer::vec());
+        let input2 = vec_buffer();
         let tuple7 = Tuple::from_fields(vec!["a".into()]);
         let tuple8 = Tuple::from_fields(vec!["b".into()]);
         input2.append(tuple7.copy()).unwrap();
