@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -1347,7 +1347,7 @@ pub struct PhysicalRelExprToPipelineQueue<T: TxnStorageTrait> {
     pub pipeline_queue: PipelineQueue<T>,
 }
 
-type ColIdToIdx = HashMap<ColumnId, usize>;
+type ColIdToIdx = BTreeMap<ColumnId, usize>;
 
 impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
     pub fn new(storage: Arc<T>) -> Self {

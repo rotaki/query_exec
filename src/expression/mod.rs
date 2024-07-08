@@ -5,7 +5,7 @@ use crate::{prelude::DataType, tuple::Field};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -19,9 +19,9 @@ pub mod prelude {
 }
 
 // This `plan` is implemented by logical (LogicalRelExpr) and physical (PhysicalRelExpr) relational expressions.
-pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq {
+pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq + Eq + PartialOrd + Ord + Hash {
     /// Replace the variables in the current plan with the dest_ids in the `src_to_dest` map.
-    fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Self;
+    fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> Self;
 
     /// Print the current plan with the given indentation by modifying the `out` string.
     fn print_inner(&self, indent: usize, out: &mut String);
@@ -39,7 +39,7 @@ pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq {
     fn free(&self) -> HashSet<ColumnId>;
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -74,7 +74,7 @@ impl std::fmt::Display for BinaryOp {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AggOp {
     Avg,
     Count,
@@ -96,7 +96,7 @@ impl std::fmt::Display for AggOp {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 pub enum JoinType {
     Inner,
     LeftOuter,
@@ -138,14 +138,14 @@ impl std::fmt::Display for JoinType {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DateField {
     Year,
     Month,
     Day,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Expression<P: PlanTrait> {
     ColRef {
         id: ColumnId,
@@ -266,6 +266,25 @@ impl<P: PlanTrait> Expression<P> {
         if matches!(op, BinaryOp::Or) {
             if left == right {
                 return left;
+            } else {
+                // Push down the OR operator as much as possible
+                let left = left.split_conjunction();
+                let right = right.split_conjunction();
+                if left.len() == 1 && right.len() == 1 {
+                    return Expression::Binary {
+                        op,
+                        left: left.into_iter().next().unwrap().into(),
+                        right: right.into_iter().next().unwrap().into(),
+                    };
+                } else {
+                    let mut result = Vec::with_capacity(left.len() * right.len());
+                    for l in left {
+                        for r in right.iter() {
+                            result.push(Expression::binary(op, l.clone(), r.clone()));
+                        }
+                    }
+                    return Expression::merge_conjunction(result);
+                }
             }
         } else if matches!(op, BinaryOp::And) && left == right {
             return left;
@@ -422,7 +441,7 @@ impl<P: PlanTrait> Expression<P> {
         }
     }
 
-    pub fn split_conjunction(self) -> Vec<Expression<P>> {
+    pub fn split_conjunction(self) -> BTreeSet<Expression<P>> {
         match self {
             Expression::Binary {
                 op: BinaryOp::And,
@@ -434,7 +453,7 @@ impl<P: PlanTrait> Expression<P> {
                 left.append(&mut right);
                 left
             }
-            _ => vec![self],
+            _ => std::iter::once(self).collect(),
         }
     }
 
@@ -514,7 +533,7 @@ impl<P: PlanTrait> Expression<P> {
 
     /// Replace the variables in the expression with the new column IDs as specified in the
     /// `src_to_dest` mapping.
-    pub fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Expression<P> {
+    pub fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> Expression<P> {
         if src_to_dest.is_empty() {
             return self;
         }

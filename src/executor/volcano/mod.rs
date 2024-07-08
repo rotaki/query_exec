@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use txn_storage::prelude::*;
 
@@ -1431,7 +1434,7 @@ pub struct PhysicalRelExprToOpIter<T: TxnStorageTrait> {
     pub storage: Arc<T>,
 }
 
-type ColIdToIdx = HashMap<ColumnId, usize>;
+type ColIdToIdx = BTreeMap<ColumnId, usize>;
 
 impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
     pub fn new(storage: Arc<T>) -> Self {

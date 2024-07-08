@@ -8,7 +8,7 @@ use crate::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 
 pub enum ByteCodes {
@@ -190,7 +190,7 @@ impl ByteCodeExpr {
 
     pub fn from_ast<P: PlanTrait>(
         expr: Expression<P>,
-        col_id_to_idx: &HashMap<ColumnId, ColumnId>,
+        col_id_to_idx: &BTreeMap<ColumnId, ColumnId>,
     ) -> Result<Self, ExecError> {
         AstToByteCode::<P>::to_bytecode(expr, col_id_to_idx)
     }
@@ -730,7 +730,7 @@ impl<P: PlanTrait + PartialEq> AstToByteCode<P> {
     ///
     pub fn to_bytecode(
         expr: Expression<P>,
-        col_id_to_idx: &HashMap<ColumnId, ColumnId>,
+        col_id_to_idx: &BTreeMap<ColumnId, ColumnId>,
     ) -> Result<ByteCodeExpr, ExecError> {
         let expr = expr.replace_variables(col_id_to_idx);
         let mut bytecode_expr = ByteCodeExpr::new();
@@ -974,6 +974,10 @@ mod tests {
     use crate::tuple::Field;
     use std::collections::HashMap;
 
+    fn get_col_id_to_idx() -> BTreeMap<ColumnId, ColumnId> {
+        BTreeMap::new()
+    }
+
     #[test]
     fn test_binary_operation() {
         let tuple = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
@@ -987,7 +991,7 @@ mod tests {
             }),
             right: Box::new(Expression::ColRef { id: 2 }),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(true));
@@ -1022,7 +1026,7 @@ mod tests {
             left: Box::new(Expression::ColRef { id: 0 }),
             right: Box::new(Expression::ColRef { id: 1 }),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(false));
@@ -1045,7 +1049,7 @@ mod tests {
         let expr = Expression::<PhysicalRelExpr>::IsNull {
             expr: Box::new(Expression::ColRef { id: 0 }),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(true));
@@ -1091,7 +1095,7 @@ mod tests {
             ],
             else_expr: Some(Box::new(Expression::Field { val: 40.into() })),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result0 = bytecode_expr.eval(&tuple0).unwrap();
         assert_eq!(result0, Field::Int(Some(40)));
@@ -1178,7 +1182,7 @@ mod tests {
             ],
             else_expr: Some(Box::new(Expression::Field { val: 50.into() })),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result0 = bytecode_expr.eval(&tuple0).unwrap();
         assert_eq!(result0, Field::Int(Some(40)));
@@ -1232,7 +1236,7 @@ mod tests {
             lower: Box::new(Expression::Field { val: 1.into() }),
             upper: Box::new(Expression::Field { val: 3.into() }),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result0 = bytecode_expr.eval(&tuple0).unwrap();
         assert_eq!(result0, Field::from_bool(false));
@@ -1256,7 +1260,7 @@ mod tests {
             field: DateField::Year,
             expr: Box::new(Expression::ColRef { id: 0 }),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::Int(Some(2021)));
@@ -1289,7 +1293,7 @@ mod tests {
             pattern: "hello world".to_string(),
             escape: None,
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(true));
@@ -1405,7 +1409,7 @@ mod tests {
             expr: Box::new(Expression::ColRef { id: 0 }),
             to_type: DataType::String,
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::String(Some("1".to_string())));
@@ -1469,7 +1473,7 @@ mod tests {
                 Expression::Field { val: 3.into() },
             ],
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(true));
@@ -1519,7 +1523,7 @@ mod tests {
         let expr = Expression::<PhysicalRelExpr>::Not {
             expr: Box::new(Expression::ColRef { id: 0 }),
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::from_bool(false));
@@ -1552,7 +1556,7 @@ mod tests {
             start: 0,
             len: 5,
         };
-        let col_id_to_idx = HashMap::new();
+        let col_id_to_idx = get_col_id_to_idx();
         let bytecode_expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx).unwrap();
         let result = bytecode_expr.eval(&tuple).unwrap();
         assert_eq!(result, Field::String(Some("hello".to_string())));

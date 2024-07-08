@@ -1,7 +1,7 @@
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
 use crate::Field;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 impl LogicalRelExpr {
     pub fn flatmap(
@@ -162,12 +162,9 @@ impl LogicalRelExpr {
                             col_id_gen,
                             JoinType::LeftOuter,
                             copy,
-                            new_col_ids
-                                .iter()
-                                .map(|(src, dest)| {
-                                    Expression::col_ref(*src).eq(Expression::col_ref(*dest))
-                                })
-                                .collect(),
+                            new_col_ids.iter().map(|(src, dest)| {
+                                Expression::col_ref(*src).eq(Expression::col_ref(*dest))
+                            }),
                         );
                         // plan.att() contains (duplicated) join cols, group_by and aggrs.
                         // 1. We replace the original count columns with the new column ids.
@@ -181,12 +178,12 @@ impl LogicalRelExpr {
                         let replace_count_cols = counts
                             .iter()
                             .map(|id| (*id, col_id_gen.next()))
-                            .collect::<HashMap<_, _>>();
+                            .collect::<BTreeMap<_, _>>();
                         // New -> Original
                         let replace_count_cols_rev = replace_count_cols
                             .iter()
                             .map(|(src, dest)| (*dest, *src))
-                            .collect::<HashMap<_, _>>();
+                            .collect::<BTreeMap<_, _>>();
                         let new_plan = plan.replace_variables(&replace_count_cols);
 
                         // Get the projected columns

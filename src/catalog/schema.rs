@@ -104,7 +104,7 @@ impl ColumnDef {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DataType {
     Boolean = 0,
     Int,

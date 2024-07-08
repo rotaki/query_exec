@@ -2,7 +2,7 @@
 
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 impl LogicalRelExpr {
     /// Apply selection to the current logical relational expression.
@@ -11,15 +11,16 @@ impl LogicalRelExpr {
         optimize: bool,
         enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
-        predicates: Vec<Expression<LogicalRelExpr>>,
+        predicates: impl IntoIterator<Item = Expression<LogicalRelExpr>>,
     ) -> LogicalRelExpr {
-        if predicates.is_empty() {
-            return self;
-        }
-        let mut predicates: Vec<Expression<LogicalRelExpr>> = predicates
+        let mut predicates: BTreeSet<Expression<LogicalRelExpr>> = predicates
             .into_iter()
             .flat_map(|expr| expr.split_conjunction())
             .collect();
+
+        if predicates.is_empty() {
+            return self;
+        }
 
         if optimize && enabled_rules.is_enabled(&HeuristicRule::SelectionPushdown) {
             match self {

@@ -294,7 +294,7 @@ impl Translator {
                         true,
                         &self.enabled_rules,
                         &self.col_id_gen,
-                        condition.into_iter().collect(),
+                        condition.into_iter(),
                     )
             } else {
                 plan.on(
@@ -303,7 +303,7 @@ impl Translator {
                     &self.col_id_gen,
                     join_type,
                     right,
-                    condition.into_iter().collect(),
+                    condition.into_iter(),
                 )
             }
         }
@@ -541,7 +541,7 @@ impl Translator {
                         true,
                         &self.enabled_rules,
                         &self.col_id_gen,
-                        vec![Expression::col_ref(col_id)],
+                        [Expression::col_ref(col_id)],
                     )
                     .u_project(
                         true,
@@ -1337,7 +1337,10 @@ fn has_agg(expr: &sqlparser::ast::Expr) -> bool {
         TypedString { .. } => false,
 
         BinaryOp { left, op: _, right } => has_agg(left) || has_agg(right),
-        Function(function) => matches!(get_name(&function.name).to_uppercase().as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"),
+        Function(function) => matches!(
+            get_name(&function.name).to_uppercase().as_str(),
+            "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
+        ),
         Nested(expr) => has_agg(expr),
         Extract { .. } => false,
         Cast { expr, .. } => has_agg(expr),

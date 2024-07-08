@@ -2,7 +2,7 @@
 
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 impl LogicalRelExpr {
     /// Apply on(join) to the current logical relational expression.
@@ -13,8 +13,13 @@ impl LogicalRelExpr {
         col_id_gen: &ColIdGenRef,
         join_type: JoinType,
         other: LogicalRelExpr,
-        mut on_conditions: Vec<Expression<LogicalRelExpr>>, // On condition. On conditions can be pushed down to the source independently of the join type.
+        on_conditions: impl IntoIterator<Item = Expression<LogicalRelExpr>>, // On condition. On conditions can be pushed down to the source independently of the join type.
     ) -> LogicalRelExpr {
+        let on_conditions: BTreeSet<_> = on_conditions
+            .into_iter()
+            .flat_map(|expr| expr.split_conjunction())
+            .collect();
+
         if on_conditions.is_empty() {
             return LogicalRelExpr::Join {
                 join_type,
@@ -24,41 +29,44 @@ impl LogicalRelExpr {
             };
         }
 
-        on_conditions = on_conditions
-            .into_iter()
-            .flat_map(|expr| expr.split_conjunction())
-            .collect();
-
         if optimize {
             let (push_down, keep): (Vec<_>, Vec<_>) =
                 on_conditions.iter().partition(|pred| pred.bound_by(&self));
             if !push_down.is_empty() {
                 // This condition is necessary to avoid infinite recursion
-                let push_down = push_down.into_iter().cloned().collect();
-                let keep = keep.into_iter().cloned().collect();
-                return self.select(true, enabled_rules, col_id_gen, push_down).on(
-                    true,
-                    enabled_rules,
-                    col_id_gen,
-                    join_type,
-                    other,
-                    keep,
-                );
+                return self
+                    .select(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        push_down.into_iter().cloned(),
+                    )
+                    .on(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        join_type,
+                        other,
+                        keep.into_iter().cloned(),
+                    );
             }
 
             let (push_down, keep): (Vec<_>, Vec<_>) =
                 on_conditions.iter().partition(|pred| pred.bound_by(&other));
             if !push_down.is_empty() {
                 // This condition is necessary to avoid infinite recursion
-                let push_down = push_down.into_iter().cloned().collect();
-                let keep = keep.into_iter().cloned().collect();
                 return self.on(
                     true,
                     enabled_rules,
                     col_id_gen,
                     join_type,
-                    other.select(true, enabled_rules, col_id_gen, push_down),
-                    keep,
+                    other.select(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        push_down.into_iter().cloned(),
+                    ),
+                    keep.into_iter().cloned(),
                 );
             }
 
@@ -89,8 +97,13 @@ impl LogicalRelExpr {
         col_id_gen: &ColIdGenRef,
         join_type: JoinType,
         other: LogicalRelExpr,
-        mut predicates: Vec<Expression<LogicalRelExpr>>, // Pushed down predicates. This can only be applied to the source if join_type matches the condition.
+        predicates: impl IntoIterator<Item = Expression<LogicalRelExpr>>,
     ) -> LogicalRelExpr {
+        let predicates: BTreeSet<_> = predicates
+            .into_iter()
+            .flat_map(|expr| expr.split_conjunction())
+            .collect();
+
         if predicates.is_empty() {
             return LogicalRelExpr::Join {
                 join_type,
@@ -99,11 +112,6 @@ impl LogicalRelExpr {
                 predicates,
             };
         }
-
-        predicates = predicates
-            .into_iter()
-            .flat_map(|expr| expr.split_conjunction())
-            .collect();
 
         if optimize {
             if matches!(
@@ -119,11 +127,21 @@ impl LogicalRelExpr {
                     predicates.iter().partition(|pred| pred.bound_by(&self));
                 if !push_down.is_empty() {
                     // This condition is necessary to avoid infinite recursion
-                    let push_down = push_down.into_iter().cloned().collect();
-                    let keep = keep.into_iter().cloned().collect();
                     return self
-                        .select(true, enabled_rules, col_id_gen, push_down)
-                        .join(true, enabled_rules, col_id_gen, join_type, other, keep);
+                        .select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().cloned(),
+                        )
+                        .join(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            join_type,
+                            other,
+                            keep.into_iter().cloned(),
+                        );
                 }
             }
 
@@ -140,15 +158,18 @@ impl LogicalRelExpr {
                     predicates.iter().partition(|pred| pred.bound_by(&other));
                 if !push_down.is_empty() {
                     // This condition is necessary to avoid infinite recursion
-                    let push_down = push_down.into_iter().cloned().collect();
-                    let keep = keep.into_iter().cloned().collect();
                     return self.join(
                         true,
                         enabled_rules,
                         col_id_gen,
                         join_type,
-                        other.select(true, enabled_rules, col_id_gen, push_down),
-                        keep,
+                        other.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().cloned(),
+                        ),
+                        keep.into_iter().cloned(),
                     );
                 }
             }

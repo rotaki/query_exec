@@ -1,4 +1,3 @@
-// Reference: https://github.com/rotaki/decorrelator
 mod aggregate;
 mod flatmap;
 mod hoist;
@@ -11,7 +10,10 @@ mod rules;
 mod scan;
 mod select;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    hash::Hash,
+};
 
 use super::prelude::*;
 use crate::{ColumnId, ContainerId};
@@ -24,7 +26,7 @@ pub mod prelude {
     pub use super::{HeuristicRule, HeuristicRulesRef};
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LogicalRelExpr {
     Scan {
         db_id: DatabaseId,
@@ -35,13 +37,13 @@ pub enum LogicalRelExpr {
     Select {
         // Evaluate the predicate for each row in the source
         src: Box<LogicalRelExpr>,
-        predicates: Vec<Expression<Self>>,
+        predicates: BTreeSet<Expression<Self>>,
     },
     Join {
         join_type: JoinType,
         left: Box<LogicalRelExpr>,
         right: Box<LogicalRelExpr>,
-        predicates: Vec<Expression<Self>>,
+        predicates: BTreeSet<Expression<Self>>,
     },
     Project {
         // Reduces the number of columns in the result
@@ -71,14 +73,14 @@ pub enum LogicalRelExpr {
     },
     Rename {
         src: Box<LogicalRelExpr>,
-        src_to_dest: HashMap<ColumnId, ColumnId>, // (src_column_id, dest_column_id)
+        src_to_dest: BTreeMap<ColumnId, ColumnId>, // (src_column_id, dest_column_id)
     },
 }
 
 impl PlanTrait for LogicalRelExpr {
     /// Replace the column names in the relational expression
     /// * src_to_dest: A mapping from the source column id to the desired destination column id
-    fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> LogicalRelExpr {
+    fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> LogicalRelExpr {
         match self {
             LogicalRelExpr::Scan {
                 db_id,
