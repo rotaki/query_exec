@@ -377,7 +377,7 @@ impl Translator {
                         plan.rename(&self.enabled_rules, &self.col_id_gen);
 
                     // Add the
-                    for (old_col_id, new_col_id) in new_col_ids.drain() {
+                    for (old_col_id, new_col_id) in new_col_ids.into_iter() {
                         // get the name of the column
                         let col_name = cols.get(old_col_id).unwrap().name();
                         self.env.set(&col_name, new_col_id);
@@ -406,7 +406,7 @@ impl Translator {
                     let (plan, mut new_col_ids) =
                         plan.rename(&self.enabled_rules, &self.col_id_gen);
 
-                    for (old_col_id, new_col_id) in new_col_ids.drain() {
+                    for (old_col_id, new_col_id) in new_col_ids.into_iter() {
                         // get the name of the column
                         let names = query.env.get_names(old_col_id);
                         for name in names {

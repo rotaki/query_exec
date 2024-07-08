@@ -10,6 +10,7 @@ log_debug = []
 log_info = []
 log_warn = []
 log_error = []
+datafusion_bench = ["datafusion", "tokio"]
 
 [dependencies]
 txn_storage = { git = "https://github.com/rotaki/txn_storage.git", branch = "master" }
@@ -21,3 +22,5 @@ chrono = { version = "0.4", features = ["serde"] }
 sqlparser = "0.47"
 clap = "4.5"
 regex = "1.5"
+datafusion = { version = "39.0", optional = true }
+tokio = { version = "1.0", features = ["rt-multi-thread"], optional = true }

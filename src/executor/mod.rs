@@ -37,7 +37,7 @@ use crate::{
 pub trait Executor<T: TxnStorageTrait> {
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self;
     fn to_pretty_string(&self) -> String;
-    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError>;
+    fn execute(self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError>;
 }
 
 pub enum TupleBuffer<T: TxnStorageTrait> {

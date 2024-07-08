@@ -314,7 +314,7 @@ impl PartialEq for Field {
             (Field::Date(val1), Field::Date(val2)) => val1 == val2,
             (Field::Int(val1), Field::Float(val2)) => {
                 if let (Some(val1), Some(val2)) = (val1, val2) {
-                    (*val1 as f64).eq(&val2)
+                    (*val1 as f64).eq(val2)
                 } else {
                     false
                 }

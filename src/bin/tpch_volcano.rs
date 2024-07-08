@@ -6,7 +6,11 @@ use query_exec::{
     },
     ContainerType, InMemStorage,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 #[derive(Debug, Parser)]
 #[clap(name = "TPC-H", about = "TPC-H Benchmarks.")]
@@ -15,7 +19,7 @@ pub struct TpchOpt {
     #[clap(short = 'q', long = "query", default_value = "15")]
     pub query_id: usize,
     /// Scale factor. Should be in range [0.01, 100].
-    #[clap(short = 's', long = "scale factor", default_value = "0.01")]
+    #[clap(short = 's', long = "scale factor", default_value = "0.1")]
     pub scale_factor: f64,
 }
 
@@ -72,18 +76,59 @@ fn main() {
 
     println!("Data loaded. Running query...");
 
-    let query_path = format!("tpch/queries/q{}.sql", opt.query_id);
-    let query = std::fs::read_to_string(query_path).unwrap();
-    let logical = query_executor.to_logical(&query).unwrap();
-    println!("=== Logical Plan ===");
-    logical.pretty_print();
-    let physical = query_executor.to_physical(logical);
-    println!("=== Physical Plan ===");
-    physical.pretty_print();
-    let exec = query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical);
-    println!("=== Exec ===");
-    println!("{}", exec.to_pretty_string());
-    let result = query_executor.execute(exec).unwrap();
+    let mut results = BTreeMap::new(); // query_id -> Vec<Time>
 
-    print_tuples(result);
+    for query_id in 1..=22 {
+        let query_path = format!("tpch/queries/q{}.sql", query_id);
+        let query = std::fs::read_to_string(query_path).unwrap();
+        let logical = query_executor.to_logical(&query).unwrap();
+        let physical = query_executor.to_physical(logical);
+        // Run the query 3 times to warm up the cache
+        println!("====== Warming up query {} ======", query_id);
+        for _ in 0..3 {
+            let exec =
+                query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical.clone());
+            let result = query_executor.execute(exec).unwrap();
+            println!("Warm up result num rows: {}", result.num_tuples().unwrap());
+        }
+        println!("====== Measuring query {} ======", query_id);
+        for _ in 0..10 {
+            let exec =
+                query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical.clone());
+            let start = std::time::Instant::now();
+            let result = query_executor.execute(exec).unwrap();
+            let elapsed = start.elapsed();
+            println!(
+                "Query {} took {:?}, num rows: {}",
+                query_id,
+                elapsed,
+                result.num_tuples().unwrap()
+            );
+            results
+                .entry(query_id)
+                .or_insert_with(Vec::new)
+                .push(elapsed);
+        }
+    }
+
+    // Print the results as csv with the following format:
+    // query_id, time1, time2, time3, ...
+    // Name the file tpch_volcano_results_sf_<scale_factor>.csv
+    let file_name = format!("tpch_volcano_results_sf_{}.csv", opt.scale_factor);
+    let mut writer = csv::Writer::from_path(&file_name).unwrap();
+    writer
+        .write_record(&[
+            "query_id", "time1", "time2", "time3", "time4", "time5", "time6", "time7", "time8",
+            "time9", "time10",
+        ])
+        .unwrap();
+    for (query_id, times) in results {
+        let mut record = Vec::with_capacity(1 + times.len());
+        record.push(query_id.to_string());
+        for time in times {
+            record.push(time.as_millis().to_string());
+        }
+        writer.write_record(&record).unwrap();
+    }
+    println!("Results written to {}.", file_name);
 }

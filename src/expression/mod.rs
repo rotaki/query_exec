@@ -4,7 +4,11 @@ mod physical;
 use crate::{prelude::DataType, tuple::Field};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    hash::Hash,
+    result,
+};
 
 pub use crate::ColumnId;
 
@@ -16,9 +20,9 @@ pub mod prelude {
 }
 
 // This `plan` is implemented by logical (LogicalRelExpr) and physical (PhysicalRelExpr) relational expressions.
-pub trait PlanTrait: Clone + std::fmt::Debug {
+pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq + Hash {
     /// Replace the variables in the current plan with the dest_ids in the `src_to_dest` map.
-    fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Self;
+    fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> Self;
 
     /// Print the current plan with the given indentation by modifying the `out` string.
     fn print_inner(&self, indent: usize, out: &mut String);
@@ -135,14 +139,14 @@ impl std::fmt::Display for JoinType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum DateField {
     Year,
     Month,
     Day,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq)]
 pub enum Expression<P: PlanTrait> {
     ColRef {
         id: ColumnId,
@@ -261,30 +265,18 @@ impl<P: PlanTrait> Expression<P> {
 
     pub fn binary(op: BinaryOp, left: Expression<P>, right: Expression<P>) -> Expression<P> {
         if matches!(op, BinaryOp::Or) {
-            // Push down the OR operator as much as possible
-            let left = left.split_conjunction();
-            let right = right.split_conjunction();
-            if left.len() == 1 && right.len() == 1 {
-                return Expression::Binary {
-                    op,
-                    left: Box::new(left[0].clone()),
-                    right: Box::new(right[0].clone()),
-                };
-            } else {
-                let mut result = Vec::with_capacity(left.len() * right.len());
-                for l in left {
-                    for r in right.iter() {
-                        result.push(Expression::binary(op, l.clone(), r.clone()));
-                    }
-                }
-                return Expression::merge_conjunction(result);
+            if left == right {
+                return left;
             }
-        } else {
-            Expression::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
+        } else if matches!(op, BinaryOp::And) {
+            if left == right {
+                return left;
             }
+        }
+        Expression::Binary {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
         }
     }
 
@@ -460,9 +452,64 @@ impl<P: PlanTrait> Expression<P> {
         })
     }
 
+    /// Extract the bounded predicates from the given predicates.
+    /// The bounded predicates are the predicates that are bound by the given bound columns.
+    ///
+    /// For example:
+    /// Bound: a, b
+    /// (a = 1 AND c = 2) OR  (b = 3 AND d = 4) => (a = 1) OR (b = 3)
+    /// (a = 1 AND b = 2) OR  (c = 3 AND d = 4) => (a = 1 AND b = 2) OR empty => empty
+    /// (a = 1 AND b = 2) OR  (a = 3 AND b = 4) => (a = 1 AND b = 2) OR (a = 3 AND b = 4)
+    /// (a = 1 OR  c = 2) OR  (b = 3 AND d = 4) => empty OR b = 3 => empty
+    /// (a = 1 OR  c = 2) AND (b = 3 AND d = 4) => empty AND b = 3 => b = 3
+    ///
+    /// The returning predicates subsumes the original predicates.
+    /// This means the returning predicates express a logically larger set of rows than the original predicates.
+    /// The returning predicates are predicates that are bound by the bound_cols.
+    pub fn extract_bounded_predicates(&self, rel: &P) -> Vec<Expression<P>> {
+        let mut result = Vec::new();
+        match self {
+            Expression::Binary { op, left, right } if matches!(op, BinaryOp::And) => {
+                let mut left = left.extract_bounded_predicates(rel);
+                let mut right = right.extract_bounded_predicates(rel);
+                result.append(&mut left);
+                result.append(&mut right);
+            }
+            Expression::Binary { op, left, right } if matches!(op, BinaryOp::Or) => {
+                let mut left = left.extract_bounded_predicates(rel);
+                let mut right = right.extract_bounded_predicates(rel);
+                if left.is_empty() || right.is_empty() {
+                    // Do nothing
+                } else if left.len() == 1 && right.len() == 1 {
+                    let left = left.remove(0);
+                    let right = right.remove(0);
+                    if left == right {
+                        result.push(left);
+                    } else {
+                        result.push(Expression::binary(BinaryOp::Or, left, right));
+                    }
+                } else {
+                    // Connect every left and right with an AND
+                    // After that, connect the two results with an OR
+                    let merged_left = Expression::merge_conjunction(left);
+                    let merged_right = Expression::merge_conjunction(right);
+                    result.push(Expression::binary(BinaryOp::Or, merged_left, merged_right));
+                }
+            }
+            _ => {
+                // All other cases, check if expr is bound. If bound, add to the result.
+                // If not bound, ignore the expr.
+                if self.bound_by(rel) {
+                    result.push(self.clone());
+                }
+            }
+        }
+        result
+    }
+
     /// Replace the variables in the expression with the new column IDs as specified in the
     /// `src_to_dest` mapping.
-    pub fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Expression<P> {
+    pub fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> Expression<P> {
         if src_to_dest.is_empty() {
             return self;
         }

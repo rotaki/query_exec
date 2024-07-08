@@ -60,9 +60,6 @@ for table in tpch_tables:
     print("Table {} generated".format(table))
 
 for query in range(1, 23):
-    if query == 15:
-        print("Skipping query 15")
-        continue
     print("Generating result of query {}".format(query))
     file = output / "query-{}.csv".format(query)
     query_string = open("../queries/q{}.sql".format(query)).read()

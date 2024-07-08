@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
     cmp::Reverse,
-    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
     hash::Hash,
     sync::{Arc, Mutex, RwLock, RwLockReadGuard},
 };
@@ -11,7 +11,7 @@ use txn_storage::{ContainerId, DatabaseId, ScanOptions, TxnStorageTrait};
 use crate::{
     error::ExecError,
     expression::{AggOp, Expression, JoinType},
-    log, log_info,
+    log, log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, IsNull, Tuple},
@@ -142,7 +142,7 @@ impl<T: TxnStorageTrait> PScanIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("ScanIter::next");
+        log_debug!("ScanIter::next");
         if let Some(iter) = &mut self.iter {
             let next = iter.next();
             Ok(next.map(|tuple| tuple.project(&self.column_indices)))
@@ -193,7 +193,7 @@ impl<T: TxnStorageTrait> PFilterIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("FilterIter::next");
+        log_debug!("FilterIter::next");
         while let Some(tuple) = self.input.next(context)? {
             if self.expr.eval(&tuple)? == Field::from_bool(true) {
                 return Ok(Some(tuple));
@@ -251,7 +251,7 @@ impl<T: TxnStorageTrait> PProjectIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("ProjectIter::next");
+        log_debug!("ProjectIter::next");
         if let Some(tuple) = self.input.next(context)? {
             let new_tuple = tuple.project(&self.column_indices);
             Ok(Some(new_tuple))
@@ -305,7 +305,7 @@ impl<T: TxnStorageTrait> PMapIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("MapIter::next");
+        log_debug!("MapIter::next");
         if let Some(mut tuple) = self.input.next(context)? {
             for expr in &self.exprs {
                 tuple.push(expr.eval(&tuple)?);
@@ -440,7 +440,7 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("HashJoinInnerIter::next");
+        log_debug!("HashJoinInnerIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
                 let result = build.merge_mut(&probe);
@@ -539,7 +539,7 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("HashJoinRightOuterIter::next");
+        log_debug!("HashJoinRightOuterIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
                 let result = build.merge_mut(&probe);
@@ -635,7 +635,7 @@ impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("HashJoinRightSemiIter::next");
+        log_debug!("HashJoinRightSemiIter::next");
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         loop {
@@ -718,7 +718,7 @@ impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("HashJoinRightAntiIter::next");
+        log_debug!("HashJoinRightAntiIter::next");
         // If there is no match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         loop {
@@ -804,7 +804,7 @@ impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
-        log_info!("HashJoinRightMarkIter::next");
+        log_debug!("HashJoinRightMarkIter::next");
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         let build_side = context.get(&self.build_side).unwrap();
@@ -965,7 +965,7 @@ impl<T: TxnStorageTrait> BlockingOp<T> {
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         match self {
             BlockingOp::Dummy(plan) => {
-                log_info!("Dummy blocking op");
+                log_debug!("Dummy blocking op");
                 let output = Arc::new(TupleBuffer::vec());
                 while let Some(tuple) = plan.next(&context)? {
                     output.append(tuple)?;
@@ -1034,7 +1034,7 @@ impl<T: TxnStorageTrait> InMemSort<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
-        log_info!("InMemSort::execute");
+        log_debug!("InMemSort::execute");
         let output = Arc::new(TupleBuffer::vec());
         let mut tuples = Vec::new();
         while let Some(tuple) = self.exec_plan.next(&context)? {
@@ -1095,7 +1095,7 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
-        log_info!("InMemHashTableCreation::execute");
+        log_debug!("InMemHashTableCreation::execute");
         let output = Arc::new(TupleBuffer::hash_table(self.exprs.clone()));
         while let Some(tuple) = self.exec_plan.next(&context)? {
             output.append(tuple)?;
@@ -1158,7 +1158,7 @@ impl<T: TxnStorageTrait> InMemHashAggregation<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
-        log_info!("InMemHashAggregation::execute");
+        log_debug!("InMemHashAggregation::execute");
         let output = Arc::new(TupleBuffer::hash_aggregate_table(
             self.group_by.clone(),
             self.agg_op.clone(),
@@ -1314,23 +1314,23 @@ impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
         result
     }
 
-    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+    fn execute(mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
-        println!(
+        log_info!(
             "Initial queue: {:?}",
             self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
         );
         while let Some(mut pipeline) = self.queue.pop_front() {
             let current_result = pipeline.execute()?;
-            println!(
+            log_info!(
                 "Pipeline ID: {} executed with output size: {:?}",
                 pipeline.get_id(),
                 current_result.num_tuples()
             );
             self.notify_dependants(pipeline.get_id(), current_result.clone());
             self.push_no_deps_to_queue();
-            println!(
+            log_info!(
                 "Queue: {:?}",
                 self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
             );
@@ -1346,7 +1346,7 @@ pub struct PhysicalRelExprToPipelineQueue<T: TxnStorageTrait> {
     pub pipeline_queue: PipelineQueue<T>,
 }
 
-type ColIdToIdx = HashMap<ColumnId, usize>;
+type ColIdToIdx = BTreeMap<ColumnId, usize>;
 
 impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
     pub fn new(storage: Arc<T>) -> Self {
@@ -1456,7 +1456,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
             PhysicalRelExpr::Project { src, column_names } => {
                 let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let (column_indices, new_col_id_to_idx) = {
-                    let mut new_col_id_to_idx = HashMap::new();
+                    let mut new_col_id_to_idx = BTreeMap::new();
                     let mut column_indices = Vec::new();
                     for (idx, col_id) in column_names.iter().enumerate() {
                         new_col_id_to_idx.insert(*col_id, idx);
@@ -1699,7 +1699,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                     group_by_indices,
                     agg_op_indices,
                 ));
-                let mut new_col_id_to_idx: HashMap<usize, usize> = group_by
+                let mut new_col_id_to_idx: BTreeMap<usize, usize> = group_by
                     .iter()
                     .enumerate()
                     .map(|(idx, col_id)| (*col_id, idx))

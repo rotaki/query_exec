@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     marker::PhantomData,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -51,7 +51,7 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
         out
     }
 
-    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+    fn execute(mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let results = Arc::new(TupleBuffer::vec());
         loop {
             log_trace!("------------ VolcanoIterator::next ------------");
@@ -1464,7 +1464,7 @@ pub struct PhysicalRelExprToOpIter<T: TxnStorageTrait> {
     pub storage: Arc<T>,
 }
 
-type ColIdToIdx = HashMap<ColumnId, usize>;
+type ColIdToIdx = BTreeMap<ColumnId, usize>;
 
 impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
     pub fn new(storage: Arc<T>) -> Self {
@@ -1518,7 +1518,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
             PhysicalRelExpr::Project { src, column_names } => {
                 let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let (column_indices, new_col_id_to_idx) = {
-                    let mut new_col_id_to_idx = HashMap::new();
+                    let mut new_col_id_to_idx = BTreeMap::new();
                     let mut column_indices = Vec::new();
                     for (idx, col_id) in column_names.iter().enumerate() {
                         new_col_id_to_idx.insert(*col_id, idx);
@@ -1569,7 +1569,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                     group_by_indices,
                     agg_op_indices,
                 );
-                let mut new_col_id_to_idx: HashMap<usize, usize> = group_by
+                let mut new_col_id_to_idx: BTreeMap<usize, usize> = group_by
                     .iter()
                     .enumerate()
                     .map(|(idx, col_id)| (*col_id, idx))
