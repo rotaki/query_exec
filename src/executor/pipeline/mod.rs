@@ -11,6 +11,7 @@ use txn_storage::{ContainerId, DatabaseId, ScanOptions, TxnStorageTrait};
 use crate::{
     error::ExecError,
     expression::{AggOp, Expression, JoinType},
+    log, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, IsNull, Tuple},
@@ -141,8 +142,10 @@ impl<T: TxnStorageTrait> PScanIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("ScanIter::next");
         if let Some(iter) = &mut self.iter {
-            Ok(iter.next().map(|tuple| tuple.project(&self.column_indices)))
+            let next = iter.next();
+            Ok(next.map(|tuple| tuple.project(&self.column_indices)))
         } else {
             self.iter = context.get(&self.id).map(|buf| buf.iter_all());
             Ok(self
@@ -181,7 +184,7 @@ impl<T: TxnStorageTrait> PFilterIter<T> {
     }
 
     pub fn print_inner(&self, indent: usize, out: &mut String) {
-        out.push_str(&format!("{}->filter({:?})", " ".repeat(indent), self.expr));
+        out.push_str(&format!("{}->filter({})", " ".repeat(indent), self.expr));
         out.push_str("\n");
         self.input.print_inner(indent + 2, out);
     }
@@ -190,6 +193,7 @@ impl<T: TxnStorageTrait> PFilterIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("FilterIter::next");
         while let Some(tuple) = self.input.next(context)? {
             if self.expr.eval(&tuple)? == Field::from_bool(true) {
                 return Ok(Some(tuple));
@@ -247,6 +251,7 @@ impl<T: TxnStorageTrait> PProjectIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("ProjectIter::next");
         if let Some(tuple) = self.input.next(context)? {
             let new_tuple = tuple.project(&self.column_indices);
             Ok(Some(new_tuple))
@@ -289,7 +294,7 @@ impl<T: TxnStorageTrait> PMapIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -300,6 +305,7 @@ impl<T: TxnStorageTrait> PMapIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("MapIter::next");
         if let Some(mut tuple) = self.input.next(context)? {
             for expr in &self.exprs {
                 tuple.push(expr.eval(&tuple)?);
@@ -423,7 +429,7 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -434,6 +440,7 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("HashJoinInnerIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
                 let result = build.merge_mut(&probe);
@@ -521,7 +528,7 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -532,6 +539,7 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("HashJoinRightOuterIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
                 let result = build.merge_mut(&probe);
@@ -616,7 +624,7 @@ impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -627,6 +635,7 @@ impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("HashJoinRightSemiIter::next");
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         loop {
@@ -698,7 +707,7 @@ impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -709,6 +718,7 @@ impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("HashJoinRightAntiIter::next");
         // If there is no match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         loop {
@@ -783,7 +793,7 @@ impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -794,6 +804,7 @@ impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
+        log_info!("HashJoinRightMarkIter::next");
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         let build_side = context.get(&self.build_side).unwrap();
@@ -954,6 +965,7 @@ impl<T: TxnStorageTrait> BlockingOp<T> {
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         match self {
             BlockingOp::Dummy(plan) => {
+                log_info!("Dummy blocking op");
                 let output = Arc::new(TupleBuffer::vec());
                 while let Some(tuple) = plan.next(&context)? {
                     output.append(tuple)?;
@@ -1022,6 +1034,7 @@ impl<T: TxnStorageTrait> InMemSort<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+        log_info!("InMemSort::execute");
         let output = Arc::new(TupleBuffer::vec());
         let mut tuples = Vec::new();
         while let Some(tuple) = self.exec_plan.next(&context)? {
@@ -1071,7 +1084,7 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
@@ -1082,6 +1095,7 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+        log_info!("InMemHashTableCreation::execute");
         let output = Arc::new(TupleBuffer::hash_table(self.exprs.clone()));
         while let Some(tuple) = self.exec_plan.next(&context)? {
             output.append(tuple)?;
@@ -1144,6 +1158,7 @@ impl<T: TxnStorageTrait> InMemHashAggregation<T> {
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+        log_info!("InMemHashAggregation::execute");
         let output = Arc::new(TupleBuffer::hash_aggregate_table(
             self.group_by.clone(),
             self.agg_op.clone(),
@@ -1210,12 +1225,24 @@ impl<T: TxnStorageTrait> Pipeline<T> {
         self.context.insert(id, buffer);
     }
 
-    pub fn print_inner(&self, out: &mut String) {
-        out.push_str(&format!("* Pipeline ID: {}\n", self.id));
-        out.push_str(&format!("  Schema: {}\n", self.schema()));
-        out.push_str(&format!("  Dependencies: {:?}\n", self.deps()));
-        out.push_str(&format!("  Is ready: {}\n", self.is_ready()));
-        self.exec_plan.print_inner(2, out);
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}Pipeline ID: {}\n", " ".repeat(indent), self.id));
+        out.push_str(&format!(
+            "{}Schema: {}\n",
+            " ".repeat(indent),
+            self.schema()
+        ));
+        out.push_str(&format!(
+            "{}Dependencies: {:?}\n",
+            " ".repeat(indent),
+            self.deps()
+        ));
+        out.push_str(&format!(
+            "{}Is ready: {}\n",
+            " ".repeat(indent),
+            self.is_ready()
+        ));
+        self.exec_plan.print_inner(indent, out);
     }
 
     pub fn execute(&mut self) -> Result<Arc<TupleBuffer<T>>, ExecError> {
@@ -1224,37 +1251,42 @@ impl<T: TxnStorageTrait> Pipeline<T> {
 }
 
 pub struct PipelineQueue<T: TxnStorageTrait> {
-    pipelines: HashMap<PipelineID, Pipeline<T>>,
-    queue: VecDeque<PipelineID>,
+    pipelines: Vec<Pipeline<T>>,
+    queue: VecDeque<Pipeline<T>>,
 }
 
 impl<T: TxnStorageTrait> PipelineQueue<T> {
     pub fn new() -> Self {
         Self {
-            pipelines: HashMap::new(),
+            pipelines: Vec::new(),
             queue: VecDeque::new(),
         }
     }
 
     pub fn add_pipeline(&mut self, pipeline: Pipeline<T>) {
-        let id = pipeline.get_id();
-        self.pipelines.insert(id, pipeline);
+        self.pipelines.push(pipeline);
     }
 
     // Identify the pipelines that do not have any dependencies and push that to the queue
     // This pipeline's dependencies can be removed from the other pipelines since it is empty
     fn push_no_deps_to_queue(&mut self) {
-        for (id, p) in self.pipelines.iter() {
+        // Push the pipelines that do not have any dependencies to the queue
+        // drain_filter is not stable yet so use retain instead
+        let mut with_deps: Vec<Pipeline<T>> = Vec::new();
+        for p in self.pipelines.drain(..) {
             if p.is_ready() {
-                self.queue.push_back(*id);
+                self.queue.push_back(p);
+            } else {
+                with_deps.push(p);
             }
         }
+        self.pipelines = with_deps;
     }
 
     // Remove the completed pipeline from the dependencies of other pipelines
     // Set the output of the completed pipeline as the input of the dependent pipelines
     fn notify_dependants(&mut self, id: PipelineID, output: Arc<TupleBuffer<T>>) {
-        for (_, p) in self.pipelines.iter_mut() {
+        for p in self.pipelines.iter_mut() {
             if p.deps().contains(&id) {
                 // p is a dependant of the completed pipeline
                 p.set_context(id, output.clone())
@@ -1274,8 +1306,10 @@ impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
 
     fn to_pretty_string(&self) -> String {
         let mut result = String::new();
-        for (_, pipeline) in self.pipelines.iter() {
-            pipeline.print_inner(&mut result);
+        for pipeline in self.pipelines.iter() {
+            let id = pipeline.get_id();
+            result.push_str(&format!("Pipeline ID: {}\n", id));
+            pipeline.print_inner(2, &mut result);
         }
         result
     }
@@ -1283,14 +1317,23 @@ impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
     fn execute(&mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
-        while let Some(id) = self.queue.pop_front() {
-            let mut pipeline = self
-                .pipelines
-                .remove(&id)
-                .ok_or(ExecError::Pipeline(format!("Pipeline {} not found", id)))?;
+        println!(
+            "Initial queue: {:?}",
+            self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+        );
+        while let Some(mut pipeline) = self.queue.pop_front() {
             let current_result = pipeline.execute()?;
-            self.notify_dependants(id, current_result.clone());
+            println!(
+                "Pipeline ID: {} executed with output size: {:?}",
+                pipeline.get_id(),
+                current_result.num_tuples()
+            );
+            self.notify_dependants(pipeline.get_id(), current_result.clone());
             self.push_no_deps_to_queue();
+            println!(
+                "Queue: {:?}",
+                self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+            );
             result = Some(current_result);
         }
         result.ok_or(ExecError::Pipeline("No pipeline executed".to_string()))

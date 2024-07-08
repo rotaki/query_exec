@@ -1,6 +1,9 @@
 use clap::Parser;
 use query_exec::{
-    prelude::{print_tuples, Catalog, DatabaseEngine, Executor, QueryExecutor, VolcanoIterator},
+    prelude::{
+        print_tuples, Catalog, DatabaseEngine, Executor, PipelineQueue, QueryExecutor,
+        VolcanoIterator,
+    },
     ContainerType, InMemStorage,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};

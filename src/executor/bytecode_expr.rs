@@ -110,10 +110,37 @@ pub fn colidx_expr(colidx: usize) -> ByteCodeExpr {
 
 type ByteCodeType = u16;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct ByteCodeExpr {
     pub bytecodes: Vec<ByteCodeType>,
     pub literals: Vec<Field>,
+}
+
+impl std::fmt::Display for ByteCodeExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = String::new();
+        s.push_str("ByteCodeExpr {");
+        s.push_str("bytecodes: [");
+        for i in 0..self.bytecodes.len().min(5) {
+            s.push_str(&format!("{}, ", self.bytecodes[i]));
+            if self.bytecodes.len() > 5 && i == 4 {
+                s.push_str("...len=");
+                s.push_str(&self.bytecodes.len().to_string());
+                break;
+            }
+        }
+        s.push_str("], literals: [");
+        for i in 0..self.literals.len().min(5) {
+            s.push_str(&format!("{}, ", self.literals[i]));
+            if self.literals.len() > 5 && i == 4 {
+                s.push_str("...len=");
+                s.push_str(&self.literals.len().to_string());
+                break;
+            }
+        }
+        s.push_str("]}");
+        write!(f, "{}", s)
+    }
 }
 
 impl ByteCodeExpr {

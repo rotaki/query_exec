@@ -71,6 +71,50 @@ pub enum TupleBuffer<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> TupleBuffer<T> {
+    pub fn num_tuples(&self) -> Option<usize> {
+        match self {
+            TupleBuffer::TxnStorage(..) => None,
+            TupleBuffer::InMemTupleVec(_, vec) => {
+                self.shared();
+                let result = Some(unsafe { &*vec.get() }.len());
+                self.release_shared();
+                result
+            }
+            TupleBuffer::Runs(_, runs) => {
+                self.shared();
+                // If all the runs are Some, then return the sum of the number of tuples in each run.
+                // Otherwise, return None.
+                let result = if unsafe { &*runs.get() }
+                    .iter()
+                    .all(|(buf, _)| buf.num_tuples().is_some())
+                {
+                    Some(
+                        unsafe { &*runs.get() }
+                            .iter()
+                            .map(|(buf, _)| buf.num_tuples().unwrap())
+                            .sum(),
+                    )
+                } else {
+                    None
+                };
+                self.release_shared();
+                result
+            }
+            TupleBuffer::InMemHashTable(_, _, _, table) => {
+                self.shared();
+                let result = Some(unsafe { &*table.get() }.len());
+                self.release_shared();
+                result
+            }
+            TupleBuffer::InMemHashAggregateTable(_, _, _, _, table) => {
+                self.shared();
+                let result = Some(unsafe { &*table.get() }.len());
+                self.release_shared();
+                result
+            }
+        }
+    }
+
     pub fn shared(&self) {
         match self {
             TupleBuffer::TxnStorage(..) => {}
@@ -275,6 +319,7 @@ impl<T: TxnStorageTrait> TupleBuffer<T> {
                     let iter = tuples.iter();
                     Some(TupleBufferIter::vec(Arc::clone(self), iter))
                 } else {
+                    self.release_shared();
                     None
                 }
             }

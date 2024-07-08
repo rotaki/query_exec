@@ -57,7 +57,7 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
             log_trace!("------------ VolcanoIterator::next ------------");
             match self.next(txn)? {
                 Some((_, tuple)) => {
-                    results.append(tuple);
+                    results.append(tuple).unwrap();
                 }
                 None => {
                     return Ok(results);
@@ -226,12 +226,10 @@ impl<T: TxnStorageTrait> FilterIter<T> {
             match self.input.next(txn)? {
                 Some((k, tuple)) => {
                     if self.expr.eval(&tuple)? == Field::from_bool(true) {
-                        log_info!("FilterIter::next: tuple: {:?}", tuple);
                         return Ok(Some((k, tuple)));
                     }
                 }
                 None => {
-                    log_trace!("FilterIter::next: None");
                     return Ok(None);
                 }
             }
@@ -243,7 +241,7 @@ impl<T: TxnStorageTrait> FilterIter<T> {
     }
 
     fn print_inner(&self, indent: usize, out: &mut String) {
-        out.push_str(&format!("{}-> filter({:?})", " ".repeat(indent), self.expr));
+        out.push_str(&format!("{}-> filter({})", " ".repeat(indent), self.expr));
         out.push_str("\n");
         self.input.print_inner(indent + 2, out);
     }
@@ -344,7 +342,7 @@ impl<T: TxnStorageTrait> MapIter<T> {
         out.push_str("[");
         for expr in &self.exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("]");
@@ -830,7 +828,7 @@ impl<T: TxnStorageTrait> HashJoinInner<T> {
         let mut split = "";
         for expr in &self.left_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("]\n");
@@ -838,14 +836,14 @@ impl<T: TxnStorageTrait> HashJoinInner<T> {
         split = "";
         for expr in &self.right_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
         split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
-            out.push_str(&format!("{:?}", filter));
+            out.push_str(&format!("{}", filter));
         }
         out.push_str("]\n");
         out.push_str(&format!("{})\n", " ".repeat(indent)));
@@ -1005,7 +1003,7 @@ impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
         let mut split = "";
         for expr in &self.left_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("]\n");
@@ -1013,14 +1011,14 @@ impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
         split = "";
         for expr in &self.right_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
         split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
-            out.push_str(&format!("{:?}", filter));
+            out.push_str(&format!("{}", filter));
         }
         out.push_str("]\n");
         out.push_str(&format!("{})\n", " ".repeat(indent)));
@@ -1115,7 +1113,7 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
         let mut split = "";
         for expr in &self.left_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("]\n");
@@ -1123,14 +1121,14 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
         split = "";
         for expr in &self.right_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
         split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
-            out.push_str(&format!("{:?}", filter));
+            out.push_str(&format!("{}", filter));
         }
         out.push_str("]\n");
         out.push_str(&format!("{})\n", " ".repeat(indent)));
@@ -1228,7 +1226,7 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
         let mut split = "";
         for expr in &self.left_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("]\n");
@@ -1236,14 +1234,14 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
         split = "";
         for expr in &self.right_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
         split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
-            out.push_str(&format!("{:?}", filter));
+            out.push_str(&format!("{}", filter));
         }
         out.push_str("]\n");
         out.push_str(&format!("{})\n", " ".repeat(indent)));
@@ -1350,7 +1348,7 @@ impl<T: TxnStorageTrait> HashJoinRightMark<T> {
         let mut split = "";
         for expr in &self.left_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("]\n");
@@ -1358,14 +1356,14 @@ impl<T: TxnStorageTrait> HashJoinRightMark<T> {
         split = "";
         for expr in &self.right_exprs {
             out.push_str(split);
-            out.push_str(&format!("{:?}", expr));
+            out.push_str(&format!("{}", expr));
             split = ", ";
         }
         out.push_str("])\n");
         split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
-            out.push_str(&format!("{:?}", filter));
+            out.push_str(&format!("{}", filter));
         }
         out.push_str("]\n");
         out.push_str(&format!("{})\n", " ".repeat(indent)));
