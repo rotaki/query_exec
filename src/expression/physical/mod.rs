@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::prelude::*;
 use crate::prelude::*;
 
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PhysicalRelExpr {
     Scan {
         db_id: DatabaseId,
@@ -57,14 +57,14 @@ pub enum PhysicalRelExpr {
     },
     Rename {
         src: Box<PhysicalRelExpr>,
-        src_to_dest: BTreeMap<ColumnId, ColumnId>, // (src_column_id, dest_column_id)
+        src_to_dest: HashMap<ColumnId, ColumnId>, // (src_column_id, dest_column_id)
     },
 }
 
 impl PlanTrait for PhysicalRelExpr {
     /// Replace the column names in the relational expression
     /// * src_to_dest: mapping from source column id to the desired destination column id
-    fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> PhysicalRelExpr {
+    fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> PhysicalRelExpr {
         match self {
             PhysicalRelExpr::Scan {
                 db_id,

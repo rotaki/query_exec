@@ -20,9 +20,9 @@ pub mod prelude {
 }
 
 // This `plan` is implemented by logical (LogicalRelExpr) and physical (PhysicalRelExpr) relational expressions.
-pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq + Hash {
+pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq {
     /// Replace the variables in the current plan with the dest_ids in the `src_to_dest` map.
-    fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> Self;
+    fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Self;
 
     /// Print the current plan with the given indentation by modifying the `out` string.
     fn print_inner(&self, indent: usize, out: &mut String);
@@ -509,7 +509,7 @@ impl<P: PlanTrait> Expression<P> {
 
     /// Replace the variables in the expression with the new column IDs as specified in the
     /// `src_to_dest` mapping.
-    pub fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> Expression<P> {
+    pub fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> Expression<P> {
         if src_to_dest.is_empty() {
             return self;
         }

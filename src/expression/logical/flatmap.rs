@@ -181,12 +181,12 @@ impl LogicalRelExpr {
                         let replace_count_cols = counts
                             .iter()
                             .map(|id| (*id, col_id_gen.next()))
-                            .collect::<BTreeMap<_, _>>();
+                            .collect::<HashMap<_, _>>();
                         // New -> Original
                         let replace_count_cols_rev = replace_count_cols
                             .iter()
                             .map(|(src, dest)| (*dest, *src))
-                            .collect::<BTreeMap<_, _>>();
+                            .collect::<HashMap<_, _>>();
                         let new_plan = plan.replace_variables(&replace_count_cols);
 
                         // Get the projected columns

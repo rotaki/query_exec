@@ -1464,7 +1464,7 @@ pub struct PhysicalRelExprToOpIter<T: TxnStorageTrait> {
     pub storage: Arc<T>,
 }
 
-type ColIdToIdx = BTreeMap<ColumnId, usize>;
+type ColIdToIdx = HashMap<ColumnId, usize>;
 
 impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
     pub fn new(storage: Arc<T>) -> Self {
@@ -1518,7 +1518,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
             PhysicalRelExpr::Project { src, column_names } => {
                 let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let (column_indices, new_col_id_to_idx) = {
-                    let mut new_col_id_to_idx = BTreeMap::new();
+                    let mut new_col_id_to_idx = ColIdToIdx::new();
                     let mut column_indices = Vec::new();
                     for (idx, col_id) in column_names.iter().enumerate() {
                         new_col_id_to_idx.insert(*col_id, idx);
@@ -1569,7 +1569,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                     group_by_indices,
                     agg_op_indices,
                 );
-                let mut new_col_id_to_idx: BTreeMap<usize, usize> = group_by
+                let mut new_col_id_to_idx: ColIdToIdx = group_by
                     .iter()
                     .enumerate()
                     .map(|(idx, col_id)| (*col_id, idx))

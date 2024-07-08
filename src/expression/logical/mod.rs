@@ -24,7 +24,7 @@ pub mod prelude {
     pub use super::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
 }
 
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LogicalRelExpr {
     Scan {
         db_id: DatabaseId,
@@ -71,14 +71,14 @@ pub enum LogicalRelExpr {
     },
     Rename {
         src: Box<LogicalRelExpr>,
-        src_to_dest: BTreeMap<ColumnId, ColumnId>, // (src_column_id, dest_column_id)
+        src_to_dest: HashMap<ColumnId, ColumnId>, // (src_column_id, dest_column_id)
     },
 }
 
 impl PlanTrait for LogicalRelExpr {
     /// Replace the column names in the relational expression
     /// * src_to_dest: A mapping from the source column id to the desired destination column id
-    fn replace_variables(self, src_to_dest: &BTreeMap<ColumnId, ColumnId>) -> LogicalRelExpr {
+    fn replace_variables(self, src_to_dest: &HashMap<ColumnId, ColumnId>) -> LogicalRelExpr {
         match self {
             LogicalRelExpr::Scan {
                 db_id,

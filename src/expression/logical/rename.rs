@@ -11,16 +11,16 @@ impl LogicalRelExpr {
         self,
         _enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
-    ) -> (LogicalRelExpr, BTreeMap<usize, usize>) {
+    ) -> (LogicalRelExpr, HashMap<usize, usize>) {
         let atts = self.att();
-        let cols: BTreeMap<usize, usize> = atts
+        let cols: HashMap<usize, usize> = atts
             .into_iter()
             .map(|old_col_id| (old_col_id, col_id_gen.next()))
             .collect();
         (self.rename_to(cols.clone()), cols)
     }
 
-    pub(crate) fn rename_to(self, src_to_dest: BTreeMap<usize, usize>) -> LogicalRelExpr {
+    pub(crate) fn rename_to(self, src_to_dest: HashMap<usize, usize>) -> LogicalRelExpr {
         if let LogicalRelExpr::Rename {
             src,
             src_to_dest: mut existing_rename,
