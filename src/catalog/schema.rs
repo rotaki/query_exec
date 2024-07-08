@@ -58,6 +58,19 @@ impl Schema {
     }
 }
 
+impl std::fmt::Display for Schema {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Schema: [")?;
+        for (i, col) in self.columns.iter().enumerate() {
+            write!(f, "{}: {}", col.name(), col.data_type())?;
+            if i < self.columns.len() - 1 {
+                write!(f, ", ")?;
+            }
+        }
+        write!(f, "]")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ColumnDef {
     name: String,
@@ -114,6 +127,21 @@ impl From<usize> for DataType {
             5 => DataType::Months,
             6 => DataType::Days,
             _ => DataType::Unknown,
+        }
+    }
+}
+
+impl std::fmt::Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            DataType::Boolean => write!(f, "Boolean"),
+            DataType::Int => write!(f, "Int"),
+            DataType::Float => write!(f, "Float"),
+            DataType::String => write!(f, "String"),
+            DataType::Date => write!(f, "Date"),
+            DataType::Months => write!(f, "Months"),
+            DataType::Days => write!(f, "Days"),
+            DataType::Unknown => write!(f, "Unknown"),
         }
     }
 }

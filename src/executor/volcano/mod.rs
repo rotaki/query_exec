@@ -23,9 +23,7 @@ use crate::{
     ColumnId, Field,
 };
 
-use super::{
-    bytecode_expr::ByteCodeExpr, Executor, ResultBufferTrait, ResultIterator, TupleResults,
-};
+use super::{bytecode_expr::ByteCodeExpr, Executor, TupleBuffer};
 
 type Key = Vec<u8>;
 
@@ -42,11 +40,9 @@ pub enum VolcanoIterator<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
-    type Buffer = TupleResults;
-
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
         let mut physical_to_op = PhysicalRelExprToOpIter::new(storage);
-        physical_to_op.to_executable(catalog, physical_plan)
+        physical_to_op.convert(catalog, physical_plan)
     }
 
     fn to_pretty_string(&self) -> String {
@@ -55,13 +51,13 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
         out
     }
 
-    fn execute(&mut self, txn: &T::TxnHandle) -> Result<TupleResults, ExecError> {
-        let results = TupleResults::new();
+    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+        let results = Arc::new(TupleBuffer::vec());
         loop {
             log_trace!("------------ VolcanoIterator::next ------------");
             match self.next(txn)? {
                 Some((_, tuple)) => {
-                    results.insert(tuple);
+                    results.append(tuple);
                 }
                 None => {
                     return Ok(results);
@@ -1396,6 +1392,7 @@ impl<T: TxnStorageTrait> NestedLoopJoin<T> {
         right: Box<VolcanoIterator<T>>,
         filter: Option<ByteCodeExpr>,
     ) -> Self {
+        assert!(join_type == JoinType::CrossJoin);
         Self {
             schema,
             join_type,
@@ -1476,16 +1473,12 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
         Self { storage }
     }
 
-    pub fn to_executable(
-        &mut self,
-        catalog: CatalogRef,
-        expr: PhysicalRelExpr,
-    ) -> VolcanoIterator<T> {
-        let (op, _col_id_to_idx) = self.to_executable_inner(catalog, expr).unwrap();
+    pub fn convert(&mut self, catalog: CatalogRef, expr: PhysicalRelExpr) -> VolcanoIterator<T> {
+        let (op, _col_id_to_idx) = self.convert_inner(catalog, expr).unwrap();
         op
     }
 
-    fn to_executable_inner(
+    fn convert_inner(
         &mut self,
         catalog: CatalogRef,
         expr: PhysicalRelExpr,
@@ -1510,7 +1503,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 Ok((VolcanoIterator::Scan(scan), col_id_to_idx))
             }
             PhysicalRelExpr::Rename { src, src_to_dest } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
+                let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let col_id_to_idx = src_to_dest
                     .iter()
                     .map(|(src, dest)| (*dest, col_id_to_idx[src]))
@@ -1518,14 +1511,14 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 Ok((input_op, col_id_to_idx))
             }
             PhysicalRelExpr::Select { src, predicates } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
+                let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let predicate = Expression::merge_conjunction(predicates);
                 let expr: ByteCodeExpr = ByteCodeExpr::from_ast(predicate, &col_id_to_idx)?;
                 let filter = FilterIter::new(input_op.schema(), Box::new(input_op), expr);
                 Ok((VolcanoIterator::Filter(filter), col_id_to_idx))
             }
             PhysicalRelExpr::Project { src, column_names } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
+                let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let (column_indices, new_col_id_to_idx) = {
                     let mut new_col_id_to_idx = HashMap::new();
                     let mut column_indices = Vec::new();
@@ -1545,7 +1538,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 group_by,
                 aggrs,
             } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
+                let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let group_by_indices = group_by
                     .iter()
                     .map(|col_id| col_id_to_idx[col_id])
@@ -1590,7 +1583,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 Ok((VolcanoIterator::HashAggregate(hash_agg), new_col_id_to_idx))
             }
             PhysicalRelExpr::Map { input, exprs } => {
-                let (input_op, mut col_id_to_idx) = self.to_executable_inner(catalog, *input)?;
+                let (input_op, mut col_id_to_idx) = self.convert_inner(catalog, *input)?;
                 let mut bytecode_exprs = Vec::new();
                 let input_schema = input_op.schema();
                 let mut new_cols = Vec::new();
@@ -1605,7 +1598,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 Ok((VolcanoIterator::Map(map), col_id_to_idx))
             }
             PhysicalRelExpr::Sort { src, column_names } => {
-                let (input_op, col_id_to_idx) = self.to_executable_inner(catalog, *src)?;
+                let (input_op, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let sort_cols = column_names
                     .iter()
                     .map(|(col_id, asc, nulls_first)| (col_id_to_idx[col_id], *asc, *nulls_first))
@@ -1621,10 +1614,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 equalities,
                 filter,
             } => {
-                let (left_op, left_col_id_to_idx) =
-                    self.to_executable_inner(catalog.clone(), *left)?;
+                let (left_op, left_col_id_to_idx) = self.convert_inner(catalog.clone(), *left)?;
                 let left_len = left_col_id_to_idx.len();
-                let (right_op, right_col_id_to_idx) = self.to_executable_inner(catalog, *right)?;
+                let (right_op, right_col_id_to_idx) = self.convert_inner(catalog, *right)?;
                 let mut left_exprs = Vec::new();
                 let mut right_exprs = Vec::new();
                 for (left_expr, right_expr) in equalities {
@@ -1632,7 +1624,10 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                     right_exprs.push(ByteCodeExpr::from_ast(right_expr, &right_col_id_to_idx)?);
                 }
                 let (iter, col_id_to_idx) = match join_type {
-                    JoinType::Inner | JoinType::CrossJoin => {
+                    JoinType::CrossJoin => {
+                        panic!("CrossJoin should be handled by NestedLoopJoin")
+                    }
+                    JoinType::Inner => {
                         let mut col_id_to_idx = left_col_id_to_idx;
                         for (col_name, col_idx) in right_col_id_to_idx {
                             let res = col_id_to_idx.insert(col_name, col_idx + left_len);
@@ -1827,10 +1822,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                 right,
                 predicates,
             } => {
-                let (left_op, left_col_id_to_idx) =
-                    self.to_executable_inner(catalog.clone(), *left)?;
+                let (left_op, left_col_id_to_idx) = self.convert_inner(catalog.clone(), *left)?;
                 let left_len = left_col_id_to_idx.len();
-                let (right_op, right_col_id_to_idx) = self.to_executable_inner(catalog, *right)?;
+                let (right_op, right_col_id_to_idx) = self.convert_inner(catalog, *right)?;
                 let mut col_id_to_idx = left_col_id_to_idx;
                 for (col_name, col_idx) in right_col_id_to_idx {
                     col_id_to_idx.insert(col_name, col_idx + left_len);

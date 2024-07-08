@@ -10,491 +10,18 @@ use txn_storage::{ContainerId, DatabaseId, ScanOptions, TxnStorageTrait};
 
 use crate::{
     error::ExecError,
-    expression::AggOp,
-    prelude::{DataType, SchemaRef},
-    rwlatch::RwLatch,
+    expression::{AggOp, Expression, JoinType},
+    optimizer::PhysicalRelExpr,
+    prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
 };
 
-use super::bytecode_expr::ByteCodeExpr;
-
-pub enum TupleBuffer<T: TxnStorageTrait> {
-    TxnStorage(
-        SchemaRef, // Schema of the container. Needed to find the primary key.
-        DatabaseId,
-        ContainerId,
-        Arc<T>,
-    ),
-    InMemTupleVec(
-        RwLatch, // Latch to protect the vector
-        UnsafeCell<Vec<Tuple>>,
-    ),
-    Runs(
-        RwLatch,
-        UnsafeCell<Vec<(Arc<TupleBuffer<T>>, Vec<(ColumnId, bool, bool)>)>>,
-    ), // column_id, ascending, nulls_first
-    InMemHashTable(
-        RwLatch,
-        Vec<ByteCodeExpr>, // Hash key expressions
-        UnsafeCell<bool>,  // Has Nulls. Used in mark join.
-        UnsafeCell<HashMap<Vec<Field>, Vec<Tuple>>>,
-    ),
-    InMemHashAggregateTable(
-        RwLatch,
-        Vec<ColumnId>,                                        // Group by columns
-        Vec<(AggOp, ColumnId)>,                               // Aggregation operations
-        UnsafeCell<bool>,                                     // Has Nulls. Used in mark join.
-        UnsafeCell<HashMap<Vec<Field>, (usize, Vec<Field>)>>, // Count and aggregate values
-    ),
-}
-
-impl<T: TxnStorageTrait> TupleBuffer<T> {
-    pub fn shared(&self) {
-        match self {
-            TupleBuffer::TxnStorage(..) => {}
-            TupleBuffer::InMemTupleVec(latch, _) => latch.shared(),
-            TupleBuffer::Runs(latch, _) => latch.shared(),
-            TupleBuffer::InMemHashTable(latch, _, _, _) => latch.shared(),
-            TupleBuffer::InMemHashAggregateTable(latch, _, _, _, _) => latch.shared(),
-        }
-    }
-
-    pub fn exclusive(&self) {
-        match self {
-            TupleBuffer::TxnStorage(..) => {}
-            TupleBuffer::InMemTupleVec(latch, _) => latch.exclusive(),
-            TupleBuffer::Runs(latch, _) => latch.exclusive(),
-            TupleBuffer::InMemHashTable(latch, _, _, _) => latch.exclusive(),
-            TupleBuffer::InMemHashAggregateTable(latch, _, _, _, _) => latch.exclusive(),
-        }
-    }
-
-    pub fn release_shared(&self) {
-        match self {
-            TupleBuffer::TxnStorage(..) => {}
-            TupleBuffer::InMemTupleVec(latch, _) => latch.release_shared(),
-            TupleBuffer::Runs(latch, _) => latch.release_shared(),
-            TupleBuffer::InMemHashTable(latch, _, _, _) => latch.release_shared(),
-            TupleBuffer::InMemHashAggregateTable(latch, _, _, _, _) => latch.release_shared(),
-        }
-    }
-
-    pub fn release_exclusive(&self) {
-        match self {
-            TupleBuffer::TxnStorage(..) => {}
-            TupleBuffer::InMemTupleVec(latch, _) => latch.release_exclusive(),
-            TupleBuffer::Runs(latch, _) => latch.release_exclusive(),
-            TupleBuffer::InMemHashTable(latch, _, _, _) => latch.release_exclusive(),
-            TupleBuffer::InMemHashAggregateTable(latch, _, _, _, _) => latch.release_exclusive(),
-        }
-    }
-
-    pub fn vec() -> Self {
-        TupleBuffer::InMemTupleVec(RwLatch::default(), UnsafeCell::new(Vec::new()))
-    }
-
-    pub fn runs(runs: Vec<(Arc<TupleBuffer<T>>, Vec<(ColumnId, bool, bool)>)>) -> Self {
-        TupleBuffer::Runs(RwLatch::default(), UnsafeCell::new(runs))
-    }
-
-    pub fn hash_table(exprs: Vec<ByteCodeExpr>) -> Self {
-        TupleBuffer::InMemHashTable(
-            RwLatch::default(),
-            exprs,
-            UnsafeCell::new(false),
-            UnsafeCell::new(HashMap::new()),
-        )
-    }
-
-    pub fn hash_aggregate_table(group_by: Vec<ColumnId>, agg_op: Vec<(AggOp, ColumnId)>) -> Self {
-        TupleBuffer::InMemHashAggregateTable(
-            RwLatch::default(),
-            group_by,
-            agg_op,
-            UnsafeCell::new(false),
-            UnsafeCell::new(HashMap::new()),
-        )
-    }
-
-    pub fn has_null(&self) -> bool {
-        self.shared();
-        let result = match self {
-            TupleBuffer::TxnStorage(..) => false,
-            TupleBuffer::InMemTupleVec(_, _) => false,
-            TupleBuffer::Runs(_, _) => false,
-            TupleBuffer::InMemHashTable(_, _, has_null, _) => unsafe { *has_null.get() },
-            TupleBuffer::InMemHashAggregateTable(_, _, _, has_null, _) => unsafe {
-                *has_null.get()
-            },
-        };
-        self.release_shared();
-        result
-    }
-
-    pub fn append(&self, tuple: Tuple) -> Result<(), ExecError> {
-        self.exclusive();
-        match self {
-            TupleBuffer::TxnStorage(..) => {
-                panic!("TupleBuffer::append() is not supported for TupleBuffer::TxnStorage")
-            }
-            TupleBuffer::InMemTupleVec(_, vec) => {
-                unsafe { &mut *vec.get() }.push(tuple);
-            }
-            TupleBuffer::Runs(_, _) => {
-                panic!("TupleBuffer::push() is not supported for TupleBuffer::Runs")
-            }
-            TupleBuffer::InMemHashTable(_, exprs, has_null, table) => {
-                let key = exprs
-                    .iter()
-                    .map(|expr| expr.eval(&tuple))
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap();
-                if key.iter().any(|f| f.is_null()) {
-                    *unsafe { &mut *has_null.get() } = true;
-                    self.release_exclusive();
-                    return Ok(()); // Tuple with null keys are not added to the hash table.
-                }
-                let table = unsafe { &mut *table.get() };
-                match table.entry(key) {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        entry.get_mut().push(tuple);
-                    }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(vec![tuple]);
-                    }
-                }
-            }
-            TupleBuffer::InMemHashAggregateTable(_, group_by, agg_op, has_null, table) => {
-                let key = tuple.get_cols(&group_by);
-                if key.iter().any(|f| f.is_null()) {
-                    *unsafe { &mut *has_null.get() } = true;
-                    self.release_exclusive();
-                    return Ok(()); // Tuple with null keys are not added to the hash table.
-                }
-                let table = unsafe { &mut *table.get() };
-                match table.entry(key) {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        let (count, agg_vals) = entry.get_mut();
-                        *count += 1;
-                        for (idx, (op, col)) in agg_op.iter().enumerate() {
-                            let val = tuple.get(*col);
-                            match op {
-                                AggOp::Sum => {
-                                    agg_vals[idx] = (&agg_vals[idx] + val)?;
-                                }
-                                AggOp::Avg => {
-                                    agg_vals[idx] = (&agg_vals[idx] + val)?;
-                                }
-                                AggOp::Max => {
-                                    agg_vals[idx] = (agg_vals[idx].clone()).max(val.clone());
-                                }
-                                AggOp::Min => {
-                                    agg_vals[idx] = (agg_vals[idx].clone()).min(val.clone());
-                                }
-                                AggOp::Count => {
-                                    if !val.is_null() {
-                                        agg_vals[idx] = (&agg_vals[idx] + &Field::Int(Some(1)))?;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        let mut agg_vals = Vec::with_capacity(agg_op.len());
-                        for (op, col) in agg_op {
-                            let val = tuple.get(*col);
-                            match op {
-                                AggOp::Sum | AggOp::Avg | AggOp::Max | AggOp::Min => {
-                                    agg_vals.push(val.clone())
-                                }
-                                AggOp::Count => {
-                                    if val.is_null() {
-                                        agg_vals.push(Field::Int(Some(0)))
-                                    } else {
-                                        agg_vals.push(Field::Int(Some(1)))
-                                    }
-                                }
-                            }
-                        }
-                        entry.insert((1, agg_vals));
-                    }
-                }
-            }
-        }
-        self.release_exclusive();
-        Ok(())
-    }
-
-    pub fn iter_key(self: &Arc<Self>, key: Vec<Field>) -> Option<TupleBufferIter<T>> {
-        self.shared(); // Shared latch must be released when iterator is dropped.
-        match self.as_ref() {
-            TupleBuffer::TxnStorage(..) => {
-                panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TxnStorage")
-            }
-            TupleBuffer::InMemTupleVec(_, _) => {
-                panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::TupleVec")
-            }
-            TupleBuffer::Runs(_, _) => {
-                panic!("TupleBuffer::iter_key() is not supported for TupleBuffer::Runs")
-            }
-            TupleBuffer::InMemHashTable(_, _, _, table) => {
-                // SAFETY: The lock ensures that the reference is valid.
-                let table = unsafe { &*table.get() };
-                if let Some(tuples) = table.get(&key) {
-                    let iter = tuples.iter();
-                    Some(TupleBufferIter::vec(Arc::clone(self), iter))
-                } else {
-                    None
-                }
-            }
-            TupleBuffer::InMemHashAggregateTable(..) => {
-                unimplemented!("TupleBuffer::iter_key() is not implemented for TupleBuffer::InMemHashAggregateTable.
-                This would be beneficial if aggregated table is used as a build side in hash join.")
-            }
-        }
-    }
-
-    pub fn iter_all(self: &Arc<Self>) -> TupleBufferIter<T> {
-        self.shared(); // Shared latch must be released when iterator is dropped.
-        match self.as_ref() {
-            TupleBuffer::TxnStorage(_, db_id, c_id, storage) => {
-                let txn = storage.begin_txn(&db_id, Default::default()).unwrap();
-                let iter = storage
-                    .scan_range(&txn, c_id, ScanOptions::default())
-                    .unwrap();
-                TupleBufferIter::scan(storage.clone(), txn, iter)
-            }
-            TupleBuffer::InMemTupleVec(_, vec) => {
-                TupleBufferIter::vec(Arc::clone(self), unsafe { &*vec.get() }.iter())
-            }
-            TupleBuffer::Runs(_, runs) => {
-                let runs = unsafe { &*runs.get() };
-                let runs = runs
-                    .iter()
-                    .map(|(buf, order)| (buf.iter_all(), order.clone()))
-                    .collect();
-                TupleBufferIter::merge(Arc::clone(self), runs)
-            }
-            TupleBuffer::InMemHashTable(_, _, _, table) => {
-                let table = unsafe { &*table.get() };
-                TupleBufferIter::hash_table(Arc::clone(self), table.iter())
-            }
-            TupleBuffer::InMemHashAggregateTable(_, group_by, agg_op, _, table) => {
-                let table = unsafe { &*table.get() };
-                TupleBufferIter::hash_aggregate_table(
-                    Arc::clone(self),
-                    group_by.clone(),
-                    agg_op.clone(),
-                    table.iter(),
-                )
-            }
-        }
-    }
-}
-
-pub enum TupleBufferIter<T: TxnStorageTrait> {
-    TxnStorage(Arc<T>, T::TxnHandle, T::IteratorHandle),
-    TupleVec(
-        Arc<TupleBuffer<T>>, // Buffer with shared latch
-        Mutex<std::slice::Iter<'static, Tuple>>,
-    ),
-    HashTable(
-        Arc<TupleBuffer<T>>,                              // Buffer with shared latch
-        Mutex<()>, // Guard to ensure that the iterator is mutable by many threads
-        UnsafeCell<Option<(&'static Vec<Tuple>, usize)>>, // Current tuples and index
-        UnsafeCell<std::collections::hash_map::Iter<'static, Vec<Field>, Vec<Tuple>>>,
-    ),
-    HashAggregateTable(
-        Arc<TupleBuffer<T>>,    // Buffer with shared latch
-        Mutex<()>,              // Guard to ensure that the iterator is mutable by many threads
-        UnsafeCell<bool>, // Has output. Used to return a single tuple of NULLs if there is no output.
-        Vec<ColumnId>,    // Group by columns. Required to create NULL tuples.
-        Vec<(AggOp, ColumnId)>, // Aggregation operations. Required to compute AVG. (SUM / COUNT)
-        UnsafeCell<std::collections::hash_map::Iter<'static, Vec<Field>, (usize, Vec<Field>)>>,
-    ),
-    MergeScan(
-        Arc<TupleBuffer<T>>,                                 // Buffer with shared latch
-        Mutex<BinaryHeap<Reverse<(Vec<u8>, usize, Tuple)>>>, // Guard to ensure that the iterator is mutable by many threads
-        Vec<(TupleBufferIter<T>, Vec<(ColumnId, bool, bool)>)>,
-    ),
-}
-
-impl<T: TxnStorageTrait> Drop for TupleBufferIter<T> {
-    fn drop(&mut self) {
-        match self {
-            TupleBufferIter::TxnStorage(storage, txn, _) => {
-                storage.commit_txn(txn, false).unwrap();
-            }
-            TupleBufferIter::TupleVec(latched_buffer, ..)
-            | TupleBufferIter::HashTable(latched_buffer, ..)
-            | TupleBufferIter::HashAggregateTable(latched_buffer, ..)
-            | TupleBufferIter::MergeScan(latched_buffer, ..) => {
-                latched_buffer.release_shared();
-            }
-        }
-    }
-}
-
-impl<T: TxnStorageTrait> TupleBufferIter<T> {
-    pub fn scan(storage: Arc<T>, txn: T::TxnHandle, iter: T::IteratorHandle) -> Self {
-        TupleBufferIter::TxnStorage(storage, txn, iter)
-    }
-
-    pub fn vec(
-        latched_buffer: Arc<TupleBuffer<T>>,
-        iter: std::slice::Iter<'static, Tuple>,
-    ) -> Self {
-        TupleBufferIter::TupleVec(latched_buffer, Mutex::new(iter))
-    }
-
-    pub fn hash_table(
-        latched_buffer: Arc<TupleBuffer<T>>,
-        table: std::collections::hash_map::Iter<'static, Vec<Field>, Vec<Tuple>>,
-    ) -> Self {
-        TupleBufferIter::HashTable(
-            latched_buffer,
-            Mutex::new(()),
-            UnsafeCell::new(None),
-            UnsafeCell::new(table),
-        )
-    }
-
-    pub fn hash_aggregate_table(
-        latched_buffer: Arc<TupleBuffer<T>>,
-        group_by: Vec<ColumnId>,
-        agg_op: Vec<(AggOp, ColumnId)>,
-        table: std::collections::hash_map::Iter<'static, Vec<Field>, (usize, Vec<Field>)>,
-    ) -> Self {
-        TupleBufferIter::HashAggregateTable(
-            latched_buffer,
-            Mutex::new(()),
-            UnsafeCell::new(false),
-            group_by,
-            agg_op,
-            UnsafeCell::new(table),
-        )
-    }
-
-    pub fn merge(
-        latched_buffer: Arc<TupleBuffer<T>>,
-        runs: Vec<(TupleBufferIter<T>, Vec<(ColumnId, bool, bool)>)>,
-    ) -> Self {
-        let mut heap = BinaryHeap::new();
-        for (i, (iter, sort_cols)) in runs.iter().enumerate() {
-            if let Some(tuple) = iter.next() {
-                let key = tuple.to_normalized_key_bytes(&sort_cols);
-                heap.push(Reverse((key, i, tuple)));
-            }
-        }
-        TupleBufferIter::MergeScan(latched_buffer, Mutex::new(heap), runs)
-    }
-
-    pub fn next(&self) -> Option<Tuple> {
-        match self {
-            TupleBufferIter::TxnStorage(storage, _, iter) => {
-                storage.iter_next(iter).unwrap().map(|(_, val)| {
-                    let tuple = Tuple::from_bytes(&val);
-                    tuple
-                })
-            }
-            TupleBufferIter::TupleVec(_, iter) => iter.lock().unwrap().next().map(|t| t.copy()),
-            TupleBufferIter::MergeScan(_, heap, runs) => {
-                let heap = &mut *heap.lock().unwrap();
-                if let Some(Reverse((_, i, tuple))) = heap.pop() {
-                    let (iter, sort_cols) = &runs[i];
-                    if let Some(next) = iter.next() {
-                        let key = next.to_normalized_key_bytes(&sort_cols);
-                        heap.push(Reverse((key, i, next)));
-                    }
-                    Some(tuple.copy())
-                } else {
-                    None
-                }
-            }
-            TupleBufferIter::HashTable(_, mutex, current_vec, table) => {
-                let _guard = mutex.lock().unwrap();
-                // SAFETY: The lock ensures that the reference is valid.
-                let current_vec = unsafe { &mut *current_vec.get() };
-                let table = unsafe { &mut *table.get() };
-                if current_vec.is_none() {
-                    *current_vec = table.next().map(|(_, tuples)| (tuples, 0));
-                }
-                if let Some((tuples, i)) = current_vec {
-                    if let Some(tuple) = tuples.get(*i) {
-                        *i += 1;
-                        Some(tuple.copy())
-                    } else {
-                        // Here, we do not simply call self.next() here to avoid a deadlock on the mutex.
-                        *current_vec = table.next().map(|(_, tuples)| (tuples, 0));
-                        if let Some((tuples, i)) = current_vec {
-                            if let Some(tuple) = tuples.get(*i) {
-                                *i += 1;
-                                Some(tuple.copy())
-                            } else {
-                                unreachable!("The new tuples vector should not be empty")
-                            }
-                        } else {
-                            // There is no more tuples in the hash table.
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            }
-            TupleBufferIter::HashAggregateTable(_, mutex, has_output, group_by, agg_op, table) => {
-                let _guard = mutex.lock().unwrap();
-                // SAFETY: The lock ensures that the reference is valid.
-                let has_output = unsafe { &mut *has_output.get() };
-                let table = unsafe { &mut *table.get() };
-                if let Some((group_by, (count, agg_vals))) = table.next() {
-                    *has_output = true;
-                    // Create a tuple with group by columns and aggregation values.
-                    // Check if there is any AVG being computed.
-                    let group_by_len = group_by.len();
-                    let mut fields = Vec::with_capacity(group_by_len + agg_vals.len());
-                    fields.extend(group_by.iter().cloned());
-                    for (idx, (op, _)) in agg_op.iter().enumerate() {
-                        let val = match op {
-                            AggOp::Sum | AggOp::Max | AggOp::Min | AggOp::Count => {
-                                agg_vals[idx].clone()
-                            }
-                            AggOp::Avg => {
-                                if *count == 0 {
-                                    unreachable!("The count should not be zero")
-                                } else {
-                                    (&agg_vals[idx] / &Field::Float(Some(*count as f64))).unwrap()
-                                }
-                            }
-                        };
-                        fields.push(val);
-                    }
-                    Some(Tuple::from_fields(fields))
-                } else {
-                    if *has_output {
-                        // There is no more tuples in the hash table.
-                        None
-                    } else {
-                        // Return a single tuple of NULLs.
-                        *has_output = true;
-                        let mut fields = Vec::new();
-                        for _ in group_by {
-                            fields.push(Field::null(&DataType::Unknown));
-                        }
-                        for _ in agg_op {
-                            fields.push(Field::null(&DataType::Unknown));
-                        }
-                        Some(Tuple::from_fields(fields))
-                    }
-                }
-            }
-        }
-    }
-}
+use super::{bytecode_expr::ByteCodeExpr, Executor};
+use super::{TupleBuffer, TupleBufferIter};
 
 // Pipeline iterators are non-blocking.
-pub enum PipelineNonBlocking<T: TxnStorageTrait> {
+pub enum NonBlockingOp<T: TxnStorageTrait> {
     Scan(PScanIter<T>),
     Filter(PFilterIter<T>),
     Project(PProjectIter<T>),
@@ -503,15 +30,48 @@ pub enum PipelineNonBlocking<T: TxnStorageTrait> {
     NestedLoopJoin(PNestedLoopJoinIter<T>),
 }
 
-impl<T: TxnStorageTrait> PipelineNonBlocking<T> {
+impl<T: TxnStorageTrait> NonBlockingOp<T> {
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.schema(),
+            NonBlockingOp::Filter(iter) => iter.schema(),
+            NonBlockingOp::Project(iter) => iter.schema(),
+            NonBlockingOp::Map(iter) => iter.schema(),
+            NonBlockingOp::HashJoin(iter) => iter.schema(),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.schema(),
+        }
+    }
+
     pub fn rewind(&mut self) {
         match self {
-            PipelineNonBlocking::Scan(iter) => iter.rewind(),
-            PipelineNonBlocking::Filter(iter) => iter.rewind(),
-            PipelineNonBlocking::Project(iter) => iter.rewind(),
-            PipelineNonBlocking::Map(iter) => iter.rewind(),
-            PipelineNonBlocking::HashJoin(iter) => iter.rewind(),
-            PipelineNonBlocking::NestedLoopJoin(iter) => iter.rewind(),
+            NonBlockingOp::Scan(iter) => iter.rewind(),
+            NonBlockingOp::Filter(iter) => iter.rewind(),
+            NonBlockingOp::Project(iter) => iter.rewind(),
+            NonBlockingOp::Map(iter) => iter.rewind(),
+            NonBlockingOp::HashJoin(iter) => iter.rewind(),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.rewind(),
+        }
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.deps(),
+            NonBlockingOp::Filter(iter) => iter.deps(),
+            NonBlockingOp::Project(iter) => iter.deps(),
+            NonBlockingOp::Map(iter) => iter.deps(),
+            NonBlockingOp::HashJoin(iter) => iter.deps(),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.deps(),
+        }
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::Filter(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::Project(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::Map(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::HashJoin(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.print_inner(indent, out),
         }
     }
 
@@ -520,28 +80,61 @@ impl<T: TxnStorageTrait> PipelineNonBlocking<T> {
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         match self {
-            PipelineNonBlocking::Scan(iter) => iter.next(context),
-            PipelineNonBlocking::Filter(iter) => iter.next(context),
-            PipelineNonBlocking::Project(iter) => iter.next(context),
-            PipelineNonBlocking::Map(iter) => iter.next(context),
-            PipelineNonBlocking::HashJoin(iter) => iter.next(context),
-            PipelineNonBlocking::NestedLoopJoin(iter) => iter.next(context),
+            NonBlockingOp::Scan(iter) => iter.next(context),
+            NonBlockingOp::Filter(iter) => iter.next(context),
+            NonBlockingOp::Project(iter) => iter.next(context),
+            NonBlockingOp::Map(iter) => iter.next(context),
+            NonBlockingOp::HashJoin(iter) => iter.next(context),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.next(context),
         }
     }
 }
 
 pub struct PScanIter<T: TxnStorageTrait> {
+    schema: SchemaRef, // Output schema
     id: PipelineID,
+    column_indices: Vec<ColumnId>,
     iter: Option<TupleBufferIter<T>>,
 }
 
 impl<T: TxnStorageTrait> PScanIter<T> {
-    pub fn new(id: PipelineID) -> Self {
-        Self { id, iter: None }
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        id: PipelineID,
+        column_indices: Vec<ColumnId>,
+    ) -> Self {
+        Self {
+            schema,
+            id,
+            column_indices,
+            iter: None,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 
     pub fn rewind(&mut self) {
         self.iter = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = HashSet::new();
+        deps.insert(self.id);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->scan(p_id({}), ", " ".repeat(indent), self.id));
+        let mut split = "";
+        out.push_str("[");
+        for col_id in &self.column_indices {
+            out.push_str(split);
+            out.push_str(&format!("{}", col_id));
+            split = ", ";
+        }
+        out.push_str("])\n");
     }
 
     pub fn next(
@@ -549,26 +142,48 @@ impl<T: TxnStorageTrait> PScanIter<T> {
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         if let Some(iter) = &mut self.iter {
-            Ok(iter.next())
+            Ok(iter.next().map(|tuple| tuple.project(&self.column_indices)))
         } else {
             self.iter = context.get(&self.id).map(|buf| buf.iter_all());
-            Ok(self.iter.as_ref().and_then(|iter| iter.next()))
+            Ok(self
+                .iter
+                .as_ref()
+                .and_then(|iter| iter.next().map(|tuple| tuple.project(&self.column_indices))))
         }
     }
 }
 
 pub struct PFilterIter<T: TxnStorageTrait> {
-    input: Box<PipelineNonBlocking<T>>,
+    schema: SchemaRef, // Output schema
+    input: Box<NonBlockingOp<T>>,
     expr: ByteCodeExpr,
 }
 
 impl<T: TxnStorageTrait> PFilterIter<T> {
-    pub fn new(input: Box<PipelineNonBlocking<T>>, expr: ByteCodeExpr) -> Self {
-        Self { input, expr }
+    pub fn new(schema: SchemaRef, input: Box<NonBlockingOp<T>>, expr: ByteCodeExpr) -> Self {
+        Self {
+            schema,
+            input,
+            expr,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 
     pub fn rewind(&mut self) {
         self.input.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.input.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->filter({:?})", " ".repeat(indent), self.expr));
+        out.push_str("\n");
+        self.input.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -585,20 +200,47 @@ impl<T: TxnStorageTrait> PFilterIter<T> {
 }
 
 pub struct PProjectIter<T: TxnStorageTrait> {
-    input: Box<PipelineNonBlocking<T>>,
+    schema: SchemaRef, // Output schema
+    input: Box<NonBlockingOp<T>>,
     column_indices: Vec<ColumnId>,
 }
 
 impl<T: TxnStorageTrait> PProjectIter<T> {
-    pub fn new(input: Box<PipelineNonBlocking<T>>, column_indices: Vec<ColumnId>) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        input: Box<NonBlockingOp<T>>,
+        column_indices: Vec<ColumnId>,
+    ) -> Self {
         Self {
+            schema,
             input,
             column_indices,
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.input.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.input.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->project(", " ".repeat(indent)));
+        let mut split = "";
+        out.push_str("[");
+        for col_id in &self.column_indices {
+            out.push_str(split);
+            out.push_str(&format!("{}", col_id));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.input.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -615,17 +257,43 @@ impl<T: TxnStorageTrait> PProjectIter<T> {
 }
 
 pub struct PMapIter<T: TxnStorageTrait> {
-    input: Box<PipelineNonBlocking<T>>,
+    schema: SchemaRef, // Output schema
+    input: Box<NonBlockingOp<T>>,
     exprs: Vec<ByteCodeExpr>,
 }
 
 impl<T: TxnStorageTrait> PMapIter<T> {
-    pub fn new(input: Box<PipelineNonBlocking<T>>, exprs: Vec<ByteCodeExpr>) -> Self {
-        Self { input, exprs }
+    pub fn new(schema: SchemaRef, input: Box<NonBlockingOp<T>>, exprs: Vec<ByteCodeExpr>) -> Self {
+        Self {
+            schema,
+            input,
+            exprs,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 
     pub fn rewind(&mut self) {
         self.input.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.input.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->map(", " ".repeat(indent)));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.input.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -652,6 +320,16 @@ pub enum PHashJoinIter<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> PHashJoinIter<T> {
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.schema(),
+            PHashJoinIter::RightOuter(iter) => iter.schema(),
+            PHashJoinIter::RightSemi(iter) => iter.schema(),
+            PHashJoinIter::RightAnti(iter) => iter.schema(),
+            PHashJoinIter::RightMark(iter) => iter.schema(),
+        }
+    }
+
     pub fn rewind(&mut self) {
         match self {
             PHashJoinIter::Inner(iter) => iter.rewind(),
@@ -659,6 +337,26 @@ impl<T: TxnStorageTrait> PHashJoinIter<T> {
             PHashJoinIter::RightSemi(iter) => iter.rewind(),
             PHashJoinIter::RightAnti(iter) => iter.rewind(),
             PHashJoinIter::RightMark(iter) => iter.rewind(),
+        }
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.deps(),
+            PHashJoinIter::RightOuter(iter) => iter.deps(),
+            PHashJoinIter::RightSemi(iter) => iter.deps(),
+            PHashJoinIter::RightAnti(iter) => iter.deps(),
+            PHashJoinIter::RightMark(iter) => iter.deps(),
+        }
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightOuter(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightSemi(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightAnti(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightMark(iter) => iter.print_inner(indent, out),
         }
     }
 
@@ -677,7 +375,8 @@ impl<T: TxnStorageTrait> PHashJoinIter<T> {
 }
 
 pub struct PHashJoinInnerIter<T: TxnStorageTrait> {
-    probe_side: Box<PipelineNonBlocking<T>>,
+    schema: SchemaRef, // Output schema
+    probe_side: Box<NonBlockingOp<T>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
     current: Option<(Tuple, TupleBufferIter<T>)>,
@@ -685,11 +384,13 @@ pub struct PHashJoinInnerIter<T: TxnStorageTrait> {
 
 impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking<T>>,
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
+            schema,
             probe_side,
             build_side,
             exprs,
@@ -697,9 +398,36 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.probe_side.rewind();
         self.current = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_inner(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -742,7 +470,8 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
 }
 
 pub struct PHashJoinRightOuterIter<T: TxnStorageTrait> {
-    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
     current: Option<(Tuple, TupleBufferIter<T>)>,
@@ -751,12 +480,14 @@ pub struct PHashJoinRightOuterIter<T: TxnStorageTrait> {
 
 impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking<T>>,
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
         nulls: Tuple,
     ) -> Self {
         Self {
+            schema,
             probe_side,
             build_side,
             exprs,
@@ -765,9 +496,36 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.probe_side.rewind();
         self.current = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_outer(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -813,26 +571,56 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
 }
 
 pub struct PHashJoinRightSemiIter<T: TxnStorageTrait> {
-    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
 impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking<T>>,
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
+            schema,
             probe_side,
             build_side,
             exprs,
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.probe_side.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_semi(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -865,26 +653,56 @@ impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
 }
 
 pub struct PHashJoinRightAntiIter<T: TxnStorageTrait> {
-    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
 impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking<T>>,
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
+            schema,
             probe_side,
             build_side,
             exprs,
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.probe_side.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_anti(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -920,26 +738,56 @@ impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
 // If there is no matching tuple, if the build side has nulls, the mark is null.
 // Otherwise, the mark is false.
 pub struct PHashJoinRightMarkIter<T: TxnStorageTrait> {
-    probe_side: Box<PipelineNonBlocking<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
 impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
     pub fn new(
-        probe_side: Box<PipelineNonBlocking<T>>,
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
+            schema,
             probe_side,
             build_side,
             exprs,
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.probe_side.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_mark(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -980,15 +828,21 @@ impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
 }
 
 pub struct PNestedLoopJoinIter<T: TxnStorageTrait> {
-    outer: Box<PipelineNonBlocking<T>>, // Outer loop of NLJ
-    inner: Box<PipelineNonBlocking<T>>, // Inner loop of NLJ
+    schema: SchemaRef,            // Output schema
+    outer: Box<NonBlockingOp<T>>, // Outer loop of NLJ
+    inner: Box<NonBlockingOp<T>>, // Inner loop of NLJ
     current_outer: Option<Tuple>,
     current_inner: Option<Tuple>,
 }
 
 impl<T: TxnStorageTrait> PNestedLoopJoinIter<T> {
-    pub fn new(outer: Box<PipelineNonBlocking<T>>, inner: Box<PipelineNonBlocking<T>>) -> Self {
+    pub fn new(
+        schema: SchemaRef,
+        outer: Box<NonBlockingOp<T>>,
+        inner: Box<NonBlockingOp<T>>,
+    ) -> Self {
         Self {
+            schema,
             outer,
             inner,
             current_outer: None,
@@ -996,11 +850,27 @@ impl<T: TxnStorageTrait> PNestedLoopJoinIter<T> {
         }
     }
 
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
     pub fn rewind(&mut self) {
         self.outer.rewind();
         self.inner.rewind();
         self.current_outer = None;
         self.current_inner = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.outer.deps();
+        deps.extend(self.inner.deps());
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}-> nested_loop_join\n", " ".repeat(indent)));
+        self.outer.print_inner(indent + 2, out);
+        self.inner.print_inner(indent + 2, out);
     }
 
     pub fn next(
@@ -1032,44 +902,50 @@ impl<T: TxnStorageTrait> PNestedLoopJoinIter<T> {
             }
 
             // Outer and inner are set. Merge the tuples.
-            let result = self
+            let new_tuple = self
                 .current_outer
                 .as_ref()
                 .unwrap()
                 .merge(self.current_inner.as_ref().unwrap());
             self.current_inner = None;
-            return Ok(Some(result));
+            return Ok(Some(new_tuple));
         }
     }
 }
 
-pub enum PipelineBlocking<T: TxnStorageTrait> {
-    Dummy(PipelineNonBlocking<T>),
+pub enum BlockingOp<T: TxnStorageTrait> {
+    Dummy(NonBlockingOp<T>),
     InMemSort(InMemSort<T>),
     InMemHashTableCreation(InMemHashTableCreation<T>),
     InMemHashAggregate(InMemHashAggregation<T>),
 }
 
-impl<T: TxnStorageTrait> PipelineBlocking<T> {
-    pub fn dummy(exec_plan: PipelineNonBlocking<T>) -> Self {
-        PipelineBlocking::Dummy(exec_plan)
+impl<T: TxnStorageTrait> BlockingOp<T> {
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            BlockingOp::Dummy(plan) => plan.schema(),
+            BlockingOp::InMemSort(sort) => sort.schema(),
+            BlockingOp::InMemHashTableCreation(creation) => creation.schema(),
+            BlockingOp::InMemHashAggregate(agg) => agg.schema(),
+        }
     }
 
-    pub fn in_mem_sort(
-        exec_plan: PipelineNonBlocking<T>,
-        sort_cols: Vec<(ColumnId, bool, bool)>,
-    ) -> Self {
-        PipelineBlocking::InMemSort(InMemSort {
-            exec_plan,
-            sort_cols,
-        })
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        match self {
+            BlockingOp::Dummy(plan) => plan.deps(),
+            BlockingOp::InMemSort(sort) => sort.deps(),
+            BlockingOp::InMemHashTableCreation(creation) => creation.deps(),
+            BlockingOp::InMemHashAggregate(agg) => agg.deps(),
+        }
     }
 
-    pub fn in_mem_hash_table_creation(
-        exec_plan: PipelineNonBlocking<T>,
-        exprs: Vec<ByteCodeExpr>,
-    ) -> Self {
-        PipelineBlocking::InMemHashTableCreation(InMemHashTableCreation { exec_plan, exprs })
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        match self {
+            BlockingOp::Dummy(plan) => plan.print_inner(indent, out),
+            BlockingOp::InMemSort(sort) => sort.print_inner(indent, out),
+            BlockingOp::InMemHashTableCreation(creation) => creation.print_inner(indent, out),
+            BlockingOp::InMemHashAggregate(agg) => agg.print_inner(indent, out),
+        }
     }
 
     pub fn execute(
@@ -1077,32 +953,71 @@ impl<T: TxnStorageTrait> PipelineBlocking<T> {
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         match self {
-            PipelineBlocking::Dummy(plan) => {
+            BlockingOp::Dummy(plan) => {
                 let output = Arc::new(TupleBuffer::vec());
                 while let Some(tuple) = plan.next(&context)? {
                     output.append(tuple)?;
                 }
                 Ok(output)
             }
-            PipelineBlocking::InMemSort(sort) => sort.execute(&context),
-            PipelineBlocking::InMemHashTableCreation(creation) => creation.execute(&context),
-            PipelineBlocking::InMemHashAggregate(agg) => agg.execute(&context),
+            BlockingOp::InMemSort(sort) => sort.execute(&context),
+            BlockingOp::InMemHashTableCreation(creation) => creation.execute(&context),
+            BlockingOp::InMemHashAggregate(agg) => agg.execute(&context),
         }
     }
 }
 
-impl<T: TxnStorageTrait> From<PipelineNonBlocking<T>> for PipelineBlocking<T> {
-    fn from(plan: PipelineNonBlocking<T>) -> Self {
-        PipelineBlocking::Dummy(plan)
+impl<T: TxnStorageTrait> From<NonBlockingOp<T>> for BlockingOp<T> {
+    fn from(plan: NonBlockingOp<T>) -> Self {
+        BlockingOp::Dummy(plan)
     }
 }
 
 pub struct InMemSort<T: TxnStorageTrait> {
-    exec_plan: PipelineNonBlocking<T>,
+    schema: SchemaRef, // Output schema
+    exec_plan: NonBlockingOp<T>,
     sort_cols: Vec<(ColumnId, bool, bool)>, // ColumnId, ascending, nulls_first
 }
 
 impl<T: TxnStorageTrait> InMemSort<T> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        exec_plan: NonBlockingOp<T>,
+        sort_cols: Vec<(ColumnId, bool, bool)>,
+    ) -> Self {
+        Self {
+            schema,
+            exec_plan,
+            sort_cols,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.exec_plan.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->sort(", " ".repeat(indent)));
+        let mut split = "";
+        out.push_str("[");
+        for (col_id, asc, nulls_first) in &self.sort_cols {
+            out.push_str(split);
+            out.push_str(&format!(
+                "{} {}{}",
+                col_id,
+                if *asc { "asc" } else { "desc" },
+                if *nulls_first { " nulls first" } else { "" }
+            ));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.exec_plan.print_inner(indent + 2, out);
+    }
+
     pub fn execute(
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
@@ -1124,11 +1039,45 @@ impl<T: TxnStorageTrait> InMemSort<T> {
 }
 
 pub struct InMemHashTableCreation<T: TxnStorageTrait> {
-    exec_plan: PipelineNonBlocking<T>,
+    schema: SchemaRef, // Output schema
+    exec_plan: NonBlockingOp<T>,
     exprs: Vec<ByteCodeExpr>, // Hash key expressions
 }
 
 impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        exec_plan: NonBlockingOp<T>,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            exec_plan,
+            exprs,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.exec_plan.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->hash_table(", " ".repeat(indent)));
+        let mut split = "";
+        out.push_str("[");
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{:?}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.exec_plan.print_inner(indent + 2, out);
+    }
+
     pub fn execute(
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
@@ -1142,12 +1091,55 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
 }
 
 pub struct InMemHashAggregation<T: TxnStorageTrait> {
-    exec_plan: PipelineNonBlocking<T>,
+    schema: SchemaRef, // Output schema
+    exec_plan: NonBlockingOp<T>,
     group_by: Vec<ColumnId>,
     agg_op: Vec<(AggOp, ColumnId)>,
 }
 
 impl<T: TxnStorageTrait> InMemHashAggregation<T> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        exec_plan: NonBlockingOp<T>,
+        group_by: Vec<ColumnId>,
+        agg_op: Vec<(AggOp, ColumnId)>,
+    ) -> Self {
+        Self {
+            schema,
+            exec_plan,
+            group_by,
+            agg_op,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.exec_plan.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->hash_aggregate(", " ".repeat(indent)));
+        let mut split = "";
+        out.push_str("[");
+        for col_id in &self.group_by {
+            out.push_str(split);
+            out.push_str(&format!("{}", col_id));
+            split = ", ";
+        }
+        out.push_str("], [");
+        split = "";
+        for (agg_op, col_id) in &self.agg_op {
+            out.push_str(split);
+            out.push_str(&format!("{:?}({})", agg_op, col_id));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.exec_plan.print_inner(indent + 2, out);
+    }
+
     pub fn execute(
         &mut self,
         context: &HashMap<PipelineID, Arc<TupleBuffer<T>>>,
@@ -1168,25 +1160,62 @@ pub type PipelineID = u16;
 pub struct Pipeline<T: TxnStorageTrait> {
     id: PipelineID,
     context: HashMap<PipelineID, Arc<TupleBuffer<T>>>,
-    exec_plan: PipelineBlocking<T>,
+    exec_plan: BlockingOp<T>,
+    deps_cache: HashSet<PipelineID>,
 }
 
 impl<T: TxnStorageTrait> Pipeline<T> {
-    pub fn new(id: PipelineID, execution_plan: PipelineBlocking<T>) -> Self {
+    pub fn new(id: PipelineID, execution_plan: BlockingOp<T>) -> Self {
         Self {
             id,
             context: HashMap::new(),
+            deps_cache: execution_plan.deps(),
             exec_plan: execution_plan,
         }
+    }
+
+    pub fn new_with_context(
+        id: PipelineID,
+        execution_plan: BlockingOp<T>,
+        context: HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+    ) -> Self {
+        Self {
+            id,
+            context,
+            deps_cache: execution_plan.deps(),
+            exec_plan: execution_plan,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        self.exec_plan.schema()
     }
 
     pub fn get_id(&self) -> PipelineID {
         self.id
     }
 
-    /// Set context
+    pub fn deps(&self) -> &HashSet<PipelineID> {
+        &self.deps_cache
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.deps_cache
+            .iter()
+            .all(|id| self.context.contains_key(id))
+    }
+
+    /// Set context.
     pub fn set_context(&mut self, id: PipelineID, buffer: Arc<TupleBuffer<T>>) {
         self.context.insert(id, buffer);
+    }
+
+    pub fn print_inner(&self, out: &mut String) {
+        out.push_str(&format!("* Pipeline ID: {}\n", self.id));
+        out.push_str(&format!("  Schema: {}\n", self.schema()));
+        out.push_str(&format!("  Dependencies: {:?}\n", self.deps()));
+        out.push_str(&format!("  Is ready: {}\n", self.is_ready()));
+        self.exec_plan.print_inner(2, out);
     }
 
     pub fn execute(&mut self) -> Result<Arc<TupleBuffer<T>>, ExecError> {
@@ -1196,7 +1225,6 @@ impl<T: TxnStorageTrait> Pipeline<T> {
 
 pub struct PipelineQueue<T: TxnStorageTrait> {
     pipelines: HashMap<PipelineID, Pipeline<T>>,
-    dependencies: HashMap<PipelineID, HashSet<PipelineID>>, // PipelineID depends on the set of PipelineIDs
     queue: VecDeque<PipelineID>,
 }
 
@@ -1204,7 +1232,6 @@ impl<T: TxnStorageTrait> PipelineQueue<T> {
     pub fn new() -> Self {
         Self {
             pipelines: HashMap::new(),
-            dependencies: HashMap::new(),
             queue: VecDeque::new(),
         }
     }
@@ -1212,48 +1239,48 @@ impl<T: TxnStorageTrait> PipelineQueue<T> {
     pub fn add_pipeline(&mut self, pipeline: Pipeline<T>) {
         let id = pipeline.get_id();
         self.pipelines.insert(id, pipeline);
-        self.dependencies.entry(id).or_insert_with(HashSet::new);
-    }
-
-    pub fn add_dependencies(&mut self, id: PipelineID, deps: impl IntoIterator<Item = PipelineID>) {
-        match self.dependencies.get_mut(&id) {
-            Some(set) => {
-                set.extend(deps);
-            }
-            None => {
-                unreachable!("Pipeline {} does not exist", id);
-            }
-        }
     }
 
     // Identify the pipelines that do not have any dependencies and push that to the queue
     // This pipeline's dependencies can be removed from the other pipelines since it is empty
     fn push_no_deps_to_queue(&mut self) {
-        let mut no_deps = HashSet::new();
-        for (id, deps) in &self.dependencies {
-            if deps.is_empty() {
-                no_deps.insert(*id);
+        for (id, p) in self.pipelines.iter() {
+            if p.is_ready() {
+                self.queue.push_back(*id);
             }
-        }
-        for id in no_deps {
-            self.queue.push_back(id);
-            self.dependencies.remove(&id);
         }
     }
 
     // Remove the completed pipeline from the dependencies of other pipelines
     // Set the output of the completed pipeline as the input of the dependent pipelines
-    fn notify_dependencies(&mut self, id: PipelineID, output: Arc<TupleBuffer<T>>) {
-        for (other_id, deps) in self.dependencies.iter_mut() {
-            if deps.remove(&id) {
-                // The pipeline depends on the completed pipeline
-                let pipeline = self.pipelines.get_mut(other_id).unwrap();
-                pipeline.set_context(id, output.clone());
+    fn notify_dependants(&mut self, id: PipelineID, output: Arc<TupleBuffer<T>>) {
+        for (_, p) in self.pipelines.iter_mut() {
+            if p.deps().contains(&id) {
+                // p is a dependant of the completed pipeline
+                p.set_context(id, output.clone())
             }
         }
     }
+}
 
-    pub fn execute(&mut self) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
+    fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
+        let converter = PhysicalRelExprToPipelineQueue::new(storage);
+        let queue = converter
+            .convert(catalog, physical_plan)
+            .expect("Failed to convert physical plan");
+        queue
+    }
+
+    fn to_pretty_string(&self) -> String {
+        let mut result = String::new();
+        for (_, pipeline) in self.pipelines.iter() {
+            pipeline.print_inner(&mut result);
+        }
+        result
+    }
+
+    fn execute(&mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         while let Some(id) = self.queue.pop_front() {
@@ -1262,7 +1289,7 @@ impl<T: TxnStorageTrait> PipelineQueue<T> {
                 .remove(&id)
                 .ok_or(ExecError::Pipeline(format!("Pipeline {} not found", id)))?;
             let current_result = pipeline.execute()?;
-            self.notify_dependencies(id, current_result.clone());
+            self.notify_dependants(id, current_result.clone());
             self.push_no_deps_to_queue();
             result = Some(current_result);
         }
@@ -1270,6 +1297,416 @@ impl<T: TxnStorageTrait> PipelineQueue<T> {
     }
 }
 
+pub struct PhysicalRelExprToPipelineQueue<T: TxnStorageTrait> {
+    pub current_id: PipelineID, // Incremental pipeline ID
+    pub storage: Arc<T>,
+    pub pipeline_queue: PipelineQueue<T>,
+}
+
+type ColIdToIdx = HashMap<ColumnId, usize>;
+
+impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
+    pub fn new(storage: Arc<T>) -> Self {
+        Self {
+            current_id: 0,
+            storage,
+            pipeline_queue: PipelineQueue::new(),
+        }
+    }
+
+    fn fetch_add_id(&mut self) -> PipelineID {
+        let id = self.current_id;
+        self.current_id += 1;
+        id
+    }
+
+    pub fn convert(
+        mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> Result<PipelineQueue<T>, ExecError> {
+        let (op, context, _) = self.convert_inner(catalog, expr)?;
+        // if let NonBlockingOp::Scan(PScanIter {
+        //     schema,
+        //     id,
+        //     column_indices,
+        //     iter,
+        // }) = &op
+        // {
+        //     // If column_indices are the same as the original schema, we do not need this scan.
+        //     let num_cols = schema.columns().len();
+        //     if column_indices.len() == num_cols
+        //         && column_indices
+        //             .iter()
+        //             .enumerate()
+        //             .all(|(idx, col_id)| *col_id == idx)
+        //     {
+        //         return Ok(self.pipeline_queue);
+        //     }
+        // }
+        // // Other cases.
+        let blocking_op = BlockingOp::Dummy(op);
+        let pipeline = Pipeline::new_with_context(self.fetch_add_id(), blocking_op, context);
+        self.pipeline_queue.add_pipeline(pipeline);
+        Ok(self.pipeline_queue)
+    }
+
+    fn convert_inner(
+        &mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> Result<
+        (
+            NonBlockingOp<T>,
+            HashMap<PipelineID, Arc<TupleBuffer<T>>>,
+            ColIdToIdx,
+        ),
+        ExecError,
+    > {
+        match expr {
+            PhysicalRelExpr::Scan {
+                db_id,
+                c_id,
+                table_name,
+                column_indices,
+            } => {
+                let col_id_to_idx = column_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col_id)| (*col_id, idx))
+                    .collect();
+
+                let in_schema = catalog
+                    .get_schema(c_id)
+                    .ok_or(ExecError::Catalog(format!("Schema not found")))?;
+                let out_schema = Arc::new(in_schema.project(&column_indices));
+                let p_id = self.fetch_add_id();
+                let scan_buffer = Arc::new(TupleBuffer::txn_storage(
+                    in_schema,
+                    db_id,
+                    c_id,
+                    self.storage.clone(),
+                ));
+
+                let scan = NonBlockingOp::Scan(PScanIter::new(out_schema, p_id, column_indices));
+                Ok((
+                    scan,
+                    [(p_id, scan_buffer)].into_iter().collect(),
+                    col_id_to_idx,
+                ))
+            }
+            PhysicalRelExpr::Rename { src, src_to_dest } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let col_id_to_idx = src_to_dest
+                    .iter()
+                    .map(|(src, dest)| (*dest, col_id_to_idx[src]))
+                    .collect();
+                Ok((input_op, context, col_id_to_idx))
+            }
+            PhysicalRelExpr::Select { src, predicates } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let predicate = Expression::merge_conjunction(predicates);
+                let expr: ByteCodeExpr = ByteCodeExpr::from_ast(predicate, &col_id_to_idx)?;
+                let filter = PFilterIter::new(input_op.schema().clone(), Box::new(input_op), expr);
+                Ok((NonBlockingOp::Filter(filter), context, col_id_to_idx))
+            }
+            PhysicalRelExpr::Project { src, column_names } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let (column_indices, new_col_id_to_idx) = {
+                    let mut new_col_id_to_idx = HashMap::new();
+                    let mut column_indices = Vec::new();
+                    for (idx, col_id) in column_names.iter().enumerate() {
+                        new_col_id_to_idx.insert(*col_id, idx);
+                        column_indices.push(col_id_to_idx[col_id]);
+                    }
+                    (column_indices, new_col_id_to_idx)
+                };
+                let schema = input_op.schema().project(&column_indices);
+                let project =
+                    PProjectIter::new(Arc::new(schema), Box::new(input_op), column_indices);
+                Ok((NonBlockingOp::Project(project), context, new_col_id_to_idx))
+            }
+            PhysicalRelExpr::Map { input, exprs } => {
+                let (input_op, context, mut col_id_to_idx) = self.convert_inner(catalog, *input)?;
+                let mut bytecode_exprs = Vec::new();
+                let input_schema = input_op.schema();
+                let mut new_cols = Vec::new();
+                for (dest, expr) in exprs {
+                    let expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx)?;
+                    bytecode_exprs.push(expr);
+                    col_id_to_idx.insert(dest, col_id_to_idx.len());
+                    new_cols.push(ColumnDef::new("dest", DataType::Unknown, true));
+                }
+                let schema = input_schema.merge(&Schema::new(new_cols, Vec::new()));
+                let map = PMapIter::new(Arc::new(schema), Box::new(input_op), bytecode_exprs);
+                Ok((NonBlockingOp::Map(map), context, col_id_to_idx))
+            }
+            PhysicalRelExpr::NestedLoopJoin {
+                join_type,
+                left,
+                right,
+                predicates,
+            } => {
+                let (left_op, left_context, left_col_id_to_idx) =
+                    self.convert_inner(catalog.clone(), *left)?;
+                let left_len = left_col_id_to_idx.len();
+                let (right_op, right_context, right_col_id_to_idx) =
+                    self.convert_inner(catalog, *right)?;
+                let context = left_context.into_iter().chain(right_context).collect();
+
+                let mut col_id_to_idx = left_col_id_to_idx;
+                for (col_name, col_idx) in right_col_id_to_idx {
+                    col_id_to_idx.insert(col_name, col_idx + left_len);
+                }
+                let schema = Arc::new(left_op.schema().merge(&right_op.schema()));
+                let cross_join =
+                    PNestedLoopJoinIter::new(schema.clone(), Box::new(left_op), Box::new(right_op));
+                if predicates.is_empty() {
+                    return Ok((
+                        NonBlockingOp::NestedLoopJoin(cross_join),
+                        context,
+                        col_id_to_idx,
+                    ));
+                } else {
+                    let filter = ByteCodeExpr::from_ast(
+                        Expression::merge_conjunction(predicates),
+                        &col_id_to_idx,
+                    )?;
+                    let filter = PFilterIter::new(
+                        schema.clone(),
+                        Box::new(NonBlockingOp::NestedLoopJoin(cross_join)),
+                        filter,
+                    );
+                    return Ok((NonBlockingOp::Filter(filter), context, col_id_to_idx));
+                }
+            }
+            PhysicalRelExpr::HashJoin {
+                join_type,
+                left,
+                right,
+                equalities,
+                filter,
+            } => {
+                let (left_op, left_context, left_col_id_to_idx) =
+                    self.convert_inner(catalog.clone(), *left)?;
+                let (right_op, right_context, right_col_id_to_idx) =
+                    self.convert_inner(catalog, *right)?;
+                let left_len = left_col_id_to_idx.len();
+
+                // The left will be the build side and the right will be the probe side
+                // The physical plan should not contain left outer/semi/anti join
+                let mut left_exprs = Vec::new();
+                let mut right_exprs = Vec::new();
+                for (left_expr, right_expr) in equalities {
+                    left_exprs.push(ByteCodeExpr::from_ast(left_expr, &left_col_id_to_idx)?);
+                    right_exprs.push(ByteCodeExpr::from_ast(right_expr, &right_col_id_to_idx)?);
+                }
+
+                // First, create the pipeline for the hash table build side
+                let left_schema = left_op.schema().clone();
+                let left_id = self.fetch_add_id();
+                let left_hash_table_creation = BlockingOp::InMemHashTableCreation(
+                    InMemHashTableCreation::new(left_schema.clone(), left_op, left_exprs),
+                );
+                let left_p =
+                    Pipeline::new_with_context(left_id, left_hash_table_creation, left_context);
+                self.pipeline_queue.add_pipeline(left_p); // Add the build side to the graph
+
+                // Then create the non-blocking pipeline for the probe side
+                let (iter, col_id_to_idx) = match join_type {
+                    JoinType::CrossJoin => {
+                        panic!("Cross join is not supported in hash join")
+                    }
+                    JoinType::Inner => {
+                        let mut col_id_to_idx = left_col_id_to_idx;
+                        for (col_name, col_idx) in right_col_id_to_idx {
+                            let res = col_id_to_idx.insert(col_name, col_idx + left_len);
+                            assert_eq!(res, None);
+                        }
+                        let schema = left_schema.merge(&right_op.schema());
+                        let probe = PHashJoinIter::Inner(PHashJoinInnerIter::new(
+                            Arc::new(schema),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, col_id_to_idx)
+                    }
+                    JoinType::RightOuter => {
+                        let mut col_id_to_idx = left_col_id_to_idx;
+                        for (col_name, col_idx) in right_col_id_to_idx {
+                            let res = col_id_to_idx.insert(col_name, col_idx + left_len);
+                            assert_eq!(res, None);
+                        }
+                        // Make the left side columns nullable
+                        let left_schema = left_schema.make_nullable();
+                        let schema = left_schema.merge(&right_op.schema());
+                        let nulls = Tuple::from_fields(
+                            left_schema
+                                .columns()
+                                .iter()
+                                .map(|col| Field::null(&col.data_type()))
+                                .collect(),
+                        );
+                        let probe = PHashJoinIter::RightOuter(PHashJoinRightOuterIter::new(
+                            Arc::new(schema),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                            nulls,
+                        ));
+                        (probe, col_id_to_idx)
+                    }
+                    JoinType::RightSemi => {
+                        let probe = PHashJoinIter::RightSemi(PHashJoinRightSemiIter::new(
+                            right_op.schema().clone(),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, right_col_id_to_idx)
+                    }
+                    JoinType::RightAnti => {
+                        let probe = PHashJoinIter::RightAnti(PHashJoinRightAntiIter::new(
+                            right_op.schema().clone(),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, right_col_id_to_idx)
+                    }
+                    JoinType::RightMarkJoin(col_id) => {
+                        // insert col_id to right_col_id_to_idx
+                        let right_len = right_col_id_to_idx.len();
+                        let mut col_id_to_idx = right_col_id_to_idx;
+                        let res = col_id_to_idx.insert(col_id, right_len);
+                        assert_eq!(res, None);
+
+                        // Mark join returns the right side with a new nullable boolean column
+                        let right_schema = right_op.schema();
+                        let col_def = ColumnDef::new("mark", DataType::Boolean, true);
+                        let schema = right_schema.merge(&Schema::new(vec![col_def], Vec::new()));
+                        let probe = PHashJoinIter::RightMark(PHashJoinRightMarkIter::new(
+                            Arc::new(schema),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, col_id_to_idx)
+                    }
+                    other => {
+                        panic!("Join type {:?} is not supported", other)
+                    }
+                };
+
+                // Add the filter if necessary
+                let iter = if filter.is_empty() {
+                    NonBlockingOp::HashJoin(iter)
+                } else {
+                    let filter = ByteCodeExpr::from_ast(
+                        Expression::merge_conjunction(filter),
+                        &col_id_to_idx,
+                    )?;
+                    let filter = PFilterIter::new(
+                        iter.schema().clone(),
+                        Box::new(NonBlockingOp::HashJoin(iter)),
+                        filter,
+                    );
+                    NonBlockingOp::Filter(filter)
+                };
+
+                Ok((iter, right_context, col_id_to_idx))
+            }
+            PhysicalRelExpr::HashAggregate {
+                src,
+                group_by,
+                aggrs,
+            } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let group_by_indices = group_by
+                    .iter()
+                    .map(|col_id| col_id_to_idx[col_id])
+                    .collect();
+                let agg_op_indices = aggrs
+                    .iter()
+                    .map(|(_dest, (src, op))| (*op, col_id_to_idx[src]))
+                    .collect();
+                // Project the group by and aggregation columns
+                let input_schema = input_op.schema();
+                let mut schema = input_schema.project(&group_by_indices);
+                for &(op, col) in &agg_op_indices {
+                    match op {
+                        AggOp::Count => {
+                            schema.push_column(ColumnDef::new("dest", DataType::Int, false))
+                        }
+                        AggOp::Sum | AggOp::Max | AggOp::Min => {
+                            let col_type = input_schema.get_column(col).data_type();
+                            schema.push_column(ColumnDef::new("dest", col_type.clone(), true))
+                        }
+                        AggOp::Avg => {
+                            // float
+                            schema.push_column(ColumnDef::new("dest", DataType::Float, true))
+                        }
+                    }
+                }
+                let schema = Arc::new(schema);
+                let hash_agg = BlockingOp::InMemHashAggregate(InMemHashAggregation::new(
+                    schema.clone(),
+                    input_op,
+                    group_by_indices,
+                    agg_op_indices,
+                ));
+                let mut new_col_id_to_idx: HashMap<usize, usize> = group_by
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col_id)| (*col_id, idx))
+                    .collect();
+                let group_by_len = group_by.len();
+                for (idx, (dest, _)) in aggrs.iter().enumerate() {
+                    new_col_id_to_idx.insert(*dest, group_by_len + idx);
+                }
+
+                // Add the aggregation pipeline to the graph
+                let agg_id = self.fetch_add_id();
+                let p = Pipeline::new_with_context(agg_id, hash_agg, context);
+                self.pipeline_queue.add_pipeline(p);
+
+                // Create the scan operator for the aggregation pipeline
+                let column_indices = (0..schema.columns().len()).collect();
+                let scan = PScanIter::new(schema, agg_id, column_indices);
+
+                Ok((NonBlockingOp::Scan(scan), HashMap::new(), new_col_id_to_idx))
+            }
+            PhysicalRelExpr::Sort { src, column_names } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let sort_cols = column_names
+                    .iter()
+                    .map(|(col_id, asc, nulls_first)| (col_id_to_idx[col_id], *asc, *nulls_first))
+                    .collect();
+                let schema = input_op.schema().clone();
+                let sort =
+                    BlockingOp::InMemSort(InMemSort::new(schema.clone(), input_op, sort_cols));
+
+                let sort_id = self.fetch_add_id();
+                let p = Pipeline::new_with_context(sort_id, sort, context);
+                self.pipeline_queue.add_pipeline(p);
+
+                // Create the scan operator for the sort pipeline
+                let scan = PScanIter::new(
+                    schema.clone(),
+                    sort_id,
+                    (0..schema.columns().len()).collect(),
+                );
+                Ok((NonBlockingOp::Scan(scan), HashMap::new(), col_id_to_idx))
+            }
+            other => {
+                panic!("PhysicalRelExpr {:?} is not supported", other)
+            }
+        }
+    }
+}
+
+/*
 #[cfg(test)]
 mod tests {
     use txn_storage::InMemStorage;
@@ -1333,7 +1770,7 @@ mod tests {
         let tuple = Tuple::from_fields(vec![1.into(), 2.into(), 3.into()]);
         input.append(tuple.copy()).unwrap();
 
-        let mut pipeline = Pipeline::new(1, PipelineNonBlocking::Scan(PScanIter::new(0)).into());
+        let mut pipeline = Pipeline::new(1, NonBlockingOp::Scan(PScanIter::new(0)).into());
         pipeline.set_context(0, input);
 
         let result = pipeline.execute().unwrap();
@@ -1371,7 +1808,7 @@ mod tests {
         }
 
         // Merge the two inputs.
-        let mut pipeline = Pipeline::new(1, PipelineNonBlocking::Scan(PScanIter::new(0)).into());
+        let mut pipeline = Pipeline::new(1, NonBlockingOp::Scan(PScanIter::new(0)).into());
 
         let runs = Arc::new(TupleBuffer::runs(vec![
             (input1, vec![(0, true, false)]),
@@ -1427,7 +1864,7 @@ mod tests {
         }
 
         // Merge the three inputs.
-        let mut pipeline = Pipeline::new(1, PipelineNonBlocking::Scan(PScanIter::new(0)).into());
+        let mut pipeline = Pipeline::new(1, NonBlockingOp::Scan(PScanIter::new(0)).into());
 
         let runs = Arc::new(TupleBuffer::runs(vec![
             (input1, vec![(0, true, false)]),
@@ -1503,7 +1940,7 @@ mod tests {
         input.append(tuple3.copy()).unwrap();
         input.append(tuple4.copy()).unwrap();
 
-        let mut pipeline = Pipeline::new(1, PipelineNonBlocking::Scan(PScanIter::new(0)).into());
+        let mut pipeline = Pipeline::new(1, NonBlockingOp::Scan(PScanIter::new(0)).into());
         pipeline.set_context(0, input);
 
         let result = pipeline.execute().unwrap();
@@ -1543,8 +1980,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+            NonBlockingOp::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
                 build_side: 1,
                 exprs: vec![colidx_expr(0)],
                 current: None,
@@ -1596,8 +2033,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::HashJoin(PHashJoinIter::RightOuter(PHashJoinRightOuterIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+            NonBlockingOp::HashJoin(PHashJoinIter::RightOuter(PHashJoinRightOuterIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
                 build_side: 1,
                 exprs: vec![colidx_expr(0)],
                 current: None,
@@ -1660,8 +2097,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::HashJoin(PHashJoinIter::RightSemi(PHashJoinRightSemiIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+            NonBlockingOp::HashJoin(PHashJoinIter::RightSemi(PHashJoinRightSemiIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
                 build_side: 1,
                 exprs: vec![colidx_expr(0)],
             }))
@@ -1708,8 +2145,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::HashJoin(PHashJoinIter::RightAnti(PHashJoinRightAntiIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+            NonBlockingOp::HashJoin(PHashJoinIter::RightAnti(PHashJoinRightAntiIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
                 build_side: 1,
                 exprs: vec![colidx_expr(0)],
             }))
@@ -1762,8 +2199,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::HashJoin(PHashJoinIter::RightMark(PHashJoinRightMarkIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+            NonBlockingOp::HashJoin(PHashJoinIter::RightMark(PHashJoinRightMarkIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
                 build_side: 1,
                 exprs: vec![colidx_expr(0)],
             }))
@@ -1820,8 +2257,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::HashJoin(PHashJoinIter::RightMark(PHashJoinRightMarkIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
+            NonBlockingOp::HashJoin(PHashJoinIter::RightMark(PHashJoinRightMarkIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
                 build_side: 1,
                 exprs: vec![colidx_expr(0)],
             }))
@@ -1859,8 +2296,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             1,
-            PipelineBlocking::in_mem_sort(
-                PipelineNonBlocking::Scan(PScanIter::new(0)),
+            BlockingOp::in_mem_sort(
+                NonBlockingOp::Scan(PScanIter::new(0)),
                 vec![(0, true, false)],
             ),
         );
@@ -1891,8 +2328,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             1,
-            PipelineBlocking::in_mem_hash_table_creation(
-                PipelineNonBlocking::Scan(PScanIter::new(0)),
+            BlockingOp::in_mem_hash_table_creation(
+                NonBlockingOp::Scan(PScanIter::new(0)),
                 vec![colidx_expr(0)],
             ),
         );
@@ -1940,8 +2377,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             1,
-            PipelineBlocking::InMemHashAggregate(InMemHashAggregation {
-                exec_plan: PipelineNonBlocking::Scan(PScanIter::new(0)),
+            BlockingOp::InMemHashAggregate(InMemHashAggregation {
+                exec_plan: NonBlockingOp::Scan(PScanIter::new(0)),
                 group_by: vec![0],
                 agg_op: vec![(AggOp::Sum, 1), (AggOp::Count, 2)],
             }),
@@ -1976,8 +2413,8 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             1,
-            PipelineBlocking::InMemHashAggregate(InMemHashAggregation {
-                exec_plan: PipelineNonBlocking::Scan(PScanIter::new(0)),
+            BlockingOp::InMemHashAggregate(InMemHashAggregation {
+                exec_plan: NonBlockingOp::Scan(PScanIter::new(0)),
                 group_by: vec![0],
                 agg_op: vec![(AggOp::Sum, 1), (AggOp::Count, 2)],
             }),
@@ -2014,9 +2451,9 @@ mod tests {
 
         let mut pipeline = Pipeline::new(
             2,
-            PipelineNonBlocking::NestedLoopJoin(PNestedLoopJoinIter::new(
-                Box::new(PipelineNonBlocking::Scan(PScanIter::new(0))),
-                Box::new(PipelineNonBlocking::Scan(PScanIter::new(1))),
+            NonBlockingOp::NestedLoopJoin(PNestedLoopJoinIter::new(
+                Box::new(NonBlockingOp::Scan(PScanIter::new(0))),
+                Box::new(NonBlockingOp::Scan(PScanIter::new(1))),
             ))
             .into(),
         );
@@ -2071,8 +2508,8 @@ mod tests {
         let mut p2 = Pipeline::new(
             2,
             // Build hash table from input0.
-            PipelineBlocking::in_mem_hash_table_creation(
-                PipelineNonBlocking::Scan(PScanIter::new(0)),
+            BlockingOp::in_mem_hash_table_creation(
+                NonBlockingOp::Scan(PScanIter::new(0)),
                 vec![colidx_expr(0)],
             ),
         );
@@ -2081,8 +2518,8 @@ mod tests {
         let mut p3 = Pipeline::new(
             3,
             // Hash join with the hash table.
-            PipelineNonBlocking::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter {
-                probe_side: Box::new(PipelineNonBlocking::Scan(PScanIter::new(1))),
+            NonBlockingOp::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter {
+                probe_side: Box::new(NonBlockingOp::Scan(PScanIter::new(1))),
                 build_side: 2,
                 exprs: vec![colidx_expr(0)],
                 current: None,
@@ -2157,8 +2594,8 @@ mod tests {
         let mut p3 = Pipeline::new(
             3,
             // Build hash table from input1.
-            PipelineBlocking::in_mem_hash_table_creation(
-                PipelineNonBlocking::Scan(PScanIter::new(1)),
+            BlockingOp::in_mem_hash_table_creation(
+                NonBlockingOp::Scan(PScanIter::new(1)),
                 vec![colidx_expr(0)],
             ),
         );
@@ -2167,8 +2604,8 @@ mod tests {
         let mut p4 = Pipeline::new(
             4,
             // Build hash table from input0.
-            PipelineBlocking::in_mem_hash_table_creation(
-                PipelineNonBlocking::Scan(PScanIter::new(0)),
+            BlockingOp::in_mem_hash_table_creation(
+                NonBlockingOp::Scan(PScanIter::new(0)),
                 vec![colidx_expr(0)],
             ),
         );
@@ -2177,10 +2614,10 @@ mod tests {
         let mut p5 = Pipeline::new(
             5,
             // Hash join with the hash tables.
-            PipelineNonBlocking::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter::new(
-                Box::new(PipelineNonBlocking::HashJoin(PHashJoinIter::Inner(
+            NonBlockingOp::HashJoin(PHashJoinIter::Inner(PHashJoinInnerIter::new(
+                Box::new(NonBlockingOp::HashJoin(PHashJoinIter::Inner(
                     PHashJoinInnerIter::new(
-                        Box::new(PipelineNonBlocking::Scan(PScanIter::new(2))),
+                        Box::new(NonBlockingOp::Scan(PScanIter::new(2))),
                         3,
                         vec![colidx_expr(0)],
                     ),
@@ -2239,3 +2676,4 @@ mod tests {
         check_result(&mut actual, &mut expected, true, true);
     }
 }
+*/

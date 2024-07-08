@@ -9,7 +9,7 @@ use txn_storage::{
 
 use crate::catalog::CatalogRef;
 use crate::error::ExecError;
-use crate::executor::{Executor, ResultBufferTrait, ResultIterator};
+use crate::executor::{Executor, TupleBuffer};
 use crate::expression::prelude::{
     HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr, LogicalToPhysicalRelExpr,
     PhysicalRelExpr,
@@ -20,7 +20,7 @@ use crate::parser::{Translator, TranslatorError};
 use crate::prelude::{ColumnDef, DataType, Schema, SchemaRef, Table};
 use crate::tuple::Tuple;
 
-pub fn print_tuples(mut tuples: impl ResultBufferTrait) {
+pub fn print_tuples(tuples: Arc<TupleBuffer<impl TxnStorageTrait>>) {
     let mut count = 0;
     let tuples = tuples.iter_all();
     while let Some(t) = tuples.next() {
@@ -149,7 +149,10 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
     }
 
     // Executes the query and returns the result.
-    pub fn execute<E: Executor<T>>(&self, mut exec: E) -> Result<E::Buffer, QueryExecutorError> {
+    pub fn execute<E: Executor<T>>(
+        &self,
+        mut exec: E,
+    ) -> Result<Arc<TupleBuffer<T>>, QueryExecutorError> {
         let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
         let result = exec.execute(&txn)?;
         self.storage.commit_txn(&txn, false)?;
@@ -328,7 +331,7 @@ mod tests {
 
     use crate::{
         catalog::{self, Catalog, ColumnDef, DataType, Schema, SchemaRef, Table},
-        executor::{prelude::VolcanoIterator, ResultBufferTrait, ResultIterator},
+        executor::prelude::{PipelineQueue, VolcanoIterator},
         tuple::Tuple,
         Field,
     };
@@ -468,8 +471,8 @@ mod tests {
         c_id
     }
 
-    fn check_result(
-        result: impl ResultBufferTrait,
+    fn check_result<T: TxnStorageTrait>(
+        result: Arc<TupleBuffer<T>>,
         expected: &mut [Tuple],
         sorted: bool,
         verbose: bool,
@@ -521,7 +524,7 @@ mod tests {
         executor: &QueryExecutor<T>,
         sql_string: &str,
         verbose: bool,
-    ) -> impl ResultBufferTrait {
+    ) -> Arc<TupleBuffer<T>> {
         let logical_plan = executor.to_logical(sql_string).unwrap();
         if verbose {
             println!("=== Logical Plan ===");
@@ -532,7 +535,7 @@ mod tests {
             println!("=== Physical Plan ===");
             physical_plan.pretty_print();
         }
-        let mut exec = executor.to_executable::<VolcanoIterator<T>>(physical_plan);
+        let mut exec = executor.to_executable::<PipelineQueue<T>>(physical_plan);
         if verbose {
             println!("=== Executor ===");
             println!("{}", exec.to_pretty_string());
