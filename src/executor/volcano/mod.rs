@@ -1,24 +1,15 @@
-use std::{
-    cell::UnsafeCell,
-    collections::{BTreeMap, HashMap},
-    marker::PhantomData,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, RwLock, RwLockReadGuard,
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use txn_storage::prelude::*;
 
 use crate::{
     catalog::{
-        self,
         prelude::{ColumnDef, DataType},
         CatalogRef, Schema, SchemaRef,
     },
     error::ExecError,
     expression::{prelude::PhysicalRelExpr, AggOp, Expression, JoinType},
-    log, log_info, log_trace,
+    log_trace,
     tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
 };
@@ -196,7 +187,7 @@ impl<T: TxnStorageTrait> ScanIter<T> {
             self.c_id
         ));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for col_id in &self.column_indices {
             out.push_str(split);
             out.push_str(&format!("{:?}", col_id));
@@ -242,7 +233,7 @@ impl<T: TxnStorageTrait> FilterIter<T> {
 
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> filter({})", " ".repeat(indent), self.expr));
-        out.push_str("\n");
+        out.push('\n');
         self.input.print_inner(indent + 2, out);
     }
 }
@@ -286,13 +277,13 @@ impl<T: TxnStorageTrait> ProjectIter<T> {
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> project(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for col_id in &self.column_indices {
             out.push_str(split);
             out.push_str(&format!("{:?}", col_id));
             split = ", ";
         }
-        out.push_str("]");
+        out.push(']');
         out.push_str(")\n");
         self.input.print_inner(indent + 2, out);
     }
@@ -339,13 +330,13 @@ impl<T: TxnStorageTrait> MapIter<T> {
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> map(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
             split = ", ";
         }
-        out.push_str("]");
+        out.push(']');
         out.push_str(")\n");
         self.input.print_inner(indent + 2, out);
     }
@@ -488,14 +479,14 @@ impl<T: TxnStorageTrait> HashAggregateIter<T> {
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> hash_aggregate(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for col_id in &self.group_by {
             out.push_str(split);
             out.push_str(&format!("{:?}", col_id));
             split = ", ";
         }
         out.push_str("], ");
-        out.push_str("[");
+        out.push('[');
         split = "";
         for (op, col_id) in &self.agg_op {
             out.push_str(split);
@@ -562,7 +553,7 @@ impl<T: TxnStorageTrait> SortIter<T> {
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> sort(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for (col_id, asc, nulls_first) in &self.sort_cols {
             out.push_str(split);
             out.push_str(&format!(
@@ -615,7 +606,7 @@ impl<T: TxnStorageTrait> LimitIter<T> {
 
     fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}-> limit({})", " ".repeat(indent), self.limit));
-        out.push_str("\n");
+        out.push('\n');
         self.input.print_inner(indent + 2, out);
     }
 }
@@ -761,10 +752,7 @@ impl<T: TxnStorageTrait> HashJoinInner<T> {
                     .iter()
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
-                hash_table
-                    .entry(fields)
-                    .or_insert_with(Vec::new)
-                    .push(tuple);
+                hash_table.entry(fields).or_default().push(tuple);
             }
             self.buffer = Some(hash_table);
         }
@@ -840,7 +828,6 @@ impl<T: TxnStorageTrait> HashJoinInner<T> {
             split = ", ";
         }
         out.push_str("])\n");
-        split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
             out.push_str(&format!("{}", filter));
@@ -906,10 +893,7 @@ impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
                 if fields.iter().any(|f| f.is_null()) {
                     continue;
                 }
-                hash_table
-                    .entry(fields)
-                    .or_insert_with(Vec::new)
-                    .push(tuple);
+                hash_table.entry(fields).or_default().push(tuple);
             }
             self.buffer = Some(hash_table);
         }
@@ -1015,7 +999,6 @@ impl<T: TxnStorageTrait> HashJoinRightOuter<T> {
             split = ", ";
         }
         out.push_str("])\n");
-        split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
             out.push_str(&format!("{}", filter));
@@ -1069,10 +1052,7 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
                 if fields.iter().any(|f| f.is_null()) {
                     continue;
                 }
-                hash_table
-                    .entry(fields)
-                    .or_insert_with(Vec::new)
-                    .push(tuple);
+                hash_table.entry(fields).or_default().push(tuple);
             }
             self.buffer = Some(hash_table);
         }
@@ -1085,7 +1065,7 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
                 let hash_table = self.buffer.as_mut().unwrap();
-                if let Some(_) = hash_table.get_mut(&fields) {
+                if hash_table.get_mut(&fields).is_some() {
                     if let Some(filter) = &self.filter {
                         if filter.eval(&tuple)? == Field::from_bool(true) {
                             return Ok(Some((key, tuple)));
@@ -1125,7 +1105,6 @@ impl<T: TxnStorageTrait> HashJoinRightSemi<T> {
             split = ", ";
         }
         out.push_str("])\n");
-        split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
             out.push_str(&format!("{}", filter));
@@ -1179,10 +1158,7 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
                 if fields.iter().any(|f| f.is_null()) {
                     continue;
                 }
-                hash_table
-                    .entry(fields)
-                    .or_insert_with(Vec::new)
-                    .push(tuple);
+                hash_table.entry(fields).or_default().push(tuple);
             }
             self.buffer = Some(hash_table);
         }
@@ -1195,19 +1171,17 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
                 let hash_table = self.buffer.as_mut().unwrap();
-                if let Some(_) = hash_table.get_mut(&fields) {
+                if hash_table.get_mut(&fields).is_some() {
                     // If the tuple is in the hash table, skip it
                     continue;
-                } else {
-                    if let Some(filter) = &self.filter {
-                        if filter.eval(&tuple)? == Field::from_bool(true) {
-                            return Ok(Some((key, tuple)));
-                        } else {
-                            continue;
-                        }
-                    } else {
+                } else if let Some(filter) = &self.filter {
+                    if filter.eval(&tuple)? == Field::from_bool(true) {
                         return Ok(Some((key, tuple)));
+                    } else {
+                        continue;
                     }
+                } else {
+                    return Ok(Some((key, tuple)));
                 }
             } else {
                 self.buffer = None;
@@ -1238,7 +1212,6 @@ impl<T: TxnStorageTrait> HashJoinRightAnti<T> {
             split = ", ";
         }
         out.push_str("])\n");
-        split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
             out.push_str(&format!("{}", filter));
@@ -1295,10 +1268,7 @@ impl<T: TxnStorageTrait> HashJoinRightMark<T> {
                     self.null_in_left = true;
                     continue;
                 }
-                hash_table
-                    .entry(fields)
-                    .or_insert_with(Vec::new)
-                    .push(tuple);
+                hash_table.entry(fields).or_default().push(tuple);
             }
             self.buffer = Some(hash_table);
         }
@@ -1311,15 +1281,13 @@ impl<T: TxnStorageTrait> HashJoinRightMark<T> {
                     .map(|expr| expr.eval(&tuple))
                     .collect::<Result<Vec<_>, _>>()?;
                 let hash_table = self.buffer.as_mut().unwrap();
-                let mark = if let Some(_) = hash_table.get_mut(&fields) {
+                let mark = if hash_table.get_mut(&fields).is_some() {
                     // There is a match in the hash table.
                     Field::from_bool(true)
+                } else if self.null_in_left {
+                    Field::null(&DataType::Boolean)
                 } else {
-                    if self.null_in_left {
-                        Field::null(&DataType::Boolean)
-                    } else {
-                        Field::from_bool(false)
-                    }
+                    Field::from_bool(false)
                 };
                 tuple.push(mark); // Append the mark to the tuple.
                 if let Some(filter) = &self.filter {
@@ -1360,7 +1328,6 @@ impl<T: TxnStorageTrait> HashJoinRightMark<T> {
             split = ", ";
         }
         out.push_str("])\n");
-        split = "";
         out.push_str(&format!("{}filter: [", " ".repeat(indent + 4)));
         if let Some(filter) = &self.filter {
             out.push_str(&format!("{}", filter));
@@ -1495,7 +1462,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToOpIter<T> {
                     .collect();
                 let schema = catalog
                     .get_schema(c_id)
-                    .ok_or(ExecError::Catalog(format!("Schema not found")))?;
+                    .ok_or(ExecError::Catalog("Schema not found".to_string()))?;
                 let schema = Arc::new(schema.project(&column_indices));
                 let scan = ScanIter::new(schema, self.storage.clone(), c_id, column_indices);
                 Ok((VolcanoIterator::Scan(scan), col_id_to_idx))

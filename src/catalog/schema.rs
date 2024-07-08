@@ -30,7 +30,7 @@ impl Schema {
 
     pub fn project(&self, indices: &Vec<usize>) -> Schema {
         let columns = indices
-            .into_iter()
+            .iter()
             .map(|idx| self.columns[*idx].clone())
             .collect();
         Schema::new(columns, vec![])

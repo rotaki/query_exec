@@ -5,7 +5,7 @@ use txn_storage::prelude::*;
 use super::DataLoader;
 
 use crate::{
-    catalog::{DataType, SchemaRef},
+    catalog::SchemaRef,
     tuple::{Field, Tuple},
 };
 

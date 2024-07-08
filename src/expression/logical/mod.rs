@@ -11,7 +11,7 @@ mod rules;
 mod scan;
 mod select;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use super::prelude::*;
 use crate::{ColumnId, ContainerId};
@@ -21,7 +21,7 @@ use txn_storage::DatabaseId;
 
 pub mod prelude {
     pub use super::super::prelude::*;
-    pub use super::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
+    pub use super::{HeuristicRule, HeuristicRulesRef};
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,7 +198,7 @@ impl PlanTrait for LogicalRelExpr {
             } => {
                 out.push_str(&format!("{}-> scan({:?}, ", " ".repeat(indent), table_name,));
                 let mut split = "";
-                out.push_str("[");
+                out.push('[');
                 for col in column_names {
                     out.push_str(split);
                     out.push_str(&format!("@{}", col));
@@ -255,7 +255,7 @@ impl PlanTrait for LogicalRelExpr {
                 aggrs,
             } => {
                 out.push_str(&format!("{}-> aggregate(", " ".repeat(indent)));
-                out.push_str(&format!("group_by: [",));
+                out.push_str("group_by: [");
                 let mut split = "";
                 for col in group_by {
                     out.push_str(split);
@@ -263,15 +263,15 @@ impl PlanTrait for LogicalRelExpr {
                     split = ", ";
                 }
                 out.push_str("], ");
-                out.push_str(&format!("aggrs: ["));
+                out.push_str("aggrs: [");
                 let mut split = "";
                 for (id, (input_id, op)) in aggrs {
                     out.push_str(split);
                     out.push_str(&format!("@{} <- {:?}(@{})", id, op, input_id));
                     split = ", ";
                 }
-                out.push_str("]");
-                out.push_str(&format!(")\n"));
+                out.push(']');
+                out.push_str(")\n");
                 src.print_inner(indent + 2, out);
             }
             LogicalRelExpr::Map { input, exprs } => {

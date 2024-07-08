@@ -34,8 +34,8 @@ impl LogicalRelExpr {
                 on_conditions.iter().partition(|pred| pred.bound_by(&self));
             if !push_down.is_empty() {
                 // This condition is necessary to avoid infinite recursion
-                let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
-                let keep = keep.into_iter().map(|expr| expr.clone()).collect();
+                let push_down = push_down.into_iter().cloned().collect();
+                let keep = keep.into_iter().cloned().collect();
                 return self.select(true, enabled_rules, col_id_gen, push_down).on(
                     true,
                     enabled_rules,
@@ -50,8 +50,8 @@ impl LogicalRelExpr {
                 on_conditions.iter().partition(|pred| pred.bound_by(&other));
             if !push_down.is_empty() {
                 // This condition is necessary to avoid infinite recursion
-                let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
-                let keep = keep.into_iter().map(|expr| expr.clone()).collect();
+                let push_down = push_down.into_iter().cloned().collect();
+                let keep = keep.into_iter().cloned().collect();
                 return self.on(
                     true,
                     enabled_rules,
@@ -63,14 +63,14 @@ impl LogicalRelExpr {
             }
 
             // We pushed down all the on_conditions to the source.
-            return self.join(
+            self.join(
                 true,
                 enabled_rules,
                 col_id_gen,
                 join_type,
                 other,
                 on_conditions,
-            );
+            )
         } else {
             LogicalRelExpr::Join {
                 join_type,
@@ -119,8 +119,8 @@ impl LogicalRelExpr {
                     predicates.iter().partition(|pred| pred.bound_by(&self));
                 if !push_down.is_empty() {
                     // This condition is necessary to avoid infinite recursion
-                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
-                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
+                    let push_down = push_down.into_iter().cloned().collect();
+                    let keep = keep.into_iter().cloned().collect();
                     return self
                         .select(true, enabled_rules, col_id_gen, push_down)
                         .join(true, enabled_rules, col_id_gen, join_type, other, keep);
@@ -140,8 +140,8 @@ impl LogicalRelExpr {
                     predicates.iter().partition(|pred| pred.bound_by(&other));
                 if !push_down.is_empty() {
                     // This condition is necessary to avoid infinite recursion
-                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
-                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
+                    let push_down = push_down.into_iter().cloned().collect();
+                    let keep = keep.into_iter().cloned().collect();
                     return self.join(
                         true,
                         enabled_rules,

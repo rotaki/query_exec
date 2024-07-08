@@ -1,7 +1,7 @@
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
 use crate::Field;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 impl LogicalRelExpr {
     pub fn flatmap(
@@ -110,7 +110,7 @@ impl LogicalRelExpr {
                     // func.att() is group_by + aggrs
                     let counts: Vec<usize> = aggrs
                         .iter()
-                        .filter_map(|(id, (src_id, op))| {
+                        .filter_map(|(id, (_src_id, op))| {
                             if let AggOp::Count = op {
                                 Some(*id)
                             } else {
@@ -140,7 +140,7 @@ impl LogicalRelExpr {
 
                         // Create a copy of the original plan and rename it. Left join the copy with the src.
                         // Need to replace the free variables in the src with the new column ids.
-                        let (mut copy, new_col_ids) = self.rename(&enabled_rules, &col_id_gen);
+                        let (mut copy, new_col_ids) = self.rename(enabled_rules, col_id_gen);
                         let copy_att = copy.att();
                         let src = src.replace_variables(&new_col_ids);
                         copy = copy

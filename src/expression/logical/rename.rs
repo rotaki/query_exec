@@ -2,7 +2,7 @@
 
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 impl LogicalRelExpr {
     /// Rename the output columns of the relational expression

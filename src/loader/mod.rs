@@ -5,7 +5,6 @@ use txn_storage::prelude::*;
 
 pub mod prelude {
     pub use super::simple_csv_loader::SimpleCsvLoader;
-    pub use super::DataLoader;
 }
 
 pub trait DataLoader {

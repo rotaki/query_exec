@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use super::prelude::*;
 use crate::prelude::*;
@@ -214,7 +214,7 @@ impl PlanTrait for PhysicalRelExpr {
             } => {
                 out.push_str(&format!("{}-> scan({:?}, ", " ".repeat(indent), table_name,));
                 let mut split = "";
-                out.push_str("[");
+                out.push('[');
                 for col in column_names {
                     out.push_str(split);
                     out.push_str(&format!("@{}", col));
@@ -266,7 +266,7 @@ impl PlanTrait for PhysicalRelExpr {
                 for (left, right) in equalities {
                     out.push_str(split);
                     left.print_inner(0, out);
-                    out.push_str("=");
+                    out.push('=');
                     right.print_inner(0, out);
                     split = " && ";
                 }
@@ -306,7 +306,7 @@ impl PlanTrait for PhysicalRelExpr {
                 aggrs,
             } => {
                 out.push_str(&format!("{}-> aggregate(", " ".repeat(indent)));
-                out.push_str(&format!("group_by: [",));
+                out.push_str("group_by: [");
                 let mut split = "";
                 for col in group_by {
                     out.push_str(split);
@@ -314,15 +314,15 @@ impl PlanTrait for PhysicalRelExpr {
                     split = ", ";
                 }
                 out.push_str("], ");
-                out.push_str(&format!("aggrs: ["));
+                out.push_str("aggrs: [");
                 let mut split = "";
                 for (id, (input_id, op)) in aggrs {
                     out.push_str(split);
                     out.push_str(&format!("@{} <- {:?}(@{})", id, op, input_id));
                     split = ", ";
                 }
-                out.push_str("]");
-                out.push_str(&format!(")\n"));
+                out.push(']');
+                out.push_str(")\n");
                 src.print_inner(indent + 2, out);
             }
             PhysicalRelExpr::Map { input, exprs } => {
@@ -541,51 +541,51 @@ impl PhysicalRelExpr {
     {
         match &self {
             PhysicalRelExpr::Scan { .. } => {
-                visitor.visit_pre(&self);
-                visitor.visit_post(&self);
+                visitor.visit_pre(self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::Select { src, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 src.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::NestedLoopJoin { left, right, .. }
             | PhysicalRelExpr::HashJoin { left, right, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 left.pre_post_visit(visitor);
                 right.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::Project { src, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 src.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::Sort { src, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 src.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::HashAggregate { src, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 src.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::Map { input, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 input.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::FlatMap { input, func } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 input.pre_post_visit(visitor);
                 func.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
             PhysicalRelExpr::Rename { src, .. } => {
-                visitor.visit_pre(&self);
+                visitor.visit_pre(self);
                 src.pre_post_visit(visitor);
-                visitor.visit_post(&self);
+                visitor.visit_post(self);
             }
         }
     }
@@ -710,7 +710,7 @@ pub struct LogicalToPhysicalExpression;
 
 impl LogicalToPhysicalExpression {
     pub fn to_physical(
-        &mut self,
+        &self,
         expr: &Expression<LogicalRelExpr>,
     ) -> Expression<PhysicalRelExpr> {
         match expr {
@@ -769,8 +769,8 @@ impl LogicalToPhysicalExpression {
             },
             Expression::Substring { expr, start, len } => Expression::Substring {
                 expr: Box::new(self.to_physical(expr)),
-                start: start.clone(),
-                len: len.clone(),
+                start: *start,
+                len: *len,
             },
             Expression::Subquery { expr } => Expression::Subquery {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),

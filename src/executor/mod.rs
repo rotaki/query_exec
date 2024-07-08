@@ -240,7 +240,7 @@ impl<T: TxnStorageTrait> TupleBuffer<T> {
                 }
             }
             TupleBuffer::InMemHashAggregateTable(_, group_by, agg_op, has_null, table) => {
-                let key = tuple.get_cols(&group_by);
+                let key = tuple.get_cols(group_by);
                 if key.iter().any(|f| f.is_null()) {
                     *unsafe { &mut *has_null.get() } = true;
                     self.release_exclusive();
@@ -334,7 +334,7 @@ impl<T: TxnStorageTrait> TupleBuffer<T> {
         self.shared(); // Shared latch must be released when iterator is dropped.
         match self.as_ref() {
             TupleBuffer::TxnStorage(_, db_id, c_id, storage) => {
-                let txn = storage.begin_txn(&db_id, Default::default()).unwrap();
+                let txn = storage.begin_txn(db_id, Default::default()).unwrap();
                 let iter = storage
                     .scan_range(&txn, c_id, ScanOptions::default())
                     .unwrap();
@@ -458,7 +458,7 @@ impl<T: TxnStorageTrait> TupleBufferIter<T> {
         let mut heap = BinaryHeap::new();
         for (i, (iter, sort_cols)) in runs.iter().enumerate() {
             if let Some(tuple) = iter.next() {
-                let key = tuple.to_normalized_key_bytes(&sort_cols);
+                let key = tuple.to_normalized_key_bytes(sort_cols);
                 heap.push(Reverse((key, i, tuple)));
             }
         }
@@ -467,19 +467,17 @@ impl<T: TxnStorageTrait> TupleBufferIter<T> {
 
     pub fn next(&self) -> Option<Tuple> {
         match self {
-            TupleBufferIter::TxnStorage(storage, _, iter) => {
-                storage.iter_next(iter).unwrap().map(|(_, val)| {
-                    let tuple = Tuple::from_bytes(&val);
-                    tuple
-                })
-            }
+            TupleBufferIter::TxnStorage(storage, _, iter) => storage
+                .iter_next(iter)
+                .unwrap()
+                .map(|(_, val)| Tuple::from_bytes(&val)),
             TupleBufferIter::TupleVec(_, iter) => iter.lock().unwrap().next().map(|t| t.copy()),
             TupleBufferIter::MergeScan(_, heap, runs) => {
                 let heap = &mut *heap.lock().unwrap();
                 if let Some(Reverse((_, i, tuple))) = heap.pop() {
                     let (iter, sort_cols) = &runs[i];
                     if let Some(next) = iter.next() {
-                        let key = next.to_normalized_key_bytes(&sort_cols);
+                        let key = next.to_normalized_key_bytes(sort_cols);
                         heap.push(Reverse((key, i, next)));
                     }
                     Some(tuple.copy())
@@ -546,22 +544,20 @@ impl<T: TxnStorageTrait> TupleBufferIter<T> {
                         fields.push(val);
                     }
                     Some(Tuple::from_fields(fields))
+                } else if *has_output {
+                    // There is no more tuples in the hash table.
+                    None
                 } else {
-                    if *has_output {
-                        // There is no more tuples in the hash table.
-                        None
-                    } else {
-                        // Return a single tuple of NULLs.
-                        *has_output = true;
-                        let mut fields = Vec::new();
-                        for _ in group_by {
-                            fields.push(Field::null(&DataType::Unknown));
-                        }
-                        for _ in agg_op {
-                            fields.push(Field::null(&DataType::Unknown));
-                        }
-                        Some(Tuple::from_fields(fields))
+                    // Return a single tuple of NULLs.
+                    *has_output = true;
+                    let mut fields = Vec::new();
+                    for _ in group_by {
+                        fields.push(Field::null(&DataType::Unknown));
                     }
+                    for _ in agg_op {
+                        fields.push(Field::null(&DataType::Unknown));
+                    }
+                    Some(Tuple::from_fields(fields))
                 }
             }
         }

@@ -1,9 +1,6 @@
 use clap::Parser;
 use query_exec::{
-    prelude::{
-        print_tuples, Catalog, DatabaseEngine, Executor, PipelineQueue, QueryExecutor,
-        VolcanoIterator,
-    },
+    prelude::{Catalog, DatabaseEngine, Executor, PipelineQueue},
     ContainerType, InMemStorage,
 };
 use std::{
@@ -72,9 +69,7 @@ fn main() {
     for table in &table_names {
         let c_id = tables[table];
         let path = format!("tpch/data/sf-{}/input/{}.csv", opt.scale_factor, table);
-        query_executor
-            .import_csv(c_id, path, true, '|' as u8)
-            .unwrap();
+        query_executor.import_csv(c_id, path, true, b'|').unwrap();
     }
 
     println!("Data loaded. Running query...");
@@ -121,7 +116,7 @@ fn main() {
         let file_name = format!("tpch_pipeline_results_sf_{}.csv", opt.scale_factor);
         let mut writer = csv::Writer::from_path(&file_name).unwrap();
         writer
-            .write_record(&[
+            .write_record([
                 "query_id", "time1", "time2", "time3", "time4", "time5", "time6", "time7", "time8",
                 "time9", "time10",
             ])

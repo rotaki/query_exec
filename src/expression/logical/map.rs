@@ -1,7 +1,5 @@
 // Reference: https://github.com/rotaki/decorrelator
 
-use std::collections::HashMap;
-
 use super::super::prelude::*;
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;

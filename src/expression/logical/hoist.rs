@@ -84,7 +84,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     ) // Project the att and id
             }
             Expression::UncorrelatedExists { expr } => {
@@ -101,7 +101,7 @@ impl LogicalRelExpr {
                     true,
                     enabled_rules,
                     col_id_gen,
-                    att.into_iter().chain([id].into_iter()).collect(),
+                    att.into_iter().chain([id]).collect(),
                 )
             }
             Expression::Subquery { expr } => {
@@ -119,8 +119,7 @@ impl LogicalRelExpr {
                     vec![(id, Expression::col_ref(*input_col_id))],
                 );
 
-                let plan = self.flatmap(true, enabled_rules, col_id_gen, rhs);
-                plan
+                self.flatmap(true, enabled_rules, col_id_gen, rhs)
             }
             Expression::Binary { op, left, right } => {
                 // Hoist the left, hoist the right, then perform the binary operation
@@ -146,7 +145,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::Field { .. } | Expression::ColRef { .. } => {
@@ -171,7 +170,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::Case { .. } => {
@@ -202,7 +201,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::Extract { field, expr } => {
@@ -225,7 +224,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::Like {
@@ -253,7 +252,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::Cast { expr, to_type } => {
@@ -276,7 +275,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::InList { expr, list } => {
@@ -305,7 +304,7 @@ impl LogicalRelExpr {
                     true,
                     enabled_rules,
                     col_id_gen,
-                    att.into_iter().chain([id].into_iter()).collect(),
+                    att.into_iter().chain([id]).collect(),
                 )
             }
             Expression::Not { expr } => {
@@ -327,7 +326,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
             Expression::Substring { expr, start, len } => {
@@ -351,7 +350,7 @@ impl LogicalRelExpr {
                         true,
                         enabled_rules,
                         col_id_gen,
-                        att.into_iter().chain([id].into_iter()).collect(),
+                        att.into_iter().chain([id]).collect(),
                     )
             }
         }

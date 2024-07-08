@@ -8,8 +8,7 @@ use crate::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Debug;
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 pub enum ByteCodes {
@@ -631,7 +630,7 @@ fn like(
         // _: Any single character.
         // [ ]: Any single character within the specified range ([a-f]) or set ([abcdef]).
         // [^]: Any single character not within the specified range ([^a-f]) or set ([^abcdef]).
-        let result = is_like(&field_str, &pattern_str, &escape_str);
+        let result = is_like(field_str, pattern_str, escape_str);
         stack.push(Field::Boolean(Some(result)));
     }
     Ok(())
@@ -683,7 +682,7 @@ fn is_like(field: &str, pattern: &str, escape_str: &Option<String>) -> bool {
     while let Some(c) = chars.next() {
         match c {
             '%' => regex_pattern.push_str(".*"),
-            '_' => regex_pattern.push_str("."),
+            '_' => regex_pattern.push('.'),
             _ => {
                 if let Some(esc) = escape_str {
                     // If the character is escaped, we need to check if the next character is a special character.
@@ -733,7 +732,7 @@ impl<P: PlanTrait + PartialEq> AstToByteCode<P> {
         expr: Expression<P>,
         col_id_to_idx: &HashMap<ColumnId, ColumnId>,
     ) -> Result<ByteCodeExpr, ExecError> {
-        let expr = expr.replace_variables(&col_id_to_idx);
+        let expr = expr.replace_variables(col_id_to_idx);
         let mut bytecode_expr = ByteCodeExpr::new();
         convert_expr_to_bytecode(&expr, &mut bytecode_expr)?;
         Ok(bytecode_expr)

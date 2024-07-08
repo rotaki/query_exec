@@ -1,20 +1,17 @@
 use std::{
-    cell::UnsafeCell,
-    cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
-    hash::Hash,
-    sync::{Arc, Mutex, RwLock, RwLockReadGuard},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
 };
 
-use txn_storage::{ContainerId, DatabaseId, ScanOptions, TxnStorageTrait};
+use txn_storage::TxnStorageTrait;
 
 use crate::{
     error::ExecError,
     expression::{AggOp, Expression, JoinType},
-    log, log_debug, log_info,
+    log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
-    tuple::{FromBool, IsNull, Tuple},
+    tuple::{FromBool, Tuple},
     ColumnId, Field,
 };
 
@@ -129,7 +126,7 @@ impl<T: TxnStorageTrait> PScanIter<T> {
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->scan(p_id({}), ", " ".repeat(indent), self.id));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for col_id in &self.column_indices {
             out.push_str(split);
             out.push_str(&format!("{}", col_id));
@@ -185,7 +182,7 @@ impl<T: TxnStorageTrait> PFilterIter<T> {
 
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->filter({})", " ".repeat(indent), self.expr));
-        out.push_str("\n");
+        out.push('\n');
         self.input.print_inner(indent + 2, out);
     }
 
@@ -237,7 +234,7 @@ impl<T: TxnStorageTrait> PProjectIter<T> {
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->project(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for col_id in &self.column_indices {
             out.push_str(split);
             out.push_str(&format!("{}", col_id));
@@ -291,7 +288,7 @@ impl<T: TxnStorageTrait> PMapIter<T> {
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->map(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -426,7 +423,7 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
             self.build_side
         ));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -443,7 +440,7 @@ impl<T: TxnStorageTrait> PHashJoinInnerIter<T> {
         log_debug!("HashJoinInnerIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
-                let result = build.merge_mut(&probe);
+                let result = build.merge_mut(probe);
                 return Ok(Some(result));
             }
         }
@@ -525,7 +522,7 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
             self.build_side
         ));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -542,7 +539,7 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
         log_debug!("HashJoinRightOuterIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
             if let Some(build) = build_iter.next() {
-                let result = build.merge_mut(&probe);
+                let result = build.merge_mut(probe);
                 return Ok(Some(result));
             }
         }
@@ -557,15 +554,15 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
             let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
             let result = if let Some(iter) = build_iter {
                 // Try to iterate the build side once to check if there is any match.
-                let result = if let Some(build) = iter.next() {
+
+                if let Some(build) = iter.next() {
                     let result = build.merge_mut(&probe);
                     self.current = Some((probe, iter));
                     result
                 } else {
                     // There should be at least one tuple in the build side iterator.
                     unreachable!("The build side returned an empty iterator");
-                };
-                result
+                }
             } else {
                 self.current = None;
                 // No match found. Output the probe tuple with nulls for the build side.
@@ -621,7 +618,7 @@ impl<T: TxnStorageTrait> PHashJoinRightSemiIter<T> {
             self.build_side
         ));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -704,7 +701,7 @@ impl<T: TxnStorageTrait> PHashJoinRightAntiIter<T> {
             self.build_side
         ));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -790,7 +787,7 @@ impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
             self.build_side
         ));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -822,12 +819,10 @@ impl<T: TxnStorageTrait> PHashJoinRightMarkIter<T> {
                     } else {
                         unreachable!("The build side returned an empty iterator")
                     }
+                } else if build_side.has_null() {
+                    Field::null(&DataType::Boolean)
                 } else {
-                    if build_side.has_null() {
-                        Field::null(&DataType::Boolean)
-                    } else {
-                        Field::from_bool(false)
-                    }
+                    Field::from_bool(false)
                 };
                 probe.push(mark);
                 return Ok(Some(probe));
@@ -967,14 +962,14 @@ impl<T: TxnStorageTrait> BlockingOp<T> {
             BlockingOp::Dummy(plan) => {
                 log_debug!("Dummy blocking op");
                 let output = Arc::new(TupleBuffer::vec());
-                while let Some(tuple) = plan.next(&context)? {
+                while let Some(tuple) = plan.next(context)? {
                     output.append(tuple)?;
                 }
                 Ok(output)
             }
-            BlockingOp::InMemSort(sort) => sort.execute(&context),
-            BlockingOp::InMemHashTableCreation(creation) => creation.execute(&context),
-            BlockingOp::InMemHashAggregate(agg) => agg.execute(&context),
+            BlockingOp::InMemSort(sort) => sort.execute(context),
+            BlockingOp::InMemHashTableCreation(creation) => creation.execute(context),
+            BlockingOp::InMemHashAggregate(agg) => agg.execute(context),
         }
     }
 }
@@ -1015,7 +1010,7 @@ impl<T: TxnStorageTrait> InMemSort<T> {
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->sort(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for (col_id, asc, nulls_first) in &self.sort_cols {
             out.push_str(split);
             out.push_str(&format!(
@@ -1037,7 +1032,7 @@ impl<T: TxnStorageTrait> InMemSort<T> {
         log_debug!("InMemSort::execute");
         let output = Arc::new(TupleBuffer::vec());
         let mut tuples = Vec::new();
-        while let Some(tuple) = self.exec_plan.next(&context)? {
+        while let Some(tuple) = self.exec_plan.next(context)? {
             tuples.push(tuple);
         }
         tuples.sort_by(|a, b| {
@@ -1081,7 +1076,7 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->hash_table(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for expr in &self.exprs {
             out.push_str(split);
             out.push_str(&format!("{}", expr));
@@ -1097,7 +1092,7 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
     ) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         log_debug!("InMemHashTableCreation::execute");
         let output = Arc::new(TupleBuffer::hash_table(self.exprs.clone()));
-        while let Some(tuple) = self.exec_plan.next(&context)? {
+        while let Some(tuple) = self.exec_plan.next(context)? {
             output.append(tuple)?;
         }
         Ok(output)
@@ -1137,7 +1132,7 @@ impl<T: TxnStorageTrait> InMemHashAggregation<T> {
     pub fn print_inner(&self, indent: usize, out: &mut String) {
         out.push_str(&format!("{}->hash_aggregate(", " ".repeat(indent)));
         let mut split = "";
-        out.push_str("[");
+        out.push('[');
         for col_id in &self.group_by {
             out.push_str(split);
             out.push_str(&format!("{}", col_id));
@@ -1163,7 +1158,7 @@ impl<T: TxnStorageTrait> InMemHashAggregation<T> {
             self.group_by.clone(),
             self.agg_op.clone(),
         ));
-        while let Some(tuple) = self.exec_plan.next(&context)? {
+        while let Some(tuple) = self.exec_plan.next(context)? {
             output.append(tuple)?;
         }
         Ok(output)
@@ -1255,6 +1250,12 @@ pub struct PipelineQueue<T: TxnStorageTrait> {
     queue: VecDeque<Pipeline<T>>,
 }
 
+impl<T: TxnStorageTrait> Default for PipelineQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: TxnStorageTrait> PipelineQueue<T> {
     pub fn new() -> Self {
         Self {
@@ -1298,10 +1299,10 @@ impl<T: TxnStorageTrait> PipelineQueue<T> {
 impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
         let converter = PhysicalRelExprToPipelineQueue::new(storage);
-        let queue = converter
+
+        converter
             .convert(catalog, physical_plan)
-            .expect("Failed to convert physical plan");
-        queue
+            .expect("Failed to convert physical plan")
     }
 
     fn to_pretty_string(&self) -> String {
@@ -1314,7 +1315,7 @@ impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
         result
     }
 
-    fn execute(mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
+    fn execute(mut self, _txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         log_info!(
@@ -1410,7 +1411,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
             PhysicalRelExpr::Scan {
                 db_id,
                 c_id,
-                table_name,
+                table_name: _,
                 column_indices,
             } => {
                 let col_id_to_idx = column_indices
@@ -1421,7 +1422,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
 
                 let in_schema = catalog
                     .get_schema(c_id)
-                    .ok_or(ExecError::Catalog(format!("Schema not found")))?;
+                    .ok_or(ExecError::Catalog("Schema not found".to_string()))?;
                 let out_schema = Arc::new(in_schema.project(&column_indices));
                 let p_id = self.fetch_add_id();
                 let scan_buffer = Arc::new(TupleBuffer::txn_storage(
@@ -1485,7 +1486,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                 Ok((NonBlockingOp::Map(map), context, col_id_to_idx))
             }
             PhysicalRelExpr::NestedLoopJoin {
-                join_type,
+                join_type: _,
                 left,
                 right,
                 predicates,
@@ -1501,15 +1502,15 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                 for (col_name, col_idx) in right_col_id_to_idx {
                     col_id_to_idx.insert(col_name, col_idx + left_len);
                 }
-                let schema = Arc::new(left_op.schema().merge(&right_op.schema()));
+                let schema = Arc::new(left_op.schema().merge(right_op.schema()));
                 let cross_join =
                     PNestedLoopJoinIter::new(schema.clone(), Box::new(left_op), Box::new(right_op));
                 if predicates.is_empty() {
-                    return Ok((
+                    Ok((
                         NonBlockingOp::NestedLoopJoin(cross_join),
                         context,
                         col_id_to_idx,
-                    ));
+                    ))
                 } else {
                     let filter = ByteCodeExpr::from_ast(
                         Expression::merge_conjunction(predicates),
@@ -1520,7 +1521,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                         Box::new(NonBlockingOp::NestedLoopJoin(cross_join)),
                         filter,
                     );
-                    return Ok((NonBlockingOp::Filter(filter), context, col_id_to_idx));
+                    Ok((NonBlockingOp::Filter(filter), context, col_id_to_idx))
                 }
             }
             PhysicalRelExpr::HashJoin {
@@ -1566,7 +1567,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                             let res = col_id_to_idx.insert(col_name, col_idx + left_len);
                             assert_eq!(res, None);
                         }
-                        let schema = left_schema.merge(&right_op.schema());
+                        let schema = left_schema.merge(right_op.schema());
                         let probe = PHashJoinIter::Inner(PHashJoinInnerIter::new(
                             Arc::new(schema),
                             Box::new(right_op),
@@ -1583,12 +1584,12 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                         }
                         // Make the left side columns nullable
                         let left_schema = left_schema.make_nullable();
-                        let schema = left_schema.merge(&right_op.schema());
+                        let schema = left_schema.merge(right_op.schema());
                         let nulls = Tuple::from_fields(
                             left_schema
                                 .columns()
                                 .iter()
-                                .map(|col| Field::null(&col.data_type()))
+                                .map(|col| Field::null(col.data_type()))
                                 .collect(),
                         );
                         let probe = PHashJoinIter::RightOuter(PHashJoinRightOuterIter::new(

@@ -1,19 +1,16 @@
 use std::{
-    cell::{Ref, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet},
     rc::Rc,
     sync::{Arc, Mutex},
 };
 
-use chrono::{Datelike, Month};
 use txn_storage::DatabaseId;
 
 use crate::{
-    catalog::{self, Catalog, CatalogRef, ColIdGen, ColIdGenRef},
+    catalog::{CatalogRef, ColIdGen, ColIdGenRef},
     expression::{
-        prelude::{
-            BinaryOp, HeuristicRule, HeuristicRulesRef, JoinType, LogicalRelExpr, PlanTrait,
-        },
+        prelude::{BinaryOp, HeuristicRulesRef, JoinType, LogicalRelExpr, PlanTrait},
         AggOp, DateField, Expression,
     },
     prelude::DataType,
@@ -373,14 +370,13 @@ impl Translator {
                         table_name.clone(),
                         (0..cols.len()).collect(),
                     );
-                    let (plan, mut new_col_ids) =
-                        plan.rename(&self.enabled_rules, &self.col_id_gen);
+                    let (plan, new_col_ids) = plan.rename(&self.enabled_rules, &self.col_id_gen);
 
                     // Add the
                     for (old_col_id, new_col_id) in new_col_ids.into_iter() {
                         // get the name of the column
                         let col_name = cols.get(old_col_id).unwrap().name();
-                        self.env.set(&col_name, new_col_id);
+                        self.env.set(col_name, new_col_id);
                         self.env
                             .set(&format!("{}.{}", table_name, col_name), new_col_id);
 
@@ -403,8 +399,7 @@ impl Translator {
                     // Found in CTEs.
                     // Rename the columns and add them to the environment.
                     let plan = query.plan.clone();
-                    let (plan, mut new_col_ids) =
-                        plan.rename(&self.enabled_rules, &self.col_id_gen);
+                    let (plan, new_col_ids) = plan.rename(&self.enabled_rules, &self.col_id_gen);
 
                     for (old_col_id, new_col_id) in new_col_ids.into_iter() {
                         // get the name of the column
@@ -459,7 +454,7 @@ impl Translator {
                             // get the name of the column from env
                             let names = subquery.env.get_names(i);
                             for name in &names {
-                                self.env.set(&name, i);
+                                self.env.set(name, i);
                                 self.env.set(&format!("{}.{}", alias.name.value, name), i);
                             }
                         }
@@ -477,7 +472,7 @@ impl Translator {
                                 }
                                 let names = subquery.env.get_names(*col_id);
                                 for name in &names {
-                                    self.env.set(&name, *col_id);
+                                    self.env.set(name, *col_id);
                                 }
                                 self.env.set(&col_alias.value, *col_id);
                                 self.env
@@ -497,7 +492,7 @@ impl Translator {
                     for i in att {
                         let names = subquery.env.get_names(i);
                         for name in &names {
-                            self.env.set(&name, i);
+                            self.env.set(name, i);
                         }
                     }
                 }
@@ -660,12 +655,12 @@ impl Translator {
         &mut self,
         mut plan: LogicalRelExpr,
         projection: &Vec<sqlparser::ast::SelectItem>,
-        from: &Vec<sqlparser::ast::TableWithJoins>,
+        _from: &[sqlparser::ast::TableWithJoins],
         order_by: &Vec<sqlparser::ast::OrderByExpr>,
-        limit: &Option<sqlparser::ast::Expr>,
+        _limit: &Option<sqlparser::ast::Expr>,
         group_by: &sqlparser::ast::GroupByExpr,
         having: &Option<sqlparser::ast::Expr>,
-        distinct: &Option<sqlparser::ast::Distinct>,
+        _distinct: &Option<sqlparser::ast::Distinct>,
     ) -> Result<LogicalRelExpr, TranslatorError> {
         let mut projected_cols = Vec::new();
         let mut agg_ops = Vec::new();
@@ -894,7 +889,7 @@ impl Translator {
                 let agg_col_id = self.col_id_gen.next();
                 match function_arg_expr {
                     sqlparser::ast::FunctionArgExpr::Expr(expr) => {
-                        match self.process_expr(&expr, Some(0)) {
+                        match self.process_expr(expr, Some(0)) {
                             Ok(expr) => {
                                 if let Expression::ColRef { id } = expr {
                                     aggs.push((agg_col_id, (id, agg_op)));
@@ -912,7 +907,7 @@ impl Translator {
                             }
                             Err(TranslatorError::ColumnNotFound(_)) => {
                                 // Search globally.
-                                let expr = self.process_expr(&expr, None).unwrap();
+                                let expr = self.process_expr(expr, None).unwrap();
                                 let col_id = self.col_id_gen.next();
                                 plan = plan.map(
                                     true,
@@ -1342,10 +1337,7 @@ fn has_agg(expr: &sqlparser::ast::Expr) -> bool {
         TypedString { .. } => false,
 
         BinaryOp { left, op: _, right } => has_agg(left) || has_agg(right),
-        Function(function) => match get_name(&function.name).to_uppercase().as_str() {
-            "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" => true,
-            _ => false,
-        },
+        Function(function) => matches!(get_name(&function.name).to_uppercase().as_str(), "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"),
         Nested(expr) => has_agg(expr),
         Extract { .. } => false,
         Cast { expr, .. } => has_agg(expr),
@@ -1612,10 +1604,10 @@ fn process_correlated_any(
 mod tests {
     use super::Translator;
     use crate::{
-        catalog::{Catalog, ColIdGen, ColIdGenRef, ColumnDef, DataType, Schema, Table},
-        expression::prelude::{HeuristicRule, HeuristicRules},
+        catalog::{Catalog, ColumnDef, DataType, Schema, Table},
+        expression::prelude::HeuristicRules,
     };
-    use sqlparser::dialect::{DuckDbDialect, PostgreSqlDialect};
+    use sqlparser::dialect::DuckDbDialect;
     use std::sync::Arc;
 
     fn get_test_catalog() -> Catalog {
@@ -1668,12 +1660,11 @@ mod tests {
     }
 
     fn parse_sql(sql: &str) -> sqlparser::ast::Query {
-        use sqlparser::dialect::GenericDialect;
         use sqlparser::parser::Parser;
 
         let dialect = DuckDbDialect {};
         let statements = Parser::new(&dialect)
-            .try_with_sql(&sql)
+            .try_with_sql(sql)
             .unwrap()
             .parse_statements()
             .unwrap();

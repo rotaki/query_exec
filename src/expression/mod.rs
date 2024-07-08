@@ -5,9 +5,8 @@ use crate::{prelude::DataType, tuple::Field};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     hash::Hash,
-    result,
 };
 
 pub use crate::ColumnId;
@@ -268,10 +267,8 @@ impl<P: PlanTrait> Expression<P> {
             if left == right {
                 return left;
             }
-        } else if matches!(op, BinaryOp::And) {
-            if left == right {
-                return left;
-            }
+        } else if matches!(op, BinaryOp::And) && left == right {
+            return left;
         }
         Expression::Binary {
             op,
@@ -410,18 +407,18 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Extract { field: _, expr } => expr.has_subquery(),
             Expression::Like {
                 expr,
-                pattern,
-                escape,
+                pattern: _,
+                escape: _,
             } => expr.has_subquery(),
-            Expression::Cast { expr, to_type } => expr.has_subquery(),
+            Expression::Cast { expr, to_type: _ } => expr.has_subquery(),
             Expression::InList { expr, list } => {
                 expr.has_subquery() || list.iter().any(|expr| expr.has_subquery())
             }
             Expression::Not { expr } => expr.has_subquery(),
-            Expression::Substring { expr, start, len } => expr.has_subquery(),
+            Expression::Substring { expr, .. } => expr.has_subquery(),
             Expression::Subquery { expr: _ } => true,
-            Expression::UncorrelatedAny { left, comp, right } => true,
-            Expression::UncorrelatedExists { expr } => true,
+            Expression::UncorrelatedAny { .. } => true,
+            Expression::UncorrelatedExists { .. } => true,
         }
     }
 
@@ -469,13 +466,21 @@ impl<P: PlanTrait> Expression<P> {
     pub fn extract_bounded_predicates(&self, rel: &P) -> Vec<Expression<P>> {
         let mut result = Vec::new();
         match self {
-            Expression::Binary { op, left, right } if matches!(op, BinaryOp::And) => {
+            Expression::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } => {
                 let mut left = left.extract_bounded_predicates(rel);
                 let mut right = right.extract_bounded_predicates(rel);
                 result.append(&mut left);
                 result.append(&mut right);
             }
-            Expression::Binary { op, left, right } if matches!(op, BinaryOp::Or) => {
+            Expression::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => {
                 let mut left = left.extract_bounded_predicates(rel);
                 let mut right = right.extract_bounded_predicates(rel);
                 if left.is_empty() || right.is_empty() {
@@ -718,7 +723,7 @@ impl<P: PlanTrait> Expression<P> {
             Expression::IsNull { expr } => {
                 out.push_str("is_null(");
                 expr.print_inner(indent, out);
-                out.push_str(")");
+                out.push(')');
             }
             Expression::Binary { op, left, right } => {
                 left.print_inner(indent, out);
@@ -731,7 +736,9 @@ impl<P: PlanTrait> Expression<P> {
                 else_expr,
             } => {
                 out.push_str("case ");
-                expr.as_ref().map(|expr| expr.print_inner(indent, out));
+                if let Some(expr) = expr.as_ref() {
+                    expr.print_inner(indent, out)
+                }
                 for (when, then) in whens {
                     out.push_str(" when ");
                     when.print_inner(indent, out);
@@ -753,7 +760,7 @@ impl<P: PlanTrait> Expression<P> {
             Expression::Extract { field, expr } => {
                 out.push_str(&format!("{:?}(", field));
                 expr.print_inner(indent, out);
-                out.push_str(")");
+                out.push(')');
             }
             Expression::Like {
                 expr,
@@ -767,7 +774,7 @@ impl<P: PlanTrait> Expression<P> {
                 }
             }
             Expression::Cast { expr, to_type } => {
-                out.push_str(&format!("cast("));
+                out.push_str("cast(");
                 expr.print_inner(indent, out);
                 out.push_str(&format!(" as {:?})", to_type));
             }
@@ -780,7 +787,7 @@ impl<P: PlanTrait> Expression<P> {
                     }
                     expr.print_inner(indent, out);
                 }
-                out.push_str(")");
+                out.push(')');
             }
             Expression::Not { expr } => {
                 out.push_str("not ");
@@ -800,12 +807,12 @@ impl<P: PlanTrait> Expression<P> {
                 left.print_inner(indent, out);
                 out.push_str(&format!(" {} uncorrelated any (", comp));
                 right.print_inner(indent, out);
-                out.push_str(")");
+                out.push(')');
             }
             Expression::UncorrelatedExists { expr } => {
                 out.push_str("uncorrelated exists (");
                 expr.print_inner(indent, out);
-                out.push_str(")");
+                out.push(')');
             }
         }
     }

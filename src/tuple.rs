@@ -4,14 +4,14 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
-use serde::{de::value, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     catalog::{ColumnDef, DataType},
     error::ExecError,
 };
 
-use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta};
+use chrono::{Datelike, Days, Months, NaiveDate};
 
 fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     let mut val_bits = val.to_bits();
@@ -339,19 +339,19 @@ impl PartialOrd for Field {
         match (self, other) {
             (Field::Boolean(val1), Field::Boolean(val2)) => val1
                 .as_ref()
-                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+                .and_then(|v1| val2.as_ref().map(|v2| v1.cmp(v2))),
             (Field::Int(val1), Field::Int(val2)) => val1
                 .as_ref()
-                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+                .and_then(|v1| val2.as_ref().map(|v2| v1.cmp(v2))),
             (Field::Float(val1), Field::Float(val2)) => val1
                 .as_ref()
                 .and_then(|v1| val2.as_ref().and_then(|v2| v1.partial_cmp(v2))),
             (Field::String(val1), Field::String(val2)) => val1
                 .as_ref()
-                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+                .and_then(|v1| val2.as_ref().map(|v2| v1.cmp(v2))),
             (Field::Date(val1), Field::Date(val2)) => val1
                 .as_ref()
-                .and_then(|v1| val2.as_ref().and_then(|v2| Some(v1.cmp(v2)))),
+                .and_then(|v1| val2.as_ref().map(|v2| v1.cmp(v2))),
             (Field::Int(val1), Field::Float(val2)) => val1
                 .as_ref()
                 .and_then(|v1| val2.as_ref().and_then(|v2| (*v1 as f64).partial_cmp(v2))),

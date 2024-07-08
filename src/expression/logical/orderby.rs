@@ -5,14 +5,14 @@ use super::{HeuristicRulesRef, LogicalRelExpr};
 impl LogicalRelExpr {
     pub fn order_by(
         self,
-        optimize: bool,
-        enabled_rules: &HeuristicRulesRef,
-        col_id_gen: &ColIdGenRef,
+        _optimize: bool,
+        _enabled_rules: &HeuristicRulesRef,
+        _col_id_gen: &ColIdGenRef,
         cols: Vec<(ColumnId, bool, bool)>,
     ) -> Self {
         LogicalRelExpr::OrderBy {
             src: Box::new(self),
-            cols: cols,
+            cols,
         }
     }
 }

@@ -2,7 +2,7 @@ use crate::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 const STARTING_COL_ID: ColumnId = 10000;
@@ -38,8 +38,7 @@ impl ColIdGen {
     }
 
     pub fn next(&self) -> ColumnId {
-        let val = self.current_id.fetch_add(1, Ordering::AcqRel);
-        val
+        self.current_id.fetch_add(1, Ordering::AcqRel)
     }
 }
 

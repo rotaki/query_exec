@@ -2,9 +2,7 @@ mod col_id_gen;
 mod schema;
 
 use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    rc::Rc,
+    collections::HashMap,
     sync::{Arc, Mutex},
 };
 
@@ -39,6 +37,12 @@ pub type TableRef = Arc<Table>;
 /// Per DB catalog
 pub struct Catalog {
     tables: Mutex<HashMap<ContainerId, TableRef>>,
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Catalog {

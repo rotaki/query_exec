@@ -11,9 +11,6 @@ mod query_executor;
 mod rwlatch;
 mod tuple;
 
-use logger::log;
-use serde::{Deserialize, Serialize};
-
 pub use tuple::Field;
 pub use txn_storage::prelude::*;
 

@@ -23,7 +23,8 @@ impl LogicalRelExpr {
         cols: Vec<usize>,
     ) -> LogicalRelExpr {
         let plan = self.u_project(optimize, enabled_rules, col_id_gen, to_set(cols.clone()));
-        let plan = if let LogicalRelExpr::Project {
+
+        if let LogicalRelExpr::Project {
             src,
             cols: _no_need_cols,
         } = plan
@@ -34,8 +35,7 @@ impl LogicalRelExpr {
                 src: Box::new(plan),
                 cols,
             }
-        };
-        plan
+        }
     }
 
     // Unordered projection
@@ -257,11 +257,11 @@ impl LogicalRelExpr {
                         .collect(); // dest -> src
                     let mut new_cols = HashSet::new();
                     for col in cols {
-                        new_cols.insert(existing_rename_rev.get(&col).unwrap_or(&col).clone());
+                        new_cols.insert(*existing_rename_rev.get(&col).unwrap_or(&col));
                     }
                     // Notice that we do not apply a projection node on the `rename` operator
                     // since it is not necessary. But can be added for clarity.
-                    src.u_project(true, enabled_rules, &col_id_gen, new_cols)
+                    src.u_project(true, enabled_rules, col_id_gen, new_cols)
                         .rename_to(existing_rename)
                 }
                 LogicalRelExpr::Scan {

@@ -18,7 +18,6 @@ use crate::loader::prelude::SimpleCsvLoader;
 use crate::loader::DataLoader;
 use crate::parser::{Translator, TranslatorError};
 use crate::prelude::{ColumnDef, DataType, Schema, SchemaRef, Table};
-use crate::tuple::Tuple;
 
 pub fn print_tuples(tuples: Arc<TupleBuffer<impl TxnStorageTrait>>) {
     let mut count = 0;
@@ -92,7 +91,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
     pub fn parse_sql(sql: &str) -> Result<sqlparser::ast::Query, QueryExecutorError> {
         let dialect = GenericDialect {};
         let statements = Parser::new(&dialect)
-            .try_with_sql(&sql)?
+            .try_with_sql(sql)?
             .parse_statements()?;
         let query = {
             let statement = statements.into_iter().next().unwrap();
@@ -112,7 +111,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
         pub fn parse_query(sql: &str) -> Result<sqlparser::ast::Query, QueryExecutorError> {
             let dialect = GenericDialect {};
             let statements = Parser::new(&dialect)
-                .try_with_sql(&sql)?
+                .try_with_sql(sql)?
                 .parse_statements()?;
             let query = {
                 let statement = statements.into_iter().next().unwrap();
@@ -134,8 +133,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
     }
 
     pub fn to_physical(&self, logical_plan: LogicalRelExpr) -> PhysicalRelExpr {
-        let physical_plan = LogicalToPhysicalRelExpr.to_physical(logical_plan);
-        physical_plan
+        LogicalToPhysicalRelExpr.to_physical(logical_plan)
     }
 
     // Specifies a specific lifetime for the executor.
@@ -151,7 +149,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
     // Executes the query and returns the result.
     pub fn execute<E: Executor<T>>(
         &self,
-        mut exec: E,
+        exec: E,
     ) -> Result<Arc<TupleBuffer<T>>, QueryExecutorError> {
         let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
         let result = exec.execute(&txn)?;
@@ -167,7 +165,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
         fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorError> {
             let dialect = GenericDialect {};
             let statements = Parser::new(&dialect)
-                .try_with_sql(&sql)?
+                .try_with_sql(sql)?
                 .parse_statements()?;
             let statement = statements.into_iter().next().unwrap();
             match statement {
@@ -262,14 +260,12 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
                     let table_name = name.to_string();
                     Ok((table_name, schema))
                 }
-                other => {
-                    return Err(QueryExecutorError::InvalidSqlString(
-                        ParserError::ParserError(format!(
-                            "Expected a CREATE TABLE statement, got {:?}",
-                            other
-                        )),
-                    ))
-                }
+                other => Err(QueryExecutorError::InvalidSqlString(
+                    ParserError::ParserError(format!(
+                        "Expected a CREATE TABLE statement, got {:?}",
+                        other
+                    )),
+                )),
             }
         }
 
@@ -330,8 +326,8 @@ mod tests {
     };
 
     use crate::{
-        catalog::{self, Catalog, ColumnDef, DataType, Schema, SchemaRef, Table},
-        executor::prelude::{PipelineQueue, VolcanoIterator},
+        catalog::{Catalog, ColumnDef, DataType, Schema, Table},
+        executor::prelude::PipelineQueue,
         tuple::Tuple,
         Field,
     };
@@ -535,7 +531,7 @@ mod tests {
             println!("=== Physical Plan ===");
             physical_plan.pretty_print();
         }
-        let mut exec = executor.to_executable::<PipelineQueue<T>>(physical_plan);
+        let exec = executor.to_executable::<PipelineQueue<T>>(physical_plan);
         if verbose {
             println!("=== Executor ===");
             println!("{}", exec.to_pretty_string());
