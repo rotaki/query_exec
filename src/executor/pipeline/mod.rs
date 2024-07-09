@@ -8,7 +8,7 @@ use txn_storage::TxnStorageTrait;
 use crate::{
     error::ExecError,
     expression::{AggOp, Expression, JoinType},
-    log_debug, log_info,
+    log, log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, Tuple},

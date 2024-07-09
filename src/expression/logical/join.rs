@@ -13,7 +13,7 @@ impl LogicalRelExpr {
         col_id_gen: &ColIdGenRef,
         join_type: JoinType,
         other: LogicalRelExpr,
-        on_conditions: impl IntoIterator<Item = Expression<LogicalRelExpr>>, // On condition. On conditions can be pushed down to the source independently of the join type.
+        on_conditions: BTreeSet<Expression<LogicalRelExpr>>,
     ) -> LogicalRelExpr {
         let on_conditions: BTreeSet<_> = on_conditions
             .into_iter()
@@ -30,55 +30,78 @@ impl LogicalRelExpr {
         }
 
         if optimize {
-            let (push_down, keep): (Vec<_>, Vec<_>) =
-                on_conditions.iter().partition(|pred| pred.bound_by(&self));
-            if !push_down.is_empty() {
-                // This condition is necessary to avoid infinite recursion
-                return self
-                    .select(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        push_down.into_iter().cloned(),
-                    )
-                    .on(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        join_type,
-                        other,
-                        keep.into_iter().cloned(),
-                    );
-            }
-
-            let (push_down, keep): (Vec<_>, Vec<_>) =
-                on_conditions.iter().partition(|pred| pred.bound_by(&other));
-            if !push_down.is_empty() {
-                // This condition is necessary to avoid infinite recursion
-                return self.on(
-                    true,
-                    enabled_rules,
-                    col_id_gen,
-                    join_type,
-                    other.select(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        push_down.into_iter().cloned(),
-                    ),
-                    keep.into_iter().cloned(),
-                );
-            }
-
-            // We pushed down all the on_conditions to the source.
-            self.join(
+            let (left_pushdown, keep): (BTreeSet<_>, BTreeSet<_>) = on_conditions
+                .into_iter()
+                .partition(|pred| pred.bound_by(&self));
+            let (right_pushdown, keep): (BTreeSet<_>, BTreeSet<_>) =
+                keep.into_iter().partition(|pred| pred.bound_by(&other));
+            let left_additional_pushdown = keep
+                .iter()
+                .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                .collect::<BTreeSet<_>>();
+            let right_additional_pushdown = keep
+                .iter()
+                .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                .collect::<BTreeSet<_>>();
+            let left = self.select(
                 true,
                 enabled_rules,
                 col_id_gen,
-                join_type,
-                other,
-                on_conditions,
-            )
+                left_pushdown
+                    .into_iter()
+                    .chain(left_additional_pushdown)
+                    .collect(),
+            );
+            let right = other.select(
+                true,
+                enabled_rules,
+                col_id_gen,
+                right_pushdown
+                    .into_iter()
+                    .chain(right_additional_pushdown)
+                    .collect(),
+            );
+            match join_type {
+                JoinType::Inner
+                | JoinType::CrossJoin
+                | JoinType::RightAnti
+                | JoinType::RightOuter
+                | JoinType::RightSemi
+                | JoinType::RightMarkJoin(_) => LogicalRelExpr::Join {
+                    join_type,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    predicates: keep.into_iter().collect(),
+                },
+                JoinType::LeftOuter => LogicalRelExpr::Join {
+                    join_type: JoinType::RightOuter,
+                    left: Box::new(right),
+                    right: Box::new(left),
+                    predicates: keep.into_iter().collect(),
+                },
+                JoinType::LeftSemi => LogicalRelExpr::Join {
+                    join_type: JoinType::RightSemi,
+                    left: Box::new(right),
+                    right: Box::new(left),
+                    predicates: keep.into_iter().collect(),
+                },
+                JoinType::LeftAnti => LogicalRelExpr::Join {
+                    join_type: JoinType::RightAnti,
+                    left: Box::new(right),
+                    right: Box::new(left),
+                    predicates: keep.into_iter().collect(),
+                },
+                JoinType::LeftMarkJoin(col_id) => LogicalRelExpr::Join {
+                    join_type: JoinType::RightMarkJoin(col_id),
+                    left: Box::new(right),
+                    right: Box::new(left),
+                    predicates: keep.into_iter().collect(),
+                },
+                JoinType::FullOuter => {
+                    // Not covered
+                    unimplemented!("FullOuter join is not supported");
+                }
+            }
         } else {
             LogicalRelExpr::Join {
                 join_type,
@@ -97,7 +120,7 @@ impl LogicalRelExpr {
         col_id_gen: &ColIdGenRef,
         join_type: JoinType,
         other: LogicalRelExpr,
-        predicates: impl IntoIterator<Item = Expression<LogicalRelExpr>>,
+        predicates: BTreeSet<Expression<LogicalRelExpr>>,
     ) -> LogicalRelExpr {
         let predicates: BTreeSet<_> = predicates
             .into_iter()
@@ -114,185 +137,261 @@ impl LogicalRelExpr {
         }
 
         if optimize {
-            if matches!(
-                join_type,
-                JoinType::Inner
-                    | JoinType::LeftOuter
-                    | JoinType::CrossJoin
-                    | JoinType::LeftSemi
-                    | JoinType::LeftAnti
-                    | JoinType::LeftMarkJoin(_)
-            ) {
-                let (push_down, keep): (Vec<_>, Vec<_>) =
-                    predicates.iter().partition(|pred| pred.bound_by(&self));
-                if !push_down.is_empty() {
-                    // This condition is necessary to avoid infinite recursion
-                    return self
-                        .select(
-                            true,
-                            enabled_rules,
-                            col_id_gen,
-                            push_down.into_iter().cloned(),
-                        )
-                        .join(
-                            true,
-                            enabled_rules,
-                            col_id_gen,
-                            join_type,
-                            other,
-                            keep.into_iter().cloned(),
-                        );
-                }
-            }
-
-            if matches!(
-                join_type,
-                JoinType::Inner
-                    | JoinType::RightOuter
-                    | JoinType::CrossJoin
-                    | JoinType::RightSemi
-                    | JoinType::RightAnti
-                    | JoinType::RightMarkJoin(_)
-            ) {
-                let (push_down, keep): (Vec<_>, Vec<_>) =
-                    predicates.iter().partition(|pred| pred.bound_by(&other));
-                if !push_down.is_empty() {
-                    // This condition is necessary to avoid infinite recursion
-                    return self.join(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        join_type,
-                        other.select(
-                            true,
-                            enabled_rules,
-                            col_id_gen,
-                            push_down.into_iter().cloned(),
-                        ),
-                        keep.into_iter().cloned(),
-                    );
-                }
-            }
-
-            /* THIS DOES NOT WORK FOR CASE WHEN EXPRESSIONS HAVE NULL RELATED OPERATIONS
-            // Special case of LeftOuter join. If the predicate is bound by the right side
-            // but does not contain is_null, we can push it to the right side.
-            if matches!(join_type, JoinType::LeftOuter) {
-                let (push_down, keep): (Vec<_>, Vec<_>) = predicates
-                    .iter()
-                    .partition(|pred| pred.bound_by(&other) && !pred.has_is_null());
-                if !push_down.is_empty() {
-                    // This condition is necessary to avoid infinite recursion
-                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
-                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
-                    return self.join(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        join_type,
-                        other.select(true, enabled_rules, col_id_gen, push_down),
-                        keep,
-                    );
-                }
-            }
-
-            // Special case of RightOuter join. If the predicate is bound by the left side
-            // but does not contain is_null, we can push it to the left side.
-            if matches!(join_type, JoinType::RightOuter) {
-                let (push_down, keep): (Vec<_>, Vec<_>) = predicates
-                    .iter()
-                    .partition(|pred| pred.bound_by(&self) && !pred.has_is_null());
-                if !push_down.is_empty() {
-                    // This condition is necessary to avoid infinite recursion
-                    let push_down = push_down.into_iter().map(|expr| expr.clone()).collect();
-                    let keep = keep.into_iter().map(|expr| expr.clone()).collect();
-                    return self
-                        .select(true, enabled_rules, col_id_gen, push_down)
-                        .join(true, enabled_rules, col_id_gen, join_type, other, keep);
-                }
-            }
-            */
-
-            // If the remaining predicates are bound by the left and right sides
-            if matches!(join_type, JoinType::CrossJoin) {
-                #[cfg(debug_assertions)]
-                {
-                    // The remaining predicates should not contain any free vaiables.
-                    // Need to use flatmap or map to reference a free variable.
-                    let free = predicates
-                        .iter()
-                        .flat_map(|expr| expr.free())
-                        .collect::<HashSet<_>>();
-                    let atts = self.att().union(&other.att()).cloned().collect();
-                    assert!(free.is_subset(&atts));
-                }
-
-                return self.join(
-                    false,
-                    enabled_rules,
-                    col_id_gen,
-                    JoinType::Inner,
-                    other,
-                    predicates,
-                );
-            }
-
-            // Always convert left X join to right X join because
-            // we assume that we build the hash table on the left side
-            // and probe the hash table on the right side, thus
-            // right X join is more efficient.
             match join_type {
+                JoinType::Inner => {
+                    let (left_pushdown, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&self));
+                    let (right_pushdown, keep): (BTreeSet<_>, BTreeSet<_>) =
+                        keep.into_iter().partition(|pred| pred.bound_by(&other));
+                    let left_additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                        .collect::<BTreeSet<_>>();
+                    let right_additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type,
+                        left: Box::new(
+                            self.select(
+                                true,
+                                enabled_rules,
+                                col_id_gen,
+                                left_pushdown
+                                    .into_iter()
+                                    .chain(left_additional_pushdown)
+                                    .collect(),
+                            ),
+                        ),
+                        right: Box::new(
+                            other.select(
+                                true,
+                                enabled_rules,
+                                col_id_gen,
+                                right_pushdown
+                                    .into_iter()
+                                    .chain(right_additional_pushdown)
+                                    .collect(),
+                            ),
+                        ),
+                        predicates: keep.into_iter().collect(),
+                    }
+                }
                 JoinType::LeftOuter => {
-                    return other.join(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        JoinType::RightOuter,
-                        self,
-                        predicates,
-                    );
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&self));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightOuter,
+                        left: Box::new(other),
+                        right: Box::new(self.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
+                }
+                JoinType::RightOuter => {
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&other));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightOuter,
+                        left: Box::new(self),
+                        right: Box::new(other.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
+                }
+                JoinType::CrossJoin => {
+                    let (left_pushdown, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&self));
+                    let (right_pushdown, keep): (BTreeSet<_>, BTreeSet<_>) =
+                        keep.into_iter().partition(|pred| pred.bound_by(&other));
+                    let left_additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                        .collect::<BTreeSet<_>>();
+                    let right_additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type,
+                        left: Box::new(
+                            self.select(
+                                true,
+                                enabled_rules,
+                                col_id_gen,
+                                left_pushdown
+                                    .into_iter()
+                                    .chain(left_additional_pushdown)
+                                    .collect(),
+                            ),
+                        ),
+                        right: Box::new(
+                            other.select(
+                                true,
+                                enabled_rules,
+                                col_id_gen,
+                                right_pushdown
+                                    .into_iter()
+                                    .chain(right_additional_pushdown)
+                                    .collect(),
+                            ),
+                        ),
+                        predicates: keep.into_iter().collect(),
+                    }
                 }
                 JoinType::LeftSemi => {
-                    return other.join(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        JoinType::RightSemi,
-                        self,
-                        predicates,
-                    );
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&self));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightSemi,
+                        left: Box::new(other),
+                        right: Box::new(self.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
+                }
+                JoinType::RightSemi => {
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&other));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightSemi,
+                        left: Box::new(self),
+                        right: Box::new(other.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
                 }
                 JoinType::LeftAnti => {
-                    return other.join(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        JoinType::RightAnti,
-                        self,
-                        predicates,
-                    );
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&self));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightAnti,
+                        left: Box::new(other),
+                        right: Box::new(self.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
+                }
+                JoinType::RightAnti => {
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&other));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightAnti,
+                        left: Box::new(self),
+                        right: Box::new(other.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
                 }
                 JoinType::LeftMarkJoin(col_id) => {
-                    return other.join(
-                        true,
-                        enabled_rules,
-                        col_id_gen,
-                        JoinType::RightMarkJoin(col_id),
-                        self,
-                        predicates,
-                    );
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&self));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&self.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightMarkJoin(col_id),
+                        left: Box::new(other),
+                        right: Box::new(self.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
                 }
-                _ => {
-                    // do nothing
+                JoinType::RightMarkJoin(col_id) => {
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
+                        .into_iter()
+                        .partition(|pred| pred.bound_by(&other));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&other.att()))
+                        .collect::<BTreeSet<_>>();
+                    LogicalRelExpr::Join {
+                        join_type: JoinType::RightMarkJoin(col_id),
+                        left: Box::new(self),
+                        right: Box::new(other.select(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            push_down.into_iter().chain(additional_pushdown).collect(),
+                        )),
+                        predicates: keep.into_iter().collect(),
+                    }
+                }
+                JoinType::FullOuter => {
+                    // Not covered
+                    unimplemented!("FullOuter join is not supported");
                 }
             }
-        }
-
-        LogicalRelExpr::Join {
-            join_type,
-            left: Box::new(self),
-            right: Box::new(other),
-            predicates,
+        } else {
+            LogicalRelExpr::Join {
+                join_type,
+                left: Box::new(self),
+                right: Box::new(other),
+                predicates,
+            }
         }
     }
 }

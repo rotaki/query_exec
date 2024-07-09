@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::prelude::*;
 use crate::prelude::*;
@@ -239,7 +239,7 @@ impl PlanTrait for PhysicalRelExpr {
                 right,
                 predicates,
             } => {
-                out.push_str(&format!("{}-> nl {}_join(", " ".repeat(indent), join_type));
+                out.push_str(&format!("{}-> nl_{}_join(", " ".repeat(indent), join_type));
                 let mut split = "";
                 for pred in predicates {
                     out.push_str(split);
@@ -263,6 +263,7 @@ impl PlanTrait for PhysicalRelExpr {
                     join_type
                 ));
                 let mut split = "";
+                out.push_str("eq: (");
                 for (left, right) in equalities {
                     out.push_str(split);
                     left.print_inner(0, out);
@@ -270,6 +271,7 @@ impl PlanTrait for PhysicalRelExpr {
                     right.print_inner(0, out);
                     split = " && ";
                 }
+                out.push_str("), filter: (");
                 for pred in filter {
                     out.push_str(split);
                     pred.print_inner(0, out);
@@ -629,48 +631,92 @@ impl LogicalToPhysicalRelExpr {
                 let predicates = predicates
                     .iter()
                     .map(|pred| LogicalToPhysicalExpression.to_physical(pred))
-                    .collect();
-                match join_type {
-                    // If join_type is CrossJoin, we use the CrossJoin variant
-                    // Otherwise, we use hash join
-                    JoinType::CrossJoin => PhysicalRelExpr::NestedLoopJoin {
-                        join_type: JoinType::CrossJoin,
-                        left,
-                        right,
-                        predicates,
-                    },
-                    _ => {
-                        // Determine the equality predicates and left, right filter conditions
-                        let mut equalities = Vec::new();
-                        let mut filter = Vec::new();
-                        for pred in predicates {
-                            match pred {
-                                Expression::Binary {
-                                    op: BinaryOp::Eq,
-                                    left: left_expr,
-                                    right: right_expr,
-                                } if left_expr.bound_by(&left) && right_expr.bound_by(&right) => {
-                                    equalities.push((*left_expr, *right_expr));
-                                }
-                                Expression::Binary {
-                                    op: BinaryOp::Eq,
-                                    left: left_expr,
-                                    right: right_expr,
-                                } if left_expr.bound_by(&right) && right_expr.bound_by(&left) => {
-                                    equalities.push((*right_expr, *left_expr));
-                                }
-                                _ => {
-                                    filter.push(pred);
-                                }
-                            }
-                        }
-                        PhysicalRelExpr::HashJoin {
-                            join_type,
+                    .collect::<BTreeSet<Expression<PhysicalRelExpr>>>();
+
+                // Determine the equality predicates and left, right filter conditions
+                let mut equalities = BTreeSet::new();
+                for predicates in predicates.iter() {
+                    equalities.extend(predicates.extract_equalities());
+                }
+
+                let mut filter = Vec::new();
+                for pred in predicates {
+                    if !equalities.contains(&pred) {
+                        filter.push(pred);
+                    }
+                }
+
+                let mut equality_preds = Vec::new();
+                // From all the equalities, determine the ones that are bound by the left and right
+                // i.e. expressions that can be used in the hash join
+                for pred in equalities {
+                    match pred {
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
                             left,
                             right,
-                            equalities,
-                            filter,
+                        } if !left.has_col_ref() || !right.has_col_ref() => {
+                            filter.push(Expression::Binary {
+                                op: BinaryOp::Eq,
+                                left,
+                                right,
+                            })
                         }
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
+                            left: left_expr,
+                            right: right_expr,
+                        } if left_expr.bound_by(&left) && right_expr.bound_by(&right) => {
+                            equality_preds.push((*left_expr, *right_expr))
+                        }
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
+                            left: left_expr,
+                            right: right_expr,
+                        } if left_expr.bound_by(&right) && right_expr.bound_by(&left) => {
+                            equality_preds.push((*right_expr, *left_expr))
+                        }
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
+                            left: left_expr,
+                            right: right_expr,
+                        } => {
+                            // left_expr and right_expr are bound by one of the sources
+                            filter.push(Expression::Binary {
+                                op: BinaryOp::Eq,
+                                left: left_expr,
+                                right: right_expr,
+                            })
+                        }
+                        _ => {
+                            panic!("Join predicate is not an equality predicate")
+                        }
+                    }
+                }
+
+                if equality_preds.is_empty() && join_type == JoinType::CrossJoin {
+                    // TODO: remove join_type == JoinType::CrossJoin condition from here.
+                    // This condition is needed for executing test_uncorrelated_exists.
+                    // Otherwise, the test will fail because nl_right_mark_join is not supported.
+                    // If nested loop join with all the join_types are supported, we can remove this condition
+                    PhysicalRelExpr::NestedLoopJoin {
+                        join_type,
+                        left,
+                        right,
+                        predicates: filter,
+                    }
+                } else {
+                    let join_type = if join_type == JoinType::CrossJoin {
+                        JoinType::Inner
+                    } else {
+                        join_type
+                    };
+                    PhysicalRelExpr::HashJoin {
+                        join_type,
+                        left,
+                        right,
+                        equalities: equality_preds,
+                        filter,
                     }
                 }
             }

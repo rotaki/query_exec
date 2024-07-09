@@ -11,7 +11,7 @@ impl LogicalRelExpr {
         optimize: bool,
         enabled_rules: &HeuristicRulesRef,
         col_id_gen: &ColIdGenRef,
-        predicates: impl IntoIterator<Item = Expression<LogicalRelExpr>>,
+        predicates: BTreeSet<Expression<LogicalRelExpr>>,
     ) -> LogicalRelExpr {
         let mut predicates: BTreeSet<Expression<LogicalRelExpr>> = predicates
             .into_iter()
@@ -39,12 +39,25 @@ impl LogicalRelExpr {
                     let (push_down, keep): (Vec<_>, Vec<_>) = predicates
                         .into_iter()
                         .partition(|pred| pred.free().is_subset(&projected_cols));
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&projected_cols));
                     assert!(
                         keep.is_empty(),
                         "Selection referencing non-projected columns"
                     );
-                    src.select(true, enabled_rules, col_id_gen, push_down)
-                        .u_project(false, enabled_rules, col_id_gen, cols.into_iter().collect())
+                    src.select(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        push_down.into_iter().chain(additional_pushdown).collect(),
+                    )
+                    .u_project(
+                        false,
+                        enabled_rules,
+                        col_id_gen,
+                        cols.into_iter().collect(),
+                    )
                 }
                 LogicalRelExpr::Join {
                     join_type,
@@ -62,12 +75,20 @@ impl LogicalRelExpr {
                 } => {
                     // If the predicate is bound by the group by columns, we can push it to the source
                     let group_by_cols: HashSet<_> = group_by.iter().cloned().collect();
-                    let (push_down, keep): (Vec<_>, Vec<_>) = predicates
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = predicates
                         .into_iter()
                         .partition(|pred| pred.free().is_subset(&group_by_cols));
-                    src.select(true, enabled_rules, col_id_gen, push_down)
-                        .aggregate(false, enabled_rules, col_id_gen, group_by, aggrs)
-                        .select(false, enabled_rules, col_id_gen, keep)
+                    let additional_pushdown = keep
+                        .iter()
+                        .flat_map(|pred| pred.extract_bounded_predicates(&group_by_cols));
+                    src.select(
+                        true,
+                        enabled_rules,
+                        col_id_gen,
+                        push_down.into_iter().chain(additional_pushdown).collect(),
+                    )
+                    .aggregate(false, enabled_rules, col_id_gen, group_by, aggrs)
+                    .select(false, enabled_rules, col_id_gen, keep)
                 }
                 LogicalRelExpr::Map { input, exprs } => {
                     // If the map is a->b and a is not free and b is used as a selection, then
@@ -83,13 +104,13 @@ impl LogicalRelExpr {
                         .filter(|(_, expr)| expr.bound_by(&input))
                         .cloned()
                         .collect::<HashMap<ColumnId, Expression<_>>>();
-                    let new_predicates: Vec<Expression<LogicalRelExpr>> = predicates
+                    let new_predicates: BTreeSet<Expression<LogicalRelExpr>> = predicates
                         .into_iter()
                         .map(|pred| pred.replace_variables_with_exprs(&exprs_without_outer_refs))
                         .collect();
                     // If the predicate does not intersect with the atts of exprs, we can push it to the source
                     let atts = exprs.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
-                    let (push_down, keep): (Vec<_>, Vec<_>) = new_predicates
+                    let (push_down, keep): (BTreeSet<_>, BTreeSet<_>) = new_predicates
                         .into_iter()
                         .partition(|pred| pred.free().is_disjoint(&atts));
                     input

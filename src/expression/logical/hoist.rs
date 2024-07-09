@@ -1,5 +1,7 @@
 // Reference: https://github.com/rotaki/decorrelator
 
+use std::collections::BTreeSet;
+
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
 
@@ -74,11 +76,12 @@ impl LogicalRelExpr {
                         col_id_gen,
                         JoinType::LeftMarkJoin(id),
                         *right,
-                        vec![Expression::Binary {
+                        [Expression::Binary {
                             op: comp,
                             left: Box::new(Expression::col_ref(left_id)),
                             right: Box::new(Expression::col_ref(right_id)),
-                        }],
+                        }]
+                        .into(),
                     ) // Mark join left and right and put the result in id
                     .u_project(
                         true,
@@ -95,7 +98,7 @@ impl LogicalRelExpr {
                     col_id_gen,
                     JoinType::LeftMarkJoin(id),
                     *expr,
-                    vec![],
+                    BTreeSet::new(),
                 )
                 .u_project(
                     true,

@@ -210,6 +210,46 @@ pub enum Expression<P: PlanTrait> {
 }
 
 impl<P: PlanTrait> Expression<P> {
+    pub fn has_col_ref(&self) -> bool {
+        match self {
+            Expression::ColRef { id: _ } => true,
+            Expression::Field { val: _ } => false,
+            Expression::IsNull { expr } => expr.has_col_ref(),
+            Expression::Binary { left, right, .. } => left.has_col_ref() || right.has_col_ref(),
+            Expression::Case {
+                expr,
+                whens,
+                else_expr,
+            } => {
+                expr.as_ref().map_or(false, |expr| expr.has_col_ref())
+                    || whens
+                        .iter()
+                        .any(|(when, then)| when.has_col_ref() || then.has_col_ref())
+                    || else_expr.as_ref().map_or(false, |expr| expr.has_col_ref())
+            }
+            Expression::Between { expr, lower, upper } => {
+                expr.has_col_ref() || lower.has_col_ref() || upper.has_col_ref()
+            }
+            Expression::Extract { expr, .. } => expr.has_col_ref(),
+            Expression::Like {
+                expr,
+                pattern: _,
+                escape: _,
+            } => expr.has_col_ref(),
+            Expression::Cast { expr, .. } => expr.has_col_ref(),
+            Expression::InList { expr, list } => {
+                expr.has_col_ref() || list.iter().any(|expr| expr.has_col_ref())
+            }
+            Expression::Not { expr } => expr.has_col_ref(),
+            Expression::Substring { expr, .. } => expr.has_col_ref(),
+            Expression::Subquery { .. }
+            | Expression::UncorrelatedExists { .. }
+            | Expression::UncorrelatedAny { .. } => {
+                panic!("Subquery should not be present in the expression when checking for col_ref")
+            }
+        }
+    }
+
     pub fn col_ref(id: ColumnId) -> Expression<P> {
         Expression::ColRef { id }
     }
@@ -263,29 +303,8 @@ impl<P: PlanTrait> Expression<P> {
     }
 
     pub fn binary(op: BinaryOp, left: Expression<P>, right: Expression<P>) -> Expression<P> {
-        if matches!(op, BinaryOp::Or) {
-            if left == right {
-                return left;
-            } else {
-                // Push down the OR operator as much as possible
-                let left = left.split_conjunction();
-                let right = right.split_conjunction();
-                if left.len() == 1 && right.len() == 1 {
-                    return Expression::Binary {
-                        op,
-                        left: left.into_iter().next().unwrap().into(),
-                        right: right.into_iter().next().unwrap().into(),
-                    };
-                } else {
-                    let mut result = Vec::with_capacity(left.len() * right.len());
-                    for l in left {
-                        for r in right.iter() {
-                            result.push(Expression::binary(op, l.clone(), r.clone()));
-                        }
-                    }
-                    return Expression::merge_conjunction(result);
-                }
-            }
+        if matches!(op, BinaryOp::Or) && left == right {
+            return left;
         } else if matches!(op, BinaryOp::And) && left == right {
             return left;
         }
@@ -482,7 +501,7 @@ impl<P: PlanTrait> Expression<P> {
     /// The returning predicates subsumes the original predicates.
     /// This means the returning predicates express a logically larger set of rows than the original predicates.
     /// The returning predicates are predicates that are bound by the bound_cols.
-    pub fn extract_bounded_predicates(&self, rel: &P) -> Vec<Expression<P>> {
+    pub fn extract_bounded_predicates(&self, bound_cols: &HashSet<usize>) -> Vec<Expression<P>> {
         let mut result = Vec::new();
         match self {
             Expression::Binary {
@@ -490,8 +509,8 @@ impl<P: PlanTrait> Expression<P> {
                 left,
                 right,
             } => {
-                let mut left = left.extract_bounded_predicates(rel);
-                let mut right = right.extract_bounded_predicates(rel);
+                let mut left = left.extract_bounded_predicates(bound_cols);
+                let mut right = right.extract_bounded_predicates(bound_cols);
                 result.append(&mut left);
                 result.append(&mut right);
             }
@@ -500,8 +519,8 @@ impl<P: PlanTrait> Expression<P> {
                 left,
                 right,
             } => {
-                let mut left = left.extract_bounded_predicates(rel);
-                let mut right = right.extract_bounded_predicates(rel);
+                let mut left = left.extract_bounded_predicates(bound_cols);
+                let mut right = right.extract_bounded_predicates(bound_cols);
                 if left.is_empty() || right.is_empty() {
                     // Do nothing
                 } else if left.len() == 1 && right.len() == 1 {
@@ -523,10 +542,44 @@ impl<P: PlanTrait> Expression<P> {
             _ => {
                 // All other cases, check if expr is bound. If bound, add to the result.
                 // If not bound, ignore the expr.
-                if self.bound_by(rel) {
+                if self.free().is_subset(bound_cols) {
                     result.push(self.clone());
                 }
             }
+        }
+        result
+    }
+
+    pub fn extract_equalities(&self) -> BTreeSet<Expression<P>> {
+        let mut result = BTreeSet::new();
+        match self {
+            Expression::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => {
+                let left = left.extract_equalities();
+                let right = right.extract_equalities();
+                // Take the intersection of the left and right
+                result.extend(left.intersection(&right).cloned());
+            }
+            Expression::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } => {
+                let left = left.extract_equalities();
+                let right = right.extract_equalities();
+                result.extend(left.into_iter().chain(right.into_iter()));
+            }
+            Expression::Binary {
+                op: BinaryOp::Eq,
+                left: _,
+                right: _,
+            } => {
+                result.insert(self.clone());
+            }
+            _ => {}
         }
         result
     }

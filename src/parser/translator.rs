@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     rc::Rc,
     sync::{Arc, Mutex},
 };
@@ -264,7 +264,7 @@ impl Translator {
                     &self.col_id_gen,
                     JoinType::CrossJoin,
                     join_expr,
-                    vec![],
+                    BTreeSet::new(),
                 )
             }
         }
@@ -294,7 +294,7 @@ impl Translator {
                         true,
                         &self.enabled_rules,
                         &self.col_id_gen,
-                        condition.into_iter(),
+                        condition.into_iter().collect(),
                     )
             } else {
                 plan.on(
@@ -303,7 +303,7 @@ impl Translator {
                     &self.col_id_gen,
                     join_type,
                     right,
-                    condition.into_iter(),
+                    condition.into_iter().collect(),
                 )
             }
         }
@@ -521,7 +521,7 @@ impl Translator {
             };
 
             let mut plan = plan;
-            let (subqueries, non_subqueries): (Vec<_>, Vec<_>) = expr
+            let (subqueries, non_subqueries): (BTreeSet<_>, BTreeSet<_>) = expr
                 .split_conjunction()
                 .into_iter()
                 .partition(|expr| expr.has_subquery());
@@ -541,7 +541,7 @@ impl Translator {
                         true,
                         &self.enabled_rules,
                         &self.col_id_gen,
-                        [Expression::col_ref(col_id)],
+                        [Expression::col_ref(col_id)].into_iter().collect(),
                     )
                     .u_project(
                         true,
@@ -719,11 +719,11 @@ impl Translator {
         }
 
         // Process aggregations
-        let mut having_predicates = Vec::new();
+        let mut having_predicates = BTreeSet::new();
         if let Some(h) = having {
             let res = self.process_having(plan, h, &mut agg_ops, &mut agg_maps)?;
             plan = res.0;
-            having_predicates.push(Expression::col_ref(res.1));
+            having_predicates.insert(Expression::col_ref(res.1));
         }
         let group_by = match group_by {
             sqlparser::ast::GroupByExpr::All => Err(translation_err!(

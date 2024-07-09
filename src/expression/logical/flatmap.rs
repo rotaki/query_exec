@@ -1,7 +1,7 @@
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
 use crate::Field;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 impl LogicalRelExpr {
     pub fn flatmap(
@@ -20,7 +20,7 @@ impl LogicalRelExpr {
                     col_id_gen,
                     JoinType::CrossJoin,
                     func,
-                    vec![],
+                    BTreeSet::new(),
                 );
             }
 
@@ -162,9 +162,12 @@ impl LogicalRelExpr {
                             col_id_gen,
                             JoinType::LeftOuter,
                             copy,
-                            new_col_ids.iter().map(|(src, dest)| {
-                                Expression::col_ref(*src).eq(Expression::col_ref(*dest))
-                            }),
+                            new_col_ids
+                                .iter()
+                                .map(|(src, dest)| {
+                                    Expression::col_ref(*src).eq(Expression::col_ref(*dest))
+                                })
+                                .collect(),
                         );
                         // plan.att() contains (duplicated) join cols, group_by and aggrs.
                         // 1. We replace the original count columns with the new column ids.

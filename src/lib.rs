@@ -16,6 +16,7 @@ pub use txn_storage::prelude::*;
 
 pub type ColumnId = usize;
 
+pub use logger::log;
 pub mod prelude {
     pub use super::{ColumnId, Field};
     pub use crate::catalog::prelude::*;
