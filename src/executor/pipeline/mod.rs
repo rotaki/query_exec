@@ -3,12 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use txn_storage::TxnStorageTrait;
+use fbtree::prelude::TxnStorageTrait;
 
 use crate::{
     error::ExecError,
-    expression::{AggOp, Expression, JoinType},
-    log, log_debug, log_info,
+    expression::{AggOp, Expression, JoinType}, log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, Tuple},
@@ -1753,7 +1752,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
 /*
 #[cfg(test)]
 mod tests {
-    use txn_storage::InMemStorage;
+    use fbtree::prelude::InMemStorage;
 
     use crate::{executor::bytecode_expr::colidx_expr, tuple};
 

@@ -570,7 +570,7 @@ impl<P: PlanTrait> Expression<P> {
             } => {
                 let left = left.extract_equalities();
                 let right = right.extract_equalities();
-                result.extend(left.into_iter().chain(right.into_iter()));
+                result.extend(left.into_iter().chain(right));
             }
             Expression::Binary {
                 op: BinaryOp::Eq,

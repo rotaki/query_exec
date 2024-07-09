@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use sqlparser::parser::ParserError;
 use sqlparser::{dialect::GenericDialect, parser::Parser};
-use txn_storage::{
-    ContainerId, ContainerOptions, ContainerType, DatabaseId, Status, TxnStorageTrait,
+use fbtree::prelude::{
+    ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
 };
 
 use crate::catalog::CatalogRef;
@@ -59,8 +59,8 @@ impl From<ExecError> for QueryExecutorError {
     }
 }
 
-impl From<Status> for QueryExecutorError {
-    fn from(status: Status) -> Self {
+impl From<TxnStorageStatus> for QueryExecutorError {
+    fn from(status: TxnStorageStatus) -> Self {
         QueryExecutorError::ExecutionError(ExecError::Storage(status.into()))
     }
 }
@@ -321,7 +321,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
 
 #[cfg(test)]
 mod tests {
-    use txn_storage::{
+    use fbtree::prelude::{
         ContainerId, ContainerOptions, ContainerType, DBOptions, InMemStorage, TxnOptions,
     };
 

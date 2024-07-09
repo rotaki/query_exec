@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use txn_storage::DatabaseId;
+use fbtree::prelude::DatabaseId;
 
 use crate::{
     catalog::{CatalogRef, ColIdGen, ColIdGenRef},

@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use txn_storage::prelude::*;
+use fbtree::prelude::*;
 
 use crate::{
     catalog::{

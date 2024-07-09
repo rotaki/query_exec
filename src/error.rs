@@ -1,4 +1,4 @@
-use txn_storage::Status;
+use fbtree::prelude::TxnStorageStatus;
 
 #[derive(Debug)]
 pub enum ExecError {
@@ -9,8 +9,8 @@ pub enum ExecError {
     Pipeline(String),
 }
 
-impl From<Status> for ExecError {
-    fn from(status: Status) -> ExecError {
+impl From<TxnStorageStatus> for ExecError {
+    fn from(status: TxnStorageStatus) -> ExecError {
         ExecError::Storage(status.into())
     }
 }

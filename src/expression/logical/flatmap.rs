@@ -1,7 +1,7 @@
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
 use crate::Field;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 impl LogicalRelExpr {
     pub fn flatmap(

@@ -8,7 +8,7 @@ use crate::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 pub enum ByteCodes {
@@ -972,7 +972,7 @@ mod tests {
     use super::*;
     use crate::expression::Expression;
     use crate::tuple::Field;
-    use std::collections::HashMap;
+    
 
     fn get_col_id_to_idx() -> BTreeMap<ColumnId, ColumnId> {
         BTreeMap::new()

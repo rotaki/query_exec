@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytecode_expr::ByteCodeExpr;
-use txn_storage::TxnStorageTrait;
+use fbtree::prelude::TxnStorageTrait;
 
 use crate::{
     catalog::CatalogRef, error::ExecError, expression::prelude::PhysicalRelExpr, tuple::Tuple,
@@ -24,7 +24,7 @@ pub mod prelude {
 }
 use std::collections::BinaryHeap;
 
-use txn_storage::{ContainerId, DatabaseId, ScanOptions};
+use fbtree::prelude::{ContainerId, DatabaseId, ScanOptions};
 
 use crate::{
     expression::AggOp,

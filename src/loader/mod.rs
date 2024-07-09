@@ -1,7 +1,7 @@
 mod simple_csv_loader;
 
 use crate::catalog::SchemaRef;
-use txn_storage::prelude::*;
+use fbtree::prelude::*;
 
 pub mod prelude {
     pub use super::simple_csv_loader::SimpleCsvLoader;

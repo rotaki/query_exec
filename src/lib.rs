@@ -12,7 +12,7 @@ mod rwlatch;
 mod tuple;
 
 pub use tuple::Field;
-pub use txn_storage::prelude::*;
+pub use fbtree::prelude::*;
 
 pub type ColumnId = usize;
 
@@ -23,5 +23,5 @@ pub mod prelude {
     pub use crate::database_engine::DatabaseEngine;
     pub use crate::executor::prelude::*;
     pub use crate::query_executor::{print_tuples, QueryExecutor, QueryExecutorError};
-    pub use txn_storage::prelude::*;
+    pub use fbtree::prelude::*;
 }

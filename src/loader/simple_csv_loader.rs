@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, sync::Arc};
 
-use txn_storage::prelude::*;
+use fbtree::prelude::*;
 
 use super::DataLoader;
 
@@ -85,12 +85,13 @@ mod tests {
         tuple::Tuple,
     };
     use csv::ReaderBuilder;
-    use txn_storage::prelude::*;
+    use fbtree::prelude::*;
 
     use super::{DataLoader, SimpleCsvLoader};
+    use fbtree::prelude::InMemStorage;
 
-    fn get_in_mem_storage() -> Arc<txn_storage::InMemStorage> {
-        Arc::new(txn_storage::InMemStorage::new())
+    fn get_in_mem_storage() -> Arc<InMemStorage> {
+        Arc::new(InMemStorage::new())
     }
 
     fn setup_table_and_schema<T: TxnStorageTrait>(

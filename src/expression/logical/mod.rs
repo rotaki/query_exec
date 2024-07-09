@@ -11,7 +11,7 @@ mod scan;
 mod select;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     hash::Hash,
 };
 
@@ -19,7 +19,7 @@ use super::prelude::*;
 use crate::{ColumnId, ContainerId};
 
 pub use rules::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
-use txn_storage::DatabaseId;
+use fbtree::prelude::DatabaseId;
 
 pub mod prelude {
     pub use super::super::prelude::*;

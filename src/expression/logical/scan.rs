@@ -1,6 +1,6 @@
 // Reference: https://github.com/rotaki/decorrelator
 
-use txn_storage::DatabaseId;
+use fbtree::prelude::DatabaseId;
 
 use super::LogicalRelExpr;
 use crate::prelude::{ColumnId, ContainerId};

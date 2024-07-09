@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::prelude::*;
 use crate::prelude::*;
@@ -272,12 +272,13 @@ impl PlanTrait for PhysicalRelExpr {
                     split = " && ";
                 }
                 out.push_str("), filter: (");
+                split = "";
                 for pred in filter {
                     out.push_str(split);
                     pred.print_inner(0, out);
                     split = " && ";
                 }
-                out.push_str(")\n");
+                out.push_str("))\n");
                 left.print_inner(indent + 2, out);
                 right.print_inner(indent + 2, out);
             }

@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use txn_storage::{DBOptions, DatabaseId, TxnStorageTrait};
+use fbtree::prelude::{DBOptions, DatabaseId, TxnStorageTrait};
 
 use crate::{
     prelude::{Catalog, CatalogRef},

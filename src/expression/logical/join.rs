@@ -2,7 +2,7 @@
 
 use super::prelude::*;
 use crate::catalog::ColIdGenRef;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 impl LogicalRelExpr {
     /// Apply on(join) to the current logical relational expression.
