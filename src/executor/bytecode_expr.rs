@@ -972,7 +972,6 @@ mod tests {
     use super::*;
     use crate::expression::Expression;
     use crate::tuple::Field;
-    
 
     fn get_col_id_to_idx() -> BTreeMap<ColumnId, ColumnId> {
         BTreeMap::new()

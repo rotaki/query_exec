@@ -18,8 +18,8 @@ use std::{
 use super::prelude::*;
 use crate::{ColumnId, ContainerId};
 
-pub use rules::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
 use fbtree::prelude::DatabaseId;
+pub use rules::{HeuristicRule, HeuristicRules, HeuristicRulesRef};
 
 pub mod prelude {
     pub use super::super::prelude::*;

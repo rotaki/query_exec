@@ -11,8 +11,8 @@ mod query_executor;
 mod rwlatch;
 mod tuple;
 
-pub use tuple::Field;
 pub use fbtree::prelude::*;
+pub use tuple::Field;
 
 pub type ColumnId = usize;
 

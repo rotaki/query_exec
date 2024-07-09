@@ -1094,7 +1094,7 @@ checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 [[package]]
 name = "fbtree"
 version = "0.1.0"
-source = "git+https://github.com/rotaki/FosterBtree.git?branch=master#beeadad31ffcc1a5e2f0e75d81f9e347999d7ec7"
+source = "git+https://github.com/rotaki/FosterBtree.git?branch=master#a1005350fd1060c8da735b44881fef29a976d95e"
 dependencies = [
  "chrono",
  "clap",

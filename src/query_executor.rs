@@ -1,11 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use sqlparser::parser::ParserError;
-use sqlparser::{dialect::GenericDialect, parser::Parser};
 use fbtree::prelude::{
     ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
 };
+use sqlparser::parser::ParserError;
+use sqlparser::{dialect::GenericDialect, parser::Parser};
 
 use crate::catalog::CatalogRef;
 use crate::error::ExecError;

@@ -7,8 +7,8 @@ use std::{
 };
 
 pub use col_id_gen::{ColIdGen, ColIdGenRef};
-pub use schema::{ColumnDef, DataType, Schema, SchemaRef};
 use fbtree::prelude::ContainerId;
+pub use schema::{ColumnDef, DataType, Schema, SchemaRef};
 
 pub mod prelude {
     pub use super::*;
