@@ -90,22 +90,34 @@ impl LogicalRelExpr {
                         att.into_iter().chain([id]).collect(),
                     ) // Project the att and id
             }
-            Expression::UncorrelatedExists { expr } => {
-                let att = self.att();
-                self.join(
-                    true,
-                    enabled_rules,
-                    col_id_gen,
-                    JoinType::LeftMarkJoin(id),
-                    *expr,
-                    BTreeSet::new(),
-                )
-                .u_project(
-                    true,
-                    enabled_rules,
-                    col_id_gen,
-                    att.into_iter().chain([id]).collect(),
-                )
+            Expression::Exists { expr } => {
+                let self_clone = self.clone();
+                println!("=== Exists ===");
+                println!("{}", self_clone.pretty_string());
+                println!("=== Expr ===");
+                println!("{}", expr.pretty_string());
+                if let Some(mark_join) =
+                    self_clone.try_flatmap_mark(true, enabled_rules, col_id_gen, *expr, id)
+                {
+                    mark_join
+                } else {
+                    // Other cases
+                    todo!("Currently does not support complex un-nesting of correlated exists")
+                }
+                // self.join(
+                //     true,
+                //     enabled_rules,
+                //     col_id_gen,
+                //     JoinType::LeftMarkJoin(id),
+                //     *expr,
+                //     BTreeSet::new(),
+                // )
+                // .u_project(
+                //     true,
+                //     enabled_rules,
+                //     col_id_gen,
+                //     att.into_iter().chain([id]).collect(),
+                // )
             }
             Expression::Subquery { expr } => {
                 let att = expr.att();

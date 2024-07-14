@@ -119,7 +119,7 @@ fn main() {
         // Print the results as csv with the following format:
         // query_id, time1, time2, time3, ...
         // Name the file tpch_pipeline_results_sf_<scale_factor>.csv
-        let file_name = format!("tpch_pipeline_results_sf_{}.csv", opt.scale_factor);
+        let file_name = format!("tpch_pipeline_results_inmem_sf_{}.csv", opt.scale_factor);
         let mut writer = csv::Writer::from_path(&file_name).unwrap();
         let mut record = vec!["query_id".to_string()];
         for i in 1..=opt.runs {

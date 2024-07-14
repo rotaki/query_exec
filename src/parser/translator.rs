@@ -1058,7 +1058,22 @@ impl Translator {
                 )),
             },
             sqlparser::ast::Expr::Exists { subquery, negated } => {
-                process_exist(self, subquery, *negated)
+                let mut translator = Translator::new_with_outer(
+                    self.db_id,
+                    &self.catalog_ref,
+                    &self.ctes_ref,
+                    &self.enabled_rules,
+                    &self.col_id_gen,
+                    &self.env,
+                );
+                let subquery = translator.process_query(subquery)?;
+                let plan = subquery.plan;
+                let exists = Expression::exists(plan);
+                if *negated {
+                    Ok(exists.not())
+                } else {
+                    Ok(exists)
+                }
             }
             sqlparser::ast::Expr::InSubquery {
                 expr,
@@ -1373,6 +1388,7 @@ fn get_type(d_type: &sqlparser::ast::DataType) -> DataType {
     }
 }
 
+/*
 fn process_exist(
     translator: &Translator,
     subquery: &sqlparser::ast::Query,
@@ -1451,6 +1467,7 @@ fn process_correlated_exist(
     );
     Ok(Expression::subquery(plan))
 }
+*/
 
 fn process_any(
     translator: &Translator,

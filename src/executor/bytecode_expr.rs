@@ -960,7 +960,7 @@ fn convert_expr_to_bytecode<P: PlanTrait>(
         }
         Expression::Subquery { .. }
         | Expression::UncorrelatedAny { .. }
-        | Expression::UncorrelatedExists { .. } => {
+        | Expression::Exists { .. } => {
             unimplemented!("Subquery not supported in bytecode")
         }
     }

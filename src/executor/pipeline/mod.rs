@@ -523,10 +523,14 @@ impl<T: TxnStorageTrait> PHashJoinRightOuterIter<T> {
         ));
         let mut split = "";
         out.push('[');
-        for expr in &self.exprs {
+        for i in 0..self.exprs.len().min(5) {
             out.push_str(split);
-            out.push_str(&format!("{}", expr));
+            out.push_str(&format!("{}", i));
             split = ", ";
+            if self.exprs.len() > 5 && i == 4 {
+                out.push_str(&format!(", ...len={}", self.exprs.len()));
+                break;
+            }
         }
         out.push_str("])\n");
         self.probe_side.print_inner(indent + 2, out);
@@ -1077,10 +1081,14 @@ impl<T: TxnStorageTrait> InMemHashTableCreation<T> {
         out.push_str(&format!("{}->hash_table(", " ".repeat(indent)));
         let mut split = "";
         out.push('[');
-        for expr in &self.exprs {
+        for i in 0..self.exprs.len().min(5) {
             out.push_str(split);
-            out.push_str(&format!("{}", expr));
+            out.push_str(&format!("{}", i));
             split = ", ";
+            if self.exprs.len() > 5 && i == 4 {
+                out.push_str(&format!(", ...len={}", self.exprs.len()));
+                break;
+            }
         }
         out.push_str("])\n");
         self.exec_plan.print_inner(indent + 2, out);

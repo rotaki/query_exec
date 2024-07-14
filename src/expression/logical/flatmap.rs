@@ -4,6 +4,234 @@ use crate::Field;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 impl LogicalRelExpr {
+    pub fn try_flatmap_mark(
+        self,
+        optimize: bool,
+        enabled_rules: &HeuristicRulesRef,
+        col_id_gen: &ColIdGenRef,
+        func: LogicalRelExpr,
+        mark_id: usize,
+    ) -> Option<LogicalRelExpr> {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::Decorrelate) {
+            if func.free().is_empty() {
+                return Some(self.join(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::LeftMarkJoin(mark_id),
+                    func,
+                    BTreeSet::new(),
+                ));
+            }
+
+            // Depth first search until cardinality changing operator is found.
+            // The values returned by the function are not used so we do not care
+            // about projections, maps, or orderbys after the select.
+            match func {
+                LogicalRelExpr::Select { src, predicates } => {
+                    if src.free().is_empty() {
+                        return Some(self.join(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            JoinType::LeftMarkJoin(mark_id),
+                            *src,
+                            predicates,
+                        ));
+                    } else {
+                        None
+                    }
+                }
+                LogicalRelExpr::Project { src, cols } => {
+                    self.try_flatmap_mark(true, enabled_rules, col_id_gen, *src, mark_id)
+                }
+                LogicalRelExpr::Map { input, exprs } => {
+                    self.try_flatmap_mark(true, enabled_rules, col_id_gen, *input, mark_id)
+                }
+                LogicalRelExpr::OrderBy { src, cols } => {
+                    self.try_flatmap_mark(true, enabled_rules, col_id_gen, *src, mark_id)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    // Flat map semi executes a function for each row in the input relation.
+    // The result of the function is NOT merged with the input relation.
+    // The input relation is NOT preserved in the output.
+    // The output might have fewer rows than the input relation.
+    // When the function returns 0 input for a row, the row is removed from the output.
+    pub fn try_flatmap_semi(
+        self,
+        optimize: bool,
+        enabled_rules: &HeuristicRulesRef,
+        col_id_gen: &ColIdGenRef,
+        func: LogicalRelExpr,
+    ) -> Option<LogicalRelExpr> {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::Decorrelate) {
+            if func.free().is_empty() {
+                return Some(self.join(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::LeftSemi,
+                    func,
+                    BTreeSet::new(),
+                ));
+            }
+
+            // Depth first search until cardinality changing operator is found.
+            // The values returned by the function are not used so we do not care
+            // about projections, maps, or orderbys after the select.
+            match func {
+                // Cardinality changing operators
+                LogicalRelExpr::Select { src, predicates } => {
+                    if src.free().is_empty() {
+                        return Some(self.join(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            JoinType::LeftSemi,
+                            *src,
+                            predicates,
+                        ));
+                    } else {
+                        None
+                    }
+                }
+                // Non-cardinality changing operators
+                LogicalRelExpr::Project { src, cols } => {
+                    self.try_flatmap_semi(true, enabled_rules, col_id_gen, *src)
+                }
+                LogicalRelExpr::Map { input, exprs } => {
+                    self.try_flatmap_semi(true, enabled_rules, col_id_gen, *input)
+                }
+                LogicalRelExpr::OrderBy { src, cols } => {
+                    self.try_flatmap_semi(true, enabled_rules, col_id_gen, *src)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn try_flatmap_anti(
+        self,
+        optimize: bool,
+        enabled_rules: &HeuristicRulesRef,
+        col_id_gen: &ColIdGenRef,
+        func: LogicalRelExpr,
+    ) -> Option<LogicalRelExpr> {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::Decorrelate) {
+            if func.free().is_empty() {
+                return Some(self.join(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::LeftAnti,
+                    func,
+                    BTreeSet::new(),
+                ));
+            }
+
+            // Depth first search until cardinality changing operator is found.
+            // The values returned by the function are not used so we do not care
+            // about projections, maps, or orderbys after the select.
+            match func {
+                // Cardinality changing operators
+                LogicalRelExpr::Select { src, predicates } => {
+                    if src.free().is_empty() {
+                        return Some(self.join(
+                            true,
+                            enabled_rules,
+                            col_id_gen,
+                            JoinType::LeftAnti,
+                            *src,
+                            predicates,
+                        ));
+                    } else {
+                        None
+                    }
+                }
+                // Non-cardinality changing operators
+                LogicalRelExpr::Project { src, cols } => {
+                    self.try_flatmap_anti(true, enabled_rules, col_id_gen, *src)
+                }
+                LogicalRelExpr::Map { input, exprs } => {
+                    self.try_flatmap_anti(true, enabled_rules, col_id_gen, *input)
+                }
+                LogicalRelExpr::OrderBy { src, cols } => {
+                    self.try_flatmap_anti(true, enabled_rules, col_id_gen, *src)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    // Flat map outer executes a function for each row in the input relation.
+    // The result of the function is merged with the input relation.
+    // The input relation is preserved in the output.
+    // The output might have more rows than the input relation if there are multiple matches
+    // with the output of the function.
+    // When the function returns 0 input for a row,
+    // the row is merged with a NULL value and added to the output.
+    pub fn try_flatmap_outer(
+        self,
+        optimize: bool,
+        enabled_rules: &HeuristicRulesRef,
+        col_id_gen: &ColIdGenRef,
+        func: LogicalRelExpr,
+    ) -> Option<LogicalRelExpr> {
+        if optimize && enabled_rules.is_enabled(&HeuristicRule::Decorrelate) {
+            if func.free().is_empty() {
+                return Some(self.join(
+                    true,
+                    enabled_rules,
+                    col_id_gen,
+                    JoinType::LeftOuter,
+                    func,
+                    BTreeSet::new(),
+                ));
+            }
+
+            match func {
+                LogicalRelExpr::Select { src, predicates }
+                    if predicates.iter().all(|p| !p.has_null()) =>
+                {
+                    self.try_flatmap_outer(true, enabled_rules, col_id_gen, *src)
+                        .map(|p| p.select(true, enabled_rules, col_id_gen, predicates))
+                }
+                LogicalRelExpr::Project { src, cols } => self
+                    .try_flatmap_outer(true, enabled_rules, col_id_gen, *src)
+                    .map(|p| {
+                        p.u_project(true, enabled_rules, col_id_gen, cols.into_iter().collect())
+                    }),
+                LogicalRelExpr::Map { input, exprs }
+                    if exprs.iter().all(|(_, expr)| !expr.has_null()) =>
+                {
+                    self.try_flatmap_outer(true, enabled_rules, col_id_gen, *input)
+                        .map(|p| p.map(true, enabled_rules, col_id_gen, exprs))
+                }
+                LogicalRelExpr::OrderBy { src, cols } => self
+                    .try_flatmap_outer(true, enabled_rules, col_id_gen, *src)
+                    .map(|p| p.order_by(true, enabled_rules, col_id_gen, cols)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    // Flat map executes a function for each row in the input relation.
+    // The result of the function is merged with the input relation.
+    // The input relation is NOT preserved in the output.
+    // When the function returns 0 input for a input row,
+    // the row is removed from the output.
     pub fn flatmap(
         self,
         optimize: bool,
@@ -18,7 +246,7 @@ impl LogicalRelExpr {
                     true,
                     enabled_rules,
                     col_id_gen,
-                    JoinType::CrossJoin,
+                    JoinType::CrossJoin, // A cross join with an empty relation results in an empty relation.
                     func,
                     BTreeSet::new(),
                 );
@@ -59,6 +287,7 @@ impl LogicalRelExpr {
                         exprs,
                     );
                 }
+                // Pull up OrderBy
                 LogicalRelExpr::OrderBy { src, cols } => {
                     return self
                         .flatmap(true, enabled_rules, col_id_gen, *src)

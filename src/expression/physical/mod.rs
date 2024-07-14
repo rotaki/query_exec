@@ -264,19 +264,28 @@ impl PlanTrait for PhysicalRelExpr {
                 ));
                 let mut split = "";
                 out.push_str("eq: (");
-                for (left, right) in equalities {
+                for i in 0..equalities.len().min(5) {
                     out.push_str(split);
+                    let (left, right) = &equalities[i];
                     left.print_inner(0, out);
                     out.push('=');
                     right.print_inner(0, out);
                     split = " && ";
+                    if equalities.len() > 5 && i == 4 {
+                        out.push_str(&format!("...len={}", equalities.len()));
+                        break;
+                    }
                 }
                 out.push_str("), filter: (");
                 split = "";
-                for pred in filter {
+                for i in 0..filter.len().min(5) {
                     out.push_str(split);
-                    pred.print_inner(0, out);
+                    filter[i].print_inner(0, out);
                     split = " && ";
+                    if filter.len() > 5 && i == 4 {
+                        out.push_str(&format!("...len={}", filter.len()));
+                        break;
+                    }
                 }
                 out.push_str("))\n");
                 left.print_inner(indent + 2, out);
@@ -288,10 +297,14 @@ impl PlanTrait for PhysicalRelExpr {
             } => {
                 out.push_str(&format!("{}-> project(", " ".repeat(indent)));
                 let mut split = "";
-                for col in cols {
+                for i in 0..cols.len().min(5) {
                     out.push_str(split);
-                    out.push_str(&format!("@{}", col));
+                    out.push_str(&format!("@{}", cols[i]));
                     split = ", ";
+                    if cols.len() > 5 && i == 4 {
+                        out.push_str(&format!("...len={}", cols.len()));
+                        break;
+                    }
                 }
                 out.push_str(")\n");
                 src.print_inner(indent + 2, out);
@@ -311,18 +324,27 @@ impl PlanTrait for PhysicalRelExpr {
                 out.push_str(&format!("{}-> aggregate(", " ".repeat(indent)));
                 out.push_str("group_by: [");
                 let mut split = "";
-                for col in group_by {
+                for i in 0..group_by.len().min(5) {
                     out.push_str(split);
-                    out.push_str(&format!("@{}", col));
+                    out.push_str(&format!("@{}", group_by[i]));
                     split = ", ";
+                    if group_by.len() > 5 && i == 4 {
+                        out.push_str(&format!("...len={}", group_by.len()));
+                        break;
+                    }
                 }
                 out.push_str("], ");
                 out.push_str("aggrs: [");
                 let mut split = "";
-                for (id, (input_id, op)) in aggrs {
+                for i in 0..aggrs.len().min(5) {
+                    let (id, (input_id, op)) = &aggrs[i];
                     out.push_str(split);
                     out.push_str(&format!("@{} <- {:?}(@{})", id, op, input_id));
                     split = ", ";
+                    if aggrs.len() > 5 && i == 4 {
+                        out.push_str(&format!("...len={}", aggrs.len()));
+                        break;
+                    }
                 }
                 out.push(']');
                 out.push_str(")\n");
@@ -344,17 +366,20 @@ impl PlanTrait for PhysicalRelExpr {
                 out.push_str(&format!("{}  λ.{:?}\n", " ".repeat(indent), func.free()));
                 func.print_inner(indent + 2, out);
             }
-            PhysicalRelExpr::Rename {
-                src,
-                src_to_dest: colsk,
-            } => {
+            PhysicalRelExpr::Rename { src, src_to_dest } => {
                 // Rename will be printed as @dest <- @src
                 out.push_str(&format!("{}-> rename(", " ".repeat(indent)));
                 let mut split = "";
-                for (src, dest) in colsk {
+                let mut count = 0;
+                for (src, dest) in src_to_dest {
                     out.push_str(split);
                     out.push_str(&format!("@{} <- @{}", dest, src));
                     split = ", ";
+                    count += 1;
+                    if count == 5 {
+                        out.push_str(&format!("...len={}", src_to_dest.len()));
+                        break;
+                    }
                 }
                 out.push_str(")\n");
                 src.print_inner(indent + 2, out);
@@ -824,7 +849,7 @@ impl LogicalToPhysicalExpression {
                 comp: *comp,
                 right: Box::new(LogicalToPhysicalRelExpr.to_physical(right.as_ref().clone())),
             },
-            Expression::UncorrelatedExists { expr } => Expression::UncorrelatedExists {
+            Expression::Exists { expr } => Expression::Exists {
                 expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
             },
         }

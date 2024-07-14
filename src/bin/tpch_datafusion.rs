@@ -5,7 +5,6 @@ mod bench {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::time::Instant;
 
     #[derive(Debug, Parser)]
@@ -14,11 +13,17 @@ mod bench {
         /// Run all queries.
         #[clap(short = 'a', long = "all", default_value = "false")]
         pub bench_all: bool,
+        /// Num warmups.
+        #[clap(short = 'w', long = "warmups", default_value = "2")]
+        pub warmups: usize,
+        /// Num runs.
+        #[clap(short = 'r', long = "runs", default_value = "3")]
+        pub runs: usize,
         /// Query ID. Should be in range [1, 22].
         #[clap(short = 'q', long = "query", default_value = "15")]
         pub query_id: usize,
         /// Scale factor. Should be in range [0.01, 100].
-        #[clap(short = 's', long = "scale factor", default_value = "0.1")]
+        #[clap(short = 's', long = "scale factor", default_value = "1")]
         pub scale_factor: f64,
     }
 
@@ -36,7 +41,7 @@ mod bench {
         }
 
         // Initialize DataFusion context
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
 
         // Register tables
         let table_names = vec![
@@ -59,14 +64,14 @@ mod bench {
                 let query_path = format!("tpch/queries/q{}.sql", query_id);
                 let query = fs::read_to_string(query_path)?;
                 println!("====== Warming up query {} ======", query_id);
-                for _ in 0..3 {
+                for _ in 0..opt.warmups {
                     let df = ctx.sql(&query).await?;
                     let result = df.collect().await?;
                     println!("Warm up result produced {} rows.", result.len());
                 }
 
                 println!("====== Running query {} ======", query_id);
-                for _ in 0..10 {
+                for _ in 0..opt.runs {
                     let start = Instant::now();
                     let df = ctx.sql(&query).await?;
                     let result = df.collect().await?;
@@ -89,12 +94,11 @@ mod bench {
             // Name the file tpch_datafusion_results_sf_<scale_factor>.csv
             let file_name = format!("tpch_datafusion_results_sf_{}.csv", opt.scale_factor);
             let mut writer = csv::Writer::from_path(&file_name).unwrap();
-            writer
-                .write_record(&[
-                    "query_id", "time1", "time2", "time3", "time4", "time5", "time6", "time7",
-                    "time8", "time9", "time10",
-                ])
-                .unwrap();
+            let mut record = vec!["query_id".to_string()];
+            for i in 1..=opt.runs {
+                record.push(format!("time{}", i));
+            }
+            writer.write_record(&record).unwrap();
             for (query_id, times) in results {
                 let mut record = Vec::with_capacity(1 + times.len());
                 record.push(query_id.to_string());
