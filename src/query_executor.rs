@@ -9,7 +9,7 @@ use sqlparser::{dialect::GenericDialect, parser::Parser};
 
 use crate::catalog::CatalogRef;
 use crate::error::ExecError;
-use crate::executor::{Executor, TupleBuffer};
+use crate::executor::{Executor, TupleBuffer, TupleBufferIter};
 use crate::expression::prelude::{
     HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr, LogicalToPhysicalRelExpr,
     PhysicalRelExpr,
@@ -19,10 +19,10 @@ use crate::loader::DataLoader;
 use crate::parser::{Translator, TranslatorError};
 use crate::prelude::{ColumnDef, DataType, Schema, SchemaRef, Table};
 
-pub fn print_tuples(tuples: Arc<TupleBuffer<impl TxnStorageTrait>>) {
+pub fn print_tuples(tuples: Arc<impl TupleBuffer>) {
     let mut count = 0;
-    let tuples = tuples.iter_all();
-    while let Some(t) = tuples.next() {
+    let tuples = tuples.iter();
+    while let Some(t) = tuples.next().unwrap() {
         count += 1;
         println!("{}", t.to_pretty_string());
     }
@@ -147,10 +147,7 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
     }
 
     // Executes the query and returns the result.
-    pub fn execute<E: Executor<T>>(
-        &self,
-        exec: E,
-    ) -> Result<Arc<TupleBuffer<T>>, QueryExecutorError> {
+    pub fn execute<E: Executor<T>>(&self, exec: E) -> Result<Arc<E::Buffer>, QueryExecutorError> {
         let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
         let result = exec.execute(&txn)?;
         self.storage.commit_txn(&txn, false)?;
@@ -467,15 +464,15 @@ mod tests {
         c_id
     }
 
-    fn check_result<T: TxnStorageTrait>(
-        result: Arc<TupleBuffer<T>>,
+    fn check_result(
+        result: Arc<impl TupleBuffer>,
         expected: &mut [Tuple],
         sorted: bool,
         verbose: bool,
     ) {
         let mut vec = Vec::new();
-        let result = result.iter_all();
-        while let Some(t) = result.next() {
+        let result = result.iter();
+        while let Some(t) = result.next().unwrap() {
             vec.push(t);
         }
         let mut result = vec;
@@ -520,7 +517,7 @@ mod tests {
         executor: &QueryExecutor<T>,
         sql_string: &str,
         verbose: bool,
-    ) -> Arc<TupleBuffer<T>> {
+    ) -> Arc<impl TupleBuffer> {
         let logical_plan = executor.to_logical(sql_string).unwrap();
         if verbose {
             println!("=== Logical Plan ===");

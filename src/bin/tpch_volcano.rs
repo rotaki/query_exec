@@ -1,6 +1,6 @@
 use clap::Parser;
 use query_exec::{
-    prelude::{Catalog, DatabaseEngine, Executor, VolcanoIterator},
+    prelude::{Catalog, DatabaseEngine, Executor, TupleBuffer, VolcanoIterator},
     ContainerType, InMemStorage,
 };
 use std::{
@@ -88,7 +88,7 @@ fn main() {
                 let exec =
                     query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical.clone());
                 let result = query_executor.execute(exec).unwrap();
-                println!("Warm up result num rows: {}", result.num_tuples().unwrap());
+                println!("Warm up result num rows: {}", result.num_tuples());
             }
             println!("====== Measuring query {} ======", query_id);
             for _ in 0..10 {
@@ -101,7 +101,7 @@ fn main() {
                     "Query {} took {:?}, num rows: {}",
                     query_id,
                     elapsed,
-                    result.num_tuples().unwrap()
+                    result.num_tuples()
                 );
                 results
                     .entry(query_id)
@@ -149,7 +149,7 @@ fn main() {
             "Query {} took {:?}, num rows: {}",
             opt.query_id,
             elapsed,
-            result.num_tuples().unwrap()
+            result.num_tuples()
         );
     }
 }

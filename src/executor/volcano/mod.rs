@@ -1,9 +1,11 @@
+mod result_buffer;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 
 use fbtree::prelude::*;
+use result_buffer::ResultBuffer;
 
 use crate::{
     catalog::{
@@ -17,7 +19,7 @@ use crate::{
     ColumnId, Field,
 };
 
-use super::{bytecode_expr::ByteCodeExpr, Executor, TupleBuffer};
+use super::{bytecode_expr::ByteCodeExpr, Executor};
 
 type Key = Vec<u8>;
 
@@ -34,6 +36,8 @@ pub enum VolcanoIterator<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
+    type Buffer = ResultBuffer;
+
     fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
         let mut physical_to_op = PhysicalRelExprToOpIter::new(storage);
         physical_to_op.convert(catalog, physical_plan)
@@ -45,13 +49,13 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
         out
     }
 
-    fn execute(mut self, txn: &T::TxnHandle) -> Result<Arc<TupleBuffer<T>>, ExecError> {
-        let results = Arc::new(TupleBuffer::vec());
+    fn execute(mut self, txn: &T::TxnHandle) -> Result<Arc<Self::Buffer>, ExecError> {
+        let results = Arc::new(ResultBuffer::new());
         loop {
             log_trace!("------------ VolcanoIterator::next ------------");
             match self.next(txn)? {
                 Some((_, tuple)) => {
-                    results.append(tuple).unwrap();
+                    results.push(tuple);
                 }
                 None => {
                     return Ok(results);
