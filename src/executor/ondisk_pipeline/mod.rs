@@ -1168,30 +1168,35 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Pipeline<T,
 pub struct OnDiskPipelineGraph<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
     pipelines: Vec<Pipeline<T, E, M>>,
     queue: VecDeque<Pipeline<T, E, M>>,
-    mem_pool: Arc<M>,
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipelineGraph<T, E, M> {
     pub fn new(
         db_id: DatabaseId,
+        intermediate_dest_c_id: ContainerId,
         catalog: &CatalogRef,
         storage: &Arc<T>,
         mem_pool: &Arc<M>,
         policy: &Arc<MemoryPolicy>,
         physical_plan: PhysicalRelExpr,
     ) -> Self {
-        let converter = PhysicalRelExprToPipelineQueue::new(db_id, storage, mem_pool, policy);
-        
+        let converter = PhysicalRelExprToPipelineQueue::new(
+            db_id,
+            intermediate_dest_c_id,
+            storage,
+            mem_pool,
+            policy,
+        );
+
         converter
             .convert(catalog.clone(), physical_plan)
             .expect("Failed to convert physical plan")
     }
 
-    fn empty(mem_pool: &Arc<M>) -> Self {
+    fn empty() -> Self {
         Self {
             pipelines: Vec::new(),
             queue: VecDeque::new(),
-            mem_pool: mem_pool.clone(),
         }
     }
 
@@ -1289,6 +1294,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 {
     fn new(
         db_id: DatabaseId,
+        intermediate_dest_c_id: ContainerId,
         storage: &Arc<T>,
         mem_pool: &Arc<M>,
         policy: &Arc<MemoryPolicy>,
@@ -1296,11 +1302,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
         Self {
             current_id: 0,
             db_id,
-            dest_c_id: 1000, // Arbitrary container ID for the output of the pipelines
+            dest_c_id: intermediate_dest_c_id,
             storage: storage.clone(),
             mem_pool: mem_pool.clone(),
             policy: policy.clone(),
-            pipeline_queue: OnDiskPipelineGraph::empty(mem_pool),
+            pipeline_queue: OnDiskPipelineGraph::empty(),
         }
     }
 

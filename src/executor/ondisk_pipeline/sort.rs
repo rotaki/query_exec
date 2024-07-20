@@ -480,7 +480,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 sort_buffer.sort();
                 let iter = SortBufferIter::new(&sort_buffer);
                 let output = {
-                    
                     Arc::new(FosterBtree::bulk_insert_create(
                         dest_c_key,
                         mem_pool.clone(),
@@ -501,7 +500,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         sort_buffer.sort();
         let iter = SortBufferIter::new(&sort_buffer);
         let output = {
-            
             Arc::new(FosterBtree::bulk_insert_create(
                 dest_c_key,
                 mem_pool.clone(),
@@ -549,10 +547,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 println!("Total merge steps: {}", num_merge_steps);
                 runs.pop().unwrap()
             }
-            MemoryPolicy::Unbounded => {
-                
-                self.merge_step(runs, mem_pool, dest_c_key)
-            }
+            MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
             MemoryPolicy::Proportional(rate) => {
                 unimplemented!("Proportional memory policy is not implemented yet");
             }
@@ -844,12 +839,8 @@ mod tests {
             // Dataset 2
             let mut tuples_2 = Vec::new();
             for i in 0..num_tuples {
-                let tuple = Tuple::from_fields(vec![
-                    (i + num_tuples).into(),
-                    1.into(),
-                    2.into(),
-                    3.into(),
-                ]);
+                let tuple =
+                    Tuple::from_fields(vec![(i + num_tuples).into(), 1.into(), 2.into(), 3.into()]);
                 tuples_2.push(tuple);
             }
             let tuples_2 = gen_random_permutation(tuples_2);
