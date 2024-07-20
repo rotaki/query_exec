@@ -1491,10 +1491,10 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                 predicates,
             } => {
                 let (left_op, left_context, left_col_id_to_idx) =
-                    self.convert_inner(&catalog, *left)?;
+                    self.convert_inner(catalog, *left)?;
                 let left_len = left_col_id_to_idx.len();
                 let (right_op, right_context, right_col_id_to_idx) =
-                    self.convert_inner(&catalog, *right)?;
+                    self.convert_inner(catalog, *right)?;
                 let context = left_context.into_iter().chain(right_context).collect();
 
                 let mut col_id_to_idx = left_col_id_to_idx;
@@ -1531,9 +1531,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                 filter,
             } => {
                 let (left_op, left_context, left_col_id_to_idx) =
-                    self.convert_inner(&catalog, *left)?;
+                    self.convert_inner(catalog, *left)?;
                 let (right_op, right_context, right_col_id_to_idx) =
-                    self.convert_inner(&catalog, *right)?;
+                    self.convert_inner(catalog, *right)?;
                 let left_len = left_col_id_to_idx.len();
 
                 // The left will be the build side and the right will be the probe side

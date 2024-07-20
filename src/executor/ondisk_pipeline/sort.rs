@@ -10,15 +10,12 @@
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
-    fmt::Binary,
-    result,
     sync::Arc,
 };
 
 use crate::{
     error::ExecError,
     executor::TupleBuffer,
-    log_debug,
     prelude::{Page, PageId, SchemaRef, AVAILABLE_PAGE_SIZE},
     tuple::Tuple,
     ColumnId,
@@ -95,11 +92,9 @@ mod slot {
         }
     }
 }
-use bincode::de;
 use fbtree::{
     access_method::fbt::FosterBtreeRangeScanner,
     bp::{ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
-    log_info,
     prelude::FosterBtree,
     txn_storage::TxnStorageTrait,
 };
@@ -485,12 +480,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 sort_buffer.sort();
                 let iter = SortBufferIter::new(&sort_buffer);
                 let output = {
-                    let tree = Arc::new(FosterBtree::bulk_insert_create(
+                    
+                    Arc::new(FosterBtree::bulk_insert_create(
                         dest_c_key,
                         mem_pool.clone(),
                         iter,
-                    ));
-                    tree
+                    ))
                 };
                 result_buffers.push(output);
 
@@ -506,12 +501,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         sort_buffer.sort();
         let iter = SortBufferIter::new(&sort_buffer);
         let output = {
-            let tree = Arc::new(FosterBtree::bulk_insert_create(
+            
+            Arc::new(FosterBtree::bulk_insert_create(
                 dest_c_key,
                 mem_pool.clone(),
                 iter,
-            ));
-            tree
+            ))
         };
         result_buffers.push(output);
 
@@ -545,7 +540,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                             merged_runs.push(k_runs[0].clone());
                         } else {
                             num_merge_steps += 1;
-                            let merged_run = self.merge_step(k_runs, mem_pool, dest_c_key.clone());
+                            let merged_run = self.merge_step(k_runs, mem_pool, dest_c_key);
                             merged_runs.push(merged_run);
                         }
                     }
@@ -555,8 +550,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 runs.pop().unwrap()
             }
             MemoryPolicy::Unbounded => {
-                let merged_run = self.merge_step(runs, mem_pool, dest_c_key.clone());
-                merged_run
+                
+                self.merge_step(runs, mem_pool, dest_c_key)
             }
             MemoryPolicy::Proportional(rate) => {
                 unimplemented!("Proportional memory policy is not implemented yet");
@@ -850,7 +845,7 @@ mod tests {
             let mut tuples_2 = Vec::new();
             for i in 0..num_tuples {
                 let tuple = Tuple::from_fields(vec![
-                    (i + num_tuples as i64).into(),
+                    (i + num_tuples).into(),
                     1.into(),
                     2.into(),
                     3.into(),
@@ -886,7 +881,7 @@ mod tests {
 
     mod external_sort {
         use fbtree::{
-            bp::{BufferPoolForTest, ContainerKey, LRUEvictionPolicy, MemPool},
+            bp::{BufferPoolForTest, ContainerKey, LRUEvictionPolicy},
             prelude::AppendOnlyStore,
             random::{gen_random_permutation, RandomKVs},
             txn_storage::InMemStorage,
@@ -957,7 +952,7 @@ mod tests {
             let c_key = get_c_key(0);
             let num_kvs = 10000;
             let append_only_store = Arc::new(AppendOnlyStore::new(c_key, bp.clone()));
-            let keys = gen_random_permutation((0..num_kvs).into_iter().collect::<Vec<_>>());
+            let keys = gen_random_permutation((0..num_kvs).collect::<Vec<_>>());
             let mut expected = Vec::new();
             for k in keys {
                 let tuple = Tuple::from_fields(vec![k.into(), 1.into(), 2.into(), 3.into()]);
@@ -1029,7 +1024,7 @@ mod tests {
             let c_key = get_c_key(0);
             let num_kvs = 10000;
             let append_only_store = Arc::new(AppendOnlyStore::new(c_key, bp.clone()));
-            let keys = gen_random_permutation((0..num_kvs).into_iter().collect::<Vec<_>>());
+            let keys = gen_random_permutation((0..num_kvs).collect::<Vec<_>>());
             let mut expected = Vec::new();
             for k in keys {
                 let tuple = Tuple::from_fields(vec![k.into(), 1.into(), 2.into(), 3.into()]);

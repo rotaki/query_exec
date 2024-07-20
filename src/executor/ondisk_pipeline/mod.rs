@@ -14,7 +14,7 @@ use sort::OnDiskSort;
 
 use crate::{
     error::ExecError,
-    expression::{AggOp, Expression, JoinType},
+    expression::Expression,
     log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
@@ -1180,11 +1180,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
         policy: &Arc<MemoryPolicy>,
         physical_plan: PhysicalRelExpr,
     ) -> Self {
-        let converter = PhysicalRelExprToPipelineQueue::new(db_id, &storage, &mem_pool, &policy);
-        let pipeline_queue = converter
+        let converter = PhysicalRelExprToPipelineQueue::new(db_id, storage, mem_pool, policy);
+        
+        converter
             .convert(catalog.clone(), physical_plan)
-            .expect("Failed to convert physical plan");
-        pipeline_queue
+            .expect("Failed to convert physical plan")
     }
 
     fn empty(mem_pool: &Arc<M>) -> Self {
@@ -1300,7 +1300,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
             storage: storage.clone(),
             mem_pool: mem_pool.clone(),
             policy: policy.clone(),
-            pipeline_queue: OnDiskPipelineGraph::empty(&mem_pool),
+            pipeline_queue: OnDiskPipelineGraph::empty(mem_pool),
         }
     }
 
