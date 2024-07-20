@@ -1,5 +1,4 @@
 mod catalog;
-mod database_engine;
 mod error;
 mod executor;
 mod expression;
@@ -20,8 +19,7 @@ pub use logger::log;
 pub mod prelude {
     pub use super::{ColumnId, Field};
     pub use crate::catalog::prelude::*;
-    pub use crate::database_engine::DatabaseEngine;
     pub use crate::executor::prelude::*;
-    pub use crate::query_executor::{print_tuples, QueryExecutor, QueryExecutorError};
+    pub use crate::query_executor::*;
     pub use fbtree::prelude::*;
 }

@@ -1,4 +1,4 @@
-mod mem_buffer;
+mod inmem_buffer;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -19,7 +19,7 @@ use crate::{
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
 use super::{TupleBuffer, TupleBufferIter};
-use mem_buffer::{InMemBuffer, InMemBufferIter};
+use inmem_buffer::{InMemBuffer, InMemBufferIter};
 
 // Pipeline iterators are non-blocking.
 pub enum NonBlockingOp<T: TxnStorageTrait> {
@@ -1248,26 +1248,28 @@ impl<T: TxnStorageTrait> Pipeline<T> {
     }
 }
 
-pub struct PipelineQueue<T: TxnStorageTrait> {
+pub struct InMemPipelineGraph<T: TxnStorageTrait> {
     pipelines: Vec<Pipeline<T>>,
     queue: VecDeque<Pipeline<T>>,
 }
 
-impl<T: TxnStorageTrait> Default for PipelineQueue<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+impl<T: TxnStorageTrait> InMemPipelineGraph<T> {
+    pub fn new(catalog: &CatalogRef, storage: &Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
+        let converter = PhysicalRelExprToPipelineQueue::new(storage);
 
-impl<T: TxnStorageTrait> PipelineQueue<T> {
-    pub fn new() -> Self {
+        converter
+            .convert(catalog, physical_plan)
+            .expect("Failed to convert physical plan")
+    }
+
+    fn empty() -> Self {
         Self {
             pipelines: Vec::new(),
             queue: VecDeque::new(),
         }
     }
 
-    pub fn add_pipeline(&mut self, pipeline: Pipeline<T>) {
+    fn add_pipeline(&mut self, pipeline: Pipeline<T>) {
         self.pipelines.push(pipeline);
     }
 
@@ -1299,15 +1301,8 @@ impl<T: TxnStorageTrait> PipelineQueue<T> {
     }
 }
 
-impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
+impl<T: TxnStorageTrait> Executor<T> for InMemPipelineGraph<T> {
     type Buffer = InMemBuffer<T>;
-    fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
-        let converter = PhysicalRelExprToPipelineQueue::new(storage);
-
-        converter
-            .convert(catalog, physical_plan)
-            .expect("Failed to convert physical plan")
-    }
 
     fn to_pretty_string(&self) -> String {
         let mut result = String::new();
@@ -1348,17 +1343,17 @@ impl<T: TxnStorageTrait> Executor<T> for PipelineQueue<T> {
 pub struct PhysicalRelExprToPipelineQueue<T: TxnStorageTrait> {
     pub current_id: PipelineID, // Incremental pipeline ID
     pub storage: Arc<T>,
-    pub pipeline_queue: PipelineQueue<T>,
+    pub pipeline_queue: InMemPipelineGraph<T>,
 }
 
 type ColIdToIdx = BTreeMap<ColumnId, usize>;
 
 impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
-    pub fn new(storage: Arc<T>) -> Self {
+    pub fn new(storage: &Arc<T>) -> Self {
         Self {
             current_id: 0,
-            storage,
-            pipeline_queue: PipelineQueue::new(),
+            storage: storage.clone(),
+            pipeline_queue: InMemPipelineGraph::empty(),
         }
     }
 
@@ -1370,9 +1365,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
 
     pub fn convert(
         mut self,
-        catalog: CatalogRef,
+        catalog: &CatalogRef,
         expr: PhysicalRelExpr,
-    ) -> Result<PipelineQueue<T>, ExecError> {
+    ) -> Result<InMemPipelineGraph<T>, ExecError> {
         let (op, context, _) = self.convert_inner(catalog, expr)?;
         // if let NonBlockingOp::Scan(PScanIter {
         //     schema,
@@ -1401,7 +1396,7 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
 
     fn convert_inner(
         &mut self,
-        catalog: CatalogRef,
+        catalog: &CatalogRef,
         expr: PhysicalRelExpr,
     ) -> Result<
         (
@@ -1496,10 +1491,10 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                 predicates,
             } => {
                 let (left_op, left_context, left_col_id_to_idx) =
-                    self.convert_inner(catalog.clone(), *left)?;
+                    self.convert_inner(&catalog, *left)?;
                 let left_len = left_col_id_to_idx.len();
                 let (right_op, right_context, right_col_id_to_idx) =
-                    self.convert_inner(catalog, *right)?;
+                    self.convert_inner(&catalog, *right)?;
                 let context = left_context.into_iter().chain(right_context).collect();
 
                 let mut col_id_to_idx = left_col_id_to_idx;
@@ -1536,9 +1531,9 @@ impl<T: TxnStorageTrait> PhysicalRelExprToPipelineQueue<T> {
                 filter,
             } => {
                 let (left_op, left_context, left_col_id_to_idx) =
-                    self.convert_inner(catalog.clone(), *left)?;
+                    self.convert_inner(&catalog, *left)?;
                 let (right_op, right_context, right_col_id_to_idx) =
-                    self.convert_inner(catalog, *right)?;
+                    self.convert_inner(&catalog, *right)?;
                 let left_len = left_col_id_to_idx.len();
 
                 // The left will be the build side and the right will be the probe side

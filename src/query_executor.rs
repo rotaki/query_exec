@@ -1,9 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use fbtree::bp::EvictionPolicy;
 use fbtree::prelude::{
     ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
 };
+use fbtree::txn_storage::{DBOptions, TxnOptions};
 use sqlparser::parser::ParserError;
 use sqlparser::{dialect::GenericDialect, parser::Parser};
 
@@ -11,8 +13,7 @@ use crate::catalog::CatalogRef;
 use crate::error::ExecError;
 use crate::executor::{Executor, TupleBuffer, TupleBufferIter};
 use crate::expression::prelude::{
-    HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr, LogicalToPhysicalRelExpr,
-    PhysicalRelExpr,
+    HeuristicRules, LogicalRelExpr, LogicalToPhysicalRelExpr, PhysicalRelExpr,
 };
 use crate::loader::prelude::SimpleCsvLoader;
 use crate::loader::DataLoader;
@@ -65,6 +66,240 @@ impl From<TxnStorageStatus> for QueryExecutorError {
     }
 }
 
+pub fn parse_sql(sql: &str) -> Result<sqlparser::ast::Query, QueryExecutorError> {
+    let dialect = GenericDialect {};
+    let statements = Parser::new(&dialect)
+        .try_with_sql(sql)?
+        .parse_statements()?;
+    let query = {
+        let statement = statements.into_iter().next().unwrap();
+        match statement {
+            sqlparser::ast::Statement::Query(query) => query,
+            other => {
+                return Err(QueryExecutorError::InvalidSqlString(
+                    ParserError::ParserError(format!("Expected a query, got {:?}", other)),
+                ))
+            }
+        }
+    };
+    Ok(*query)
+}
+
+pub fn to_logical(
+    db_id: DatabaseId,
+    catalog_ref: &CatalogRef,
+    sql_string: &str,
+) -> Result<LogicalRelExpr, QueryExecutorError> {
+    let query = parse_sql(sql_string)?;
+    let logical_rules = Arc::new(HeuristicRules::default());
+    let mut translator = Translator::new(db_id, catalog_ref, &logical_rules);
+    let result = translator.process_query(&query)?;
+    Ok(result.plan)
+}
+
+pub fn to_physical(logical_plan: LogicalRelExpr) -> PhysicalRelExpr {
+    LogicalToPhysicalRelExpr.to_physical(logical_plan)
+}
+
+pub fn execute<T: TxnStorageTrait, E: Executor<T>>(
+    db_id: DatabaseId,
+    storage: &Arc<T>,
+    exec: E,
+    verbose: bool,
+) -> Arc<impl TupleBuffer> {
+    if verbose {
+        println!("=== Executor ===");
+        println!("{}", exec.to_pretty_string());
+    }
+    let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+    let result = exec.execute(&txn).unwrap();
+    storage.commit_txn(&txn, false).unwrap();
+    result
+}
+
+fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorError> {
+    let dialect = GenericDialect {};
+    let statements = Parser::new(&dialect)
+        .try_with_sql(sql)?
+        .parse_statements()?;
+    let statement = statements.into_iter().next().unwrap();
+    match statement {
+        sqlparser::ast::Statement::CreateTable {
+            name,
+            columns,
+            constraints,
+            ..
+        } => {
+            // Create a schema
+            let col_defs = columns
+                .iter()
+                .map(|c| {
+                    let data_type = match &c.data_type {
+                        sqlparser::ast::DataType::Int(_) | sqlparser::ast::DataType::Integer(_) => {
+                            DataType::Int
+                        }
+                        sqlparser::ast::DataType::Text => DataType::String,
+                        sqlparser::ast::DataType::Boolean => DataType::Boolean,
+                        sqlparser::ast::DataType::Float(_)
+                        | sqlparser::ast::DataType::Double
+                        | sqlparser::ast::DataType::Decimal(_) => DataType::Float,
+                        sqlparser::ast::DataType::Char(_) => DataType::String,
+                        sqlparser::ast::DataType::Varchar(_) => DataType::String,
+                        sqlparser::ast::DataType::Date => DataType::Date,
+                        other => {
+                            return Err(QueryExecutorError::InvalidSqlString(
+                                ParserError::ParserError(format!(
+                                    "Unsupported data type: {:?}",
+                                    other
+                                )),
+                            ))
+                        }
+                    };
+                    let not_null = c
+                        .options
+                        .iter()
+                        .any(|o| matches!(o.option, sqlparser::ast::ColumnOption::NotNull));
+                    Ok(ColumnDef::new(&c.name.value, data_type, !not_null))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Find the column index of the primary key.
+            let inline_pk = columns
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| {
+                    c.options
+                        .iter()
+                        .find(|o| {
+                            matches!(
+                                o.option,
+                                sqlparser::ast::ColumnOption::Unique {
+                                    is_primary: true,
+                                    ..
+                                }
+                            )
+                        })
+                        .map(|_| i)
+                })
+                .collect::<Vec<_>>();
+            let external_pk = constraints.iter().find_map(|c| match c {
+                sqlparser::ast::TableConstraint::PrimaryKey { columns: pks, .. } => Some(
+                    pks.iter()
+                        .map(|pk| {
+                            columns
+                                .iter()
+                                .position(|c| c.name.value == pk.value)
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            });
+            let primary_key = match (inline_pk.len(), external_pk) {
+                (0, None) => {
+                    return Err(QueryExecutorError::InvalidSqlString(
+                        ParserError::ParserError("Primary key not found".to_string()),
+                    ));
+                }
+                (1, None) => inline_pk,
+                (0, Some(pk)) => pk,
+                _ => {
+                    return Err(QueryExecutorError::InvalidSqlString(
+                        ParserError::ParserError(
+                            "Multiple primary keys are not supported".to_string(),
+                        ),
+                    ))
+                }
+            };
+            let schema = Arc::new(Schema::new(col_defs, primary_key));
+            // name joined with a .
+            let table_name = name.to_string();
+            Ok((table_name, schema))
+        }
+        other => Err(QueryExecutorError::InvalidSqlString(
+            ParserError::ParserError(format!(
+                "Expected a CREATE TABLE statement, got {:?}",
+                other
+            )),
+        )),
+    }
+}
+
+pub fn create_db<T: TxnStorageTrait>(
+    storage: &Arc<T>,
+    db_name: &str,
+) -> Result<DatabaseId, QueryExecutorError> {
+    let db_id = storage.open_db(DBOptions::new(db_name))?;
+    Ok(db_id)
+}
+
+pub fn create_table_from_sql<T: TxnStorageTrait>(
+    catalog_ref: &CatalogRef,
+    storage: &Arc<T>,
+    db_id: DatabaseId,
+    sql_string: &str,
+    container_type: ContainerType,
+) -> Result<ContainerId, QueryExecutorError> {
+    let (table_name, schema) = parse_create_table(sql_string)?;
+    create_table(
+        catalog_ref,
+        storage,
+        db_id,
+        &table_name,
+        schema,
+        container_type,
+    )
+}
+
+pub fn create_table<T: TxnStorageTrait>(
+    catalog_ref: &CatalogRef,
+    storage: &Arc<T>,
+    db_id: DatabaseId,
+    table_name: &str,
+    schema: SchemaRef,
+    container_type: ContainerType,
+) -> Result<ContainerId, QueryExecutorError> {
+    let txn = storage.begin_txn(&db_id, Default::default())?;
+    let c_id = storage.create_container(
+        &txn,
+        &db_id,
+        ContainerOptions::new(table_name, container_type),
+    )?;
+    catalog_ref.add_table(c_id, Arc::new(Table::new(table_name, schema)));
+    storage.commit_txn(&txn, false)?;
+    Ok(c_id)
+}
+
+pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
+    catalog_ref: &CatalogRef,
+    storage: &Arc<T>,
+    db_id: DatabaseId,
+    c_id: ContainerId,
+    csv_path: P,
+    has_header: bool,
+    delimiter: u8,
+) -> Result<(), QueryExecutorError> {
+    let rdr = csv::ReaderBuilder::new()
+        .has_headers(has_header)
+        .delimiter(delimiter)
+        .from_path(csv_path.as_ref())
+        .map_err(|e| QueryExecutorError::InvalidCSV(e.to_string()))?;
+    let mut loader = SimpleCsvLoader::new(rdr, storage.clone());
+    loader
+        .load_data(
+            catalog_ref
+                .get_schema(c_id)
+                .ok_or(QueryExecutorError::InvalidTable(
+                    "Table not found".to_string(),
+                ))?,
+            db_id,
+            c_id,
+        )
+        .map_err(|e| QueryExecutorError::InvalidCSV(e.to_string()))?;
+    Ok(())
+}
+
+/*
 pub struct QueryExecutor<T: TxnStorageTrait> {
     pub db_id: DatabaseId,
     pub catalog_ref: CatalogRef,
@@ -73,13 +308,12 @@ pub struct QueryExecutor<T: TxnStorageTrait> {
 }
 
 impl<T: TxnStorageTrait> QueryExecutor<T> {
-    pub fn new(db_id: DatabaseId, catalog_ref: CatalogRef, storage: Arc<T>) -> Self {
-        let logical_rules = HeuristicRules::new();
-        logical_rules.enable(HeuristicRule::Hoist);
-        logical_rules.enable(HeuristicRule::Decorrelate);
-        logical_rules.enable(HeuristicRule::SelectionPushdown);
-        logical_rules.enable(HeuristicRule::ProjectionPushdown);
-
+    pub fn new(
+        db_id: DatabaseId,
+        catalog_ref: CatalogRef,
+        storage: Arc<T>,
+    ) -> Self {
+        let logical_rules = HeuristicRules::default();
         QueryExecutor {
             db_id,
             catalog_ref,
@@ -136,18 +370,11 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
         LogicalToPhysicalRelExpr.to_physical(logical_plan)
     }
 
-    // Specifies a specific lifetime for the executor.
-    // The storage ensures that the iterator lives as long as the executor.
-    pub fn to_executable<E: Executor<T>>(&self, physical_plan: PhysicalRelExpr) -> E {
-        E::new(
-            self.catalog_ref.clone(),
-            self.storage.clone(),
-            physical_plan,
-        )
-    }
-
     // Executes the query and returns the result.
-    pub fn execute<E: Executor<T>>(&self, exec: E) -> Result<Arc<E::Buffer>, QueryExecutorError> {
+    pub fn execute<Exec: Executor<T>>(
+        &self,
+        exec: Exec,
+    ) -> Result<Arc<Exec::Buffer>, QueryExecutorError> {
         let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
         let result = exec.execute(&txn)?;
         self.storage.commit_txn(&txn, false)?;
@@ -270,51 +497,9 @@ impl<T: TxnStorageTrait> QueryExecutor<T> {
         self.create_table(&table_name, schema, container_type)
     }
 
-    pub fn create_table(
-        &self,
-        table_name: &str,
-        schema: SchemaRef,
-        container_type: ContainerType,
-    ) -> Result<ContainerId, QueryExecutorError> {
-        let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
-        let c_id = self.storage.create_container(
-            &txn,
-            &self.db_id,
-            ContainerOptions::new(table_name, container_type),
-        )?;
-        self.catalog_ref
-            .add_table(c_id, Arc::new(Table::new(table_name, schema)));
-        self.storage.commit_txn(&txn, false)?;
-        Ok(c_id)
-    }
 
-    pub fn import_csv<P: AsRef<Path>>(
-        &self,
-        c_id: ContainerId,
-        csv_path: P,
-        has_header: bool,
-        delimiter: u8,
-    ) -> Result<(), QueryExecutorError> {
-        let rdr = csv::ReaderBuilder::new()
-            .has_headers(has_header)
-            .delimiter(delimiter)
-            .from_path(csv_path.as_ref())
-            .map_err(|e| QueryExecutorError::InvalidCSV(e.to_string()))?;
-        let mut loader = SimpleCsvLoader::new(rdr, self.storage.clone());
-        loader
-            .load_data(
-                self.catalog_ref
-                    .get_schema(c_id)
-                    .ok_or(QueryExecutorError::InvalidTable(
-                        "Table not found".to_string(),
-                    ))?,
-                self.db_id,
-                c_id,
-            )
-            .map_err(|e| QueryExecutorError::InvalidCSV(e.to_string()))?;
-        Ok(())
-    }
 }
+    */
 
 #[cfg(test)]
 mod tests {
@@ -324,12 +509,18 @@ mod tests {
 
     use crate::{
         catalog::{Catalog, ColumnDef, DataType, Schema, Table},
-        executor::prelude::PipelineQueue,
+        executor::prelude::{InMemPipelineGraph, VolcanoIterator},
         tuple::Tuple,
         Field,
     };
 
     use super::*;
+
+    // Catalog implementation is common
+    // Storage implementation varies (InMemStorage, OnDiskStorage, ...)
+    // Logical Plans and Physical Plans are common
+    // Executor implementation varies (InMemPipelineQueue, OnDiskPipelineQueue, VolcanoIterator, ...)
+    // Different executors have different ways to construct it from a physical plan
 
     fn get_in_mem_storage() -> Arc<InMemStorage> {
         Arc::new(InMemStorage::new())
@@ -338,7 +529,7 @@ mod tests {
     fn setup_employees_table<T: TxnStorageTrait>(
         storage: impl AsRef<T>,
         db_id: DatabaseId,
-        catalog: &Catalog,
+        catalog: &CatalogRef,
     ) -> ContainerId {
         let storage = storage.as_ref();
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
@@ -407,7 +598,7 @@ mod tests {
     fn setup_departments_table<T: TxnStorageTrait>(
         storage: impl AsRef<T>,
         db_id: DatabaseId,
-        catalog: &Catalog,
+        catalog: &CatalogRef,
     ) -> ContainerId {
         let storage = storage.as_ref();
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
@@ -501,54 +692,56 @@ mod tests {
         );
     }
 
-    fn setup_executor<T: TxnStorageTrait>(storage: Arc<T>) -> QueryExecutor<T> {
-        let catalog = Catalog::new();
-        let db_id = storage.as_ref().open_db(DBOptions::new("test_db")).unwrap();
-
-        let employees_c_id = setup_employees_table(&storage, db_id, &catalog);
-        assert_eq!(employees_c_id, 0);
-        let departments_c_id = setup_departments_table(&storage, db_id, &catalog);
-        assert_eq!(departments_c_id, 1);
-
-        QueryExecutor::new(db_id, Arc::new(catalog), storage)
-    }
-
-    fn run_query<T: TxnStorageTrait>(
-        executor: &QueryExecutor<T>,
+    fn get_physical_plan(
+        db_id: DatabaseId,
+        catalog_ref: &CatalogRef,
         sql_string: &str,
         verbose: bool,
-    ) -> Arc<impl TupleBuffer> {
-        let logical_plan = executor.to_logical(sql_string).unwrap();
+    ) -> PhysicalRelExpr {
+        let logical_plan = to_logical(db_id, catalog_ref, sql_string).unwrap();
         if verbose {
             println!("=== Logical Plan ===");
             logical_plan.pretty_print();
         }
-        let physical_plan = executor.to_physical(logical_plan);
+        let physical_plan = to_physical(logical_plan);
         if verbose {
             println!("=== Physical Plan ===");
             physical_plan.pretty_print();
         }
-        let exec = executor.to_executable::<PipelineQueue<T>>(physical_plan);
-        if verbose {
-            println!("=== Executor ===");
-            println!("{}", exec.to_pretty_string());
-        }
-        // todo!("Implement pretty print for executor");
-        let txn = executor
-            .storage
-            .begin_txn(&executor.db_id, TxnOptions::default())
-            .unwrap();
-        let result = exec.execute(&txn).unwrap();
-        executor.storage.commit_txn(&txn, false).unwrap();
-        result
+        physical_plan
     }
 
-    #[test]
-    fn test_projection() {
+    fn volcano_executor(sql: &str) -> Arc<impl TupleBuffer> {
         let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
-        let sql_string = "SELECT name, age FROM Employees";
-        let result = run_query(&executor, sql_string, true);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let catalog = Catalog::new();
+        let catalog_ref = catalog.into();
+        let _ = setup_employees_table(&storage, db_id, &catalog_ref);
+        let _ = setup_departments_table(&storage, db_id, &catalog_ref);
+        let physical_plan = get_physical_plan(db_id, &catalog_ref, sql, true);
+        let exe = VolcanoIterator::new(&catalog_ref, &storage, physical_plan);
+        execute(db_id, &storage, exe, true)
+    }
+
+    fn in_mem_pipeline_executor(sql: &str) -> Arc<impl TupleBuffer> {
+        let storage = get_in_mem_storage();
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let catalog = Catalog::new();
+        let catalog_ref = catalog.into();
+        let _ = setup_employees_table(&storage, db_id, &catalog_ref);
+        let _ = setup_departments_table(&storage, db_id, &catalog_ref);
+        let physical_plan = get_physical_plan(db_id, &catalog_ref, sql, true);
+        let exe = InMemPipelineGraph::new(&catalog_ref, &storage, physical_plan);
+        execute(db_id, &storage, exe, true)
+    }
+
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_projection<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
+        let result = exec("SELECT name, age FROM Employees");
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into()]),
@@ -559,12 +752,11 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_projection_with_expression() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
-        let sql_string = "SELECT name, age + 1 FROM Employees";
-        let result = run_query(&executor, sql_string, true);
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_projection_with_expression<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
+        let result = exec("SELECT name, age + 1 FROM Employees");
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 31.into()]),
             Tuple::from_fields(vec!["Bob".into(), 23.into()]),
@@ -575,12 +767,12 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_filter() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_filter<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT name, age FROM Employees WHERE age > 30";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
@@ -588,12 +780,12 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT e.name, e.age, d.name AS department FROM Employees e JOIN Departments d ON e.department_id = d.id";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
             Tuple::from_fields(vec!["Bob".into(), 22.into(), "Engineering".into()]),
@@ -603,12 +795,12 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_left_outer_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_left_outer_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, sum(e.age) FROM Departments d LEFT OUTER JOIN Employees e ON e.department_id = d.id GROUP BY d.name";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
@@ -617,12 +809,12 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_right_outer_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_right_outer_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =  "SELECT d.name, sum(e.age) FROM Employees e RIGHT OUTER JOIN Departments d ON e.department_id = d.id GROUP BY d.name";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 50.into()]),
@@ -631,13 +823,13 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_left_semi_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_left_semi_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT d.name FROM Departments d LEFT SEMI JOIN Employees e ON e.department_id = d.id";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
@@ -645,12 +837,12 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_right_semi_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_right_semi_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name FROM Employees e RIGHT SEMI JOIN Departments d ON e.department_id = d.id";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
@@ -658,34 +850,34 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_left_anti_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_left_anti_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT d.name FROM Departments d LEFT ANTI JOIN Employees e ON e.department_id = d.id";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![Tuple::from_fields(vec!["Marketing".into()])];
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_right_anti_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_right_anti_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name FROM Employees e RIGHT ANTI JOIN Departments d ON e.department_id = d.id";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![Tuple::from_fields(vec!["Marketing".into()])];
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_cross_join() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_cross_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT e.name, e.age, d.name AS department FROM Employees e, Departments d";
-        let result = run_query(&executor, sql_string, false);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "HR".into()]),
             Tuple::from_fields(vec!["Alice".into(), 30.into(), "Engineering".into()]),
@@ -706,22 +898,22 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_aggregate() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_aggregate<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT COUNT(*), AVG(age) FROM Employees";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![Tuple::from_fields(vec![5.into(), 31.0.into()])];
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_groupby_aggregate() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_groupby_aggregate<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name;";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 32.5.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 25.0.into()]),
@@ -729,23 +921,23 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_groupby_aggregate_having() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_groupby_aggregate_having<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name HAVING AVG(e.age) > 30";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![Tuple::from_fields(vec!["HR".into(), 32.5.into()])];
         check_result(result, &mut expected, true, false);
     }
 
-    #[test]
-    fn test_subquery() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_subquery<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         // For each department, count the number of employees and sum of their ages
         let sql_string = "SELECT d.name, cnt, sum_age FROM Departments d, (SELECT department_id, COUNT(*) AS cnt, SUM(age) AS sum_age FROM Employees e WHERE e.department_id = d.id)";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 2.into(), 65.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 2.into(), 50.into()]),
@@ -754,12 +946,12 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_correlated_exists() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_correlated_exists<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
@@ -767,13 +959,13 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_uncorrelated_exists() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_uncorrelated_exists<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees ); ";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),
@@ -782,12 +974,12 @@ mod tests {
         check_result(result, &mut expected, true, true);
     }
 
-    #[test]
-    fn test_orderby() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_orderby<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT name, age FROM Employees ORDER BY age DESC, name ASC";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
@@ -798,12 +990,12 @@ mod tests {
         check_result(result, &mut expected, false, false);
     }
 
-    #[test]
-    fn test_orderby_expression() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_orderby_expression<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT name, age FROM Employees ORDER BY age + 1 DESC";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["Eva".into(), 40.into()]),
             Tuple::from_fields(vec!["Charlie".into(), 35.into()]),
@@ -814,12 +1006,12 @@ mod tests {
         check_result(result, &mut expected, false, false);
     }
 
-    #[test]
-    fn test_groupby_orderby() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_groupby_orderby<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name ORDER BY average_age DESC";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into(), 32.5.into()]),
             Tuple::from_fields(vec!["Engineering".into(), 25.0.into()]),
@@ -827,12 +1019,12 @@ mod tests {
         check_result(result, &mut expected, false, false);
     }
 
-    #[test]
-    fn test_in_subquery() {
-        let storage = get_in_mem_storage();
-        let executor = setup_executor(storage.clone());
+    #[rstest]
+    #[case::volcano(volcano_executor)]
+    #[case::pipeline(in_mem_pipeline_executor)]
+    fn test_in_subquery<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'HR')";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["Alice".into()]),
             Tuple::from_fields(vec!["Charlie".into()]),
@@ -840,13 +1032,13 @@ mod tests {
         check_result(result, &mut expected, true, false);
 
         let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'Marketing')";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![];
         check_result(result, &mut expected, true, false);
 
         let sql_string =
             "SELECT name FROM Departments WHERE id IN (SELECT department_id FROM Employees)";
-        let result = run_query(&executor, sql_string, true);
+        let result = exec(sql_string);
         let mut expected = vec![
             Tuple::from_fields(vec!["HR".into()]),
             Tuple::from_fields(vec!["Engineering".into()]),

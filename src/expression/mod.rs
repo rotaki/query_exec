@@ -12,7 +12,7 @@ use std::{
 pub use crate::ColumnId;
 
 pub mod prelude {
-    pub use super::logical::{HeuristicRule, HeuristicRules, HeuristicRulesRef, LogicalRelExpr};
+    pub use super::logical::{HeuristicRules, HeuristicRulesRef, LogicalRelExpr};
     pub use super::physical::{LogicalToPhysicalRelExpr, PhysicalRelExpr};
     pub use super::PrePostVisitor;
     pub use super::{AggOp, BinaryOp, ColumnId, Expression, JoinType, PlanTrait};

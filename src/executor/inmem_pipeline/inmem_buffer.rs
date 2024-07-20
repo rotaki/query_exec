@@ -24,8 +24,6 @@ use crate::{
     ColumnId, Field,
 };
 
-use super::Executor;
-
 impl<T: TxnStorageTrait> TupleBuffer for InMemBuffer<T> {
     type Iter = InMemBufferIter<T>;
 

@@ -1,7 +1,7 @@
 use clap::Parser;
 use query_exec::{
-    prelude::{Catalog, DatabaseEngine, Executor, TupleBuffer, VolcanoIterator},
-    ContainerType, InMemStorage,
+    prelude::{Catalog, Executor, PipelineQueue},
+    ContainerType, InMemStorage, OnDiskStorage,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -15,6 +15,12 @@ pub struct TpchOpt {
     /// Run all queries.
     #[clap(short = 'a', long = "all", default_value = "false")]
     pub bench_all: bool,
+    /// Num warmups.
+    #[clap(short = 'w', long = "warmups", default_value = "2")]
+    pub warmups: usize,
+    /// Num runs.
+    #[clap(short = 'r', long = "runs", default_value = "3")]
+    pub runs: usize,
     /// Query ID. Should be in range [1, 22].
     #[clap(short = 'q', long = "query", default_value = "15")]
     pub query_id: usize,
@@ -31,6 +37,10 @@ fn get_in_mem_storage() -> Arc<InMemStorage> {
     Arc::new(InMemStorage::new())
 }
 
+fn get_on_disk_storage() -> Arc<OnDiskStorage> {
+    Arc::new(OnDiskStorage::new(1000))
+}
+
 fn main() {
     let opt = TpchOpt::parse();
 
@@ -43,7 +53,7 @@ fn main() {
         );
     }
 
-    let db = DatabaseEngine::new(get_in_mem_storage());
+    let db = DatabaseEngine::new(get_on_disk_storage());
     let db_id = db.create_db("TPCH");
     let query_executor = db.get_executor(db_id);
 
@@ -84,16 +94,16 @@ fn main() {
             let physical = query_executor.to_physical(logical);
             // Run the query 3 times to warm up the cache
             println!("====== Warming up query {} ======", query_id);
-            for _ in 0..3 {
+            for _ in 0..opt.warmups {
                 let exec =
-                    query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical.clone());
+                    query_executor.to_executable::<PipelineQueue<OnDiskStorage>>(physical.clone());
                 let result = query_executor.execute(exec).unwrap();
-                println!("Warm up result num rows: {}", result.num_tuples());
+                println!("Warm up result num rows: {}", result.num_tuples().unwrap());
             }
             println!("====== Measuring query {} ======", query_id);
-            for _ in 0..10 {
+            for _ in 0..opt.runs {
                 let exec =
-                    query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical.clone());
+                    query_executor.to_executable::<PipelineQueue<OnDiskStorage>>(physical.clone());
                 let start = std::time::Instant::now();
                 let result = query_executor.execute(exec).unwrap();
                 let elapsed = start.elapsed();
@@ -101,7 +111,7 @@ fn main() {
                     "Query {} took {:?}, num rows: {}",
                     query_id,
                     elapsed,
-                    result.num_tuples()
+                    result.num_tuples().unwrap()
                 );
                 results
                     .entry(query_id)
@@ -112,15 +122,14 @@ fn main() {
 
         // Print the results as csv with the following format:
         // query_id, time1, time2, time3, ...
-        // Name the file tpch_volcano_results_sf_<scale_factor>.csv
-        let file_name = format!("tpch_volcano_results_sf_{}.csv", opt.scale_factor);
+        // Name the file tpch_pipeline_results_sf_<scale_factor>.csv
+        let file_name = format!("tpch_pipeline_results_sf_{}.csv", opt.scale_factor);
         let mut writer = csv::Writer::from_path(&file_name).unwrap();
-        writer
-            .write_record([
-                "query_id", "time1", "time2", "time3", "time4", "time5", "time6", "time7", "time8",
-                "time9", "time10",
-            ])
-            .unwrap();
+        let mut record = vec!["query_id".to_string()];
+        for i in 1..=opt.runs {
+            record.push(format!("time{}", i));
+        }
+        writer.write_record(&record).unwrap();
         for (query_id, times) in results {
             let mut record = Vec::with_capacity(1 + times.len());
             record.push(query_id.to_string());
@@ -141,7 +150,7 @@ fn main() {
         physical.pretty_print();
 
         let start = std::time::Instant::now();
-        let exec = query_executor.to_executable::<VolcanoIterator<InMemStorage>>(physical);
+        let exec = query_executor.to_executable::<PipelineQueue<OnDiskStorage>>(physical);
         println!("{}", exec.to_pretty_string());
         let result = query_executor.execute(exec).unwrap();
         let elapsed = start.elapsed();
@@ -149,7 +158,7 @@ fn main() {
             "Query {} took {:?}, num rows: {}",
             opt.query_id,
             elapsed,
-            result.num_tuples()
+            result.num_tuples().unwrap()
         );
     }
 }

@@ -1,0 +1,1713 @@
+mod disk_buffer;
+mod sort;
+
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
+
+use fbtree::{
+    bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
+    prelude::{AppendOnlyStore, TxnStorageTrait},
+};
+use sort::OnDiskSort;
+
+use crate::{
+    error::ExecError,
+    expression::{AggOp, Expression, JoinType},
+    log_debug, log_info,
+    optimizer::PhysicalRelExpr,
+    prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
+    tuple::{FromBool, Tuple},
+    ColumnId, Field,
+};
+
+use super::{bytecode_expr::ByteCodeExpr, Executor};
+use super::{TupleBuffer, TupleBufferIter};
+use disk_buffer::{OnDiskBuffer, OnDiskBufferIter};
+
+// Pipeline iterators are non-blocking.
+pub enum NonBlockingOp<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    Scan(PScanIter<T, E, M>),
+    Filter(PFilterIter<T, E, M>),
+    Project(PProjectIter<T, E, M>),
+    Map(PMapIter<T, E, M>),
+    // HashJoin(PHashJoinIter<T, E, M>),
+    // NestedLoopJoin(PNestedLoopJoinIter<T, E, M>),
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M> {
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.schema(),
+            NonBlockingOp::Filter(iter) => iter.schema(),
+            NonBlockingOp::Project(iter) => iter.schema(),
+            NonBlockingOp::Map(iter) => iter.schema(),
+            // NonBlockingOp::HashJoin(iter) => iter.schema(),
+            // NonBlockingOp::NestedLoopJoin(iter) => iter.schema(),
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.rewind(),
+            NonBlockingOp::Filter(iter) => iter.rewind(),
+            NonBlockingOp::Project(iter) => iter.rewind(),
+            NonBlockingOp::Map(iter) => iter.rewind(),
+            // NonBlockingOp::HashJoin(iter) => iter.rewind(),
+            // NonBlockingOp::NestedLoopJoin(iter) => iter.rewind(),
+        }
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.deps(),
+            NonBlockingOp::Filter(iter) => iter.deps(),
+            NonBlockingOp::Project(iter) => iter.deps(),
+            NonBlockingOp::Map(iter) => iter.deps(),
+            // NonBlockingOp::HashJoin(iter) => iter.deps(),
+            // NonBlockingOp::NestedLoopJoin(iter) => iter.deps(),
+        }
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::Filter(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::Project(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::Map(iter) => iter.print_inner(indent, out),
+            // NonBlockingOp::HashJoin(iter) => iter.print_inner(indent, out),
+            // NonBlockingOp::NestedLoopJoin(iter) => iter.print_inner(indent, out),
+        }
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.next(context),
+            NonBlockingOp::Filter(iter) => iter.next(context),
+            NonBlockingOp::Project(iter) => iter.next(context),
+            NonBlockingOp::Map(iter) => iter.next(context),
+            // NonBlockingOp::HashJoin(iter) => iter.next(context),
+            // NonBlockingOp::NestedLoopJoin(iter) => iter.next(context),
+        }
+    }
+
+    pub fn estimate_num_tuples(
+        &self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> usize {
+        match self {
+            NonBlockingOp::Scan(iter) => iter.estimate_num_tuples(context),
+            NonBlockingOp::Filter(iter) => iter.estimate_num_tuples(context),
+            NonBlockingOp::Project(iter) => iter.estimate_num_tuples(context),
+            NonBlockingOp::Map(iter) => iter.estimate_num_tuples(context),
+            // NonBlockingOp::HashJoin(iter) => iter.estimate_num_tuples(),
+            // NonBlockingOp::NestedLoopJoin(iter) => iter.estimate_num_tuples(),
+        }
+    }
+}
+
+pub struct PScanIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef, // Output schema
+    id: PipelineID,
+    column_indices: Vec<ColumnId>,
+    iter: Option<OnDiskBufferIter<T, E, M>>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> PScanIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        id: PipelineID,
+        column_indices: Vec<ColumnId>,
+    ) -> Self {
+        Self {
+            schema,
+            id,
+            column_indices,
+            iter: None,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.iter = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = HashSet::new();
+        deps.insert(self.id);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->scan(p_id({}), ", " ".repeat(indent), self.id));
+        let mut split = "";
+        out.push('[');
+        for col_id in &self.column_indices {
+            out.push_str(split);
+            out.push_str(&format!("{}", col_id));
+            split = ", ";
+        }
+        out.push_str("])\n");
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("ScanIter::next");
+        if let Some(iter) = &self.iter {
+            let next = iter.next();
+            next.map(|res| res.map(|tuple| tuple.project(&self.column_indices)))
+        } else {
+            self.iter = context.get(&self.id).map(|buf| buf.iter());
+            if let Some(iter) = &self.iter {
+                let next = iter.next();
+                next.map(|res| res.map(|tuple| tuple.project(&self.column_indices)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    pub fn estimate_num_tuples(
+        &self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> usize {
+        context
+            .get(&self.id)
+            .map(|buf| buf.num_tuples())
+            .unwrap_or(0)
+    }
+}
+
+pub struct PFilterIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef, // Output schema
+    input: Box<NonBlockingOp<T, E, M>>,
+    expr: ByteCodeExpr,
+    // Counts to estimate selectivity.
+    num_tuples_scanned: usize,
+    num_tuples_filtered: usize,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PFilterIter<T, E, M> {
+    pub fn new(schema: SchemaRef, input: Box<NonBlockingOp<T, E, M>>, expr: ByteCodeExpr) -> Self {
+        Self {
+            schema,
+            input,
+            expr,
+            num_tuples_scanned: 0,
+            num_tuples_filtered: 0,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.input.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.input.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->filter({})", " ".repeat(indent), self.expr));
+        out.push('\n');
+        self.input.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("FilterIter::next");
+        while let Some(tuple) = self.input.next(context)? {
+            self.num_tuples_scanned += 1;
+            if self.expr.eval(&tuple)? == Field::from_bool(true) {
+                return Ok(Some(tuple));
+            }
+            self.num_tuples_filtered += 1;
+        }
+        Ok(None)
+    }
+
+    pub fn estimate_num_tuples(
+        &self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> usize {
+        if self.num_tuples_scanned == 0 {
+            self.input.estimate_num_tuples(context)
+        } else {
+            (self.input.estimate_num_tuples(context) as f64
+                * (1.0 - self.num_tuples_filtered as f64 / self.num_tuples_scanned as f64))
+                as usize
+        }
+    }
+}
+
+pub struct PProjectIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef, // Output schema
+    input: Box<NonBlockingOp<T, E, M>>,
+    column_indices: Vec<ColumnId>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PProjectIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef,
+        input: Box<NonBlockingOp<T, E, M>>,
+        column_indices: Vec<ColumnId>,
+    ) -> Self {
+        Self {
+            schema,
+            input,
+            column_indices,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.input.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.input.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->project(", " ".repeat(indent)));
+        let mut split = "";
+        out.push('[');
+        for col_id in &self.column_indices {
+            out.push_str(split);
+            out.push_str(&format!("{}", col_id));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.input.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("ProjectIter::next");
+        if let Some(tuple) = self.input.next(context)? {
+            let new_tuple = tuple.project(&self.column_indices);
+            Ok(Some(new_tuple))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn estimate_num_tuples(
+        &self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> usize {
+        self.input.estimate_num_tuples(context)
+    }
+}
+
+pub struct PMapIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef, // Output schema
+    input: Box<NonBlockingOp<T, E, M>>,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PMapIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef,
+        input: Box<NonBlockingOp<T, E, M>>,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            input,
+            exprs,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.input.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        self.input.deps()
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}->map(", " ".repeat(indent)));
+        let mut split = "";
+        out.push('[');
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.input.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("MapIter::next");
+        if let Some(mut tuple) = self.input.next(context)? {
+            for expr in &self.exprs {
+                tuple.push(expr.eval(&tuple)?);
+            }
+            Ok(Some(tuple))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn estimate_num_tuples(
+        &self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> usize {
+        self.input.estimate_num_tuples(context)
+    }
+}
+
+/*
+pub enum PHashJoinIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    Inner(PHashJoinInnerIter<T, E, M>),
+    RightOuter(PHashJoinRightOuterIter<T, E, M>), // Probe side is the right
+    RightSemi(PHashJoinRightSemiIter<T, E, M>),   // Probe side is the right
+    RightAnti(PHashJoinRightAntiIter<T, E, M>),   // Probe side is the right
+    RightMark(PHashJoinRightMarkIter<T, E, M>),   // Probe side is the right
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIter<T, E, M> {
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.schema(),
+            PHashJoinIter::RightOuter(iter) => iter.schema(),
+            PHashJoinIter::RightSemi(iter) => iter.schema(),
+            PHashJoinIter::RightAnti(iter) => iter.schema(),
+            PHashJoinIter::RightMark(iter) => iter.schema(),
+        }
+    }
+
+    pub fn rewind(&mut self) {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.rewind(),
+            PHashJoinIter::RightOuter(iter) => iter.rewind(),
+            PHashJoinIter::RightSemi(iter) => iter.rewind(),
+            PHashJoinIter::RightAnti(iter) => iter.rewind(),
+            PHashJoinIter::RightMark(iter) => iter.rewind(),
+        }
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.deps(),
+            PHashJoinIter::RightOuter(iter) => iter.deps(),
+            PHashJoinIter::RightSemi(iter) => iter.deps(),
+            PHashJoinIter::RightAnti(iter) => iter.deps(),
+            PHashJoinIter::RightMark(iter) => iter.deps(),
+        }
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightOuter(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightSemi(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightAnti(iter) => iter.print_inner(indent, out),
+            PHashJoinIter::RightMark(iter) => iter.print_inner(indent, out),
+        }
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        match self {
+            PHashJoinIter::Inner(iter) => iter.next(context),
+            PHashJoinIter::RightOuter(iter) => iter.next(context),
+            PHashJoinIter::RightSemi(iter) => iter.next(context),
+            PHashJoinIter::RightAnti(iter) => iter.next(context),
+            PHashJoinIter::RightMark(iter) => iter.next(context),
+        }
+    }
+}
+
+pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy +'static, M: MemPool<E>> {
+    schema: SchemaRef, // Output schema
+    probe_side: Box<NonBlockingOp<T, E, M>>,
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+    current: Option<(Tuple, OnDiskBufferIter<T, E, M>)>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinInnerIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T, E, M>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            probe_side,
+            build_side,
+            exprs,
+            current: None,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+        self.current = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_inner(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push('[');
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("HashJoinInnerIter::next");
+        if let Some((probe, build_iter)) = &mut self.current {
+            if let Some(build) = build_iter.next()? {
+                let result = build.merge_mut(probe);
+                return Ok(Some(result));
+            }
+        }
+        // Reset the current tuple and build iterator.
+        loop {
+            // Iterate the probe side until a match is found.
+            // If match is found
+            if let Some(probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                if let Some(iter) = build_iter {
+                    // There should be at least one tuple in the build side iterator.
+                    if let Some(build) = iter.next() {
+                        let result = build.merge_mut(&probe);
+                        self.current = Some((probe, iter));
+                        return Ok(Some(result));
+                    } else {
+                        unreachable!("The build side returned an empty iterator")
+                    }
+                }
+                // No match found. Continue to the next probe tuple.
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+    current: Option<(Tuple, OnDiskBuffer<T, E, M>)>,
+    nulls: Tuple,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightOuterIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T, E, M>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+        nulls: Tuple,
+    ) -> Self {
+        Self {
+            schema,
+            probe_side,
+            build_side,
+            exprs,
+            current: None,
+            nulls,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+        self.current = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_outer(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push('[');
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("HashJoinRightOuterIter::next");
+        if let Some((probe, build_iter)) = &mut self.current {
+            if let Some(build) = build_iter.next() {
+                let result = build.merge_mut(probe);
+                return Ok(Some(result));
+            }
+        }
+        // Reset the current tuple and build iterator.
+        if let Some(probe) = self.probe_side.next(context)? {
+            let key = self
+                .exprs
+                .iter()
+                .map(|expr| expr.eval(&probe))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+            let result = if let Some(iter) = build_iter {
+                // Try to iterate the build side once to check if there is any match.
+
+                if let Some(build) = iter.next() {
+                    let result = build.merge_mut(&probe);
+                    self.current = Some((probe, iter));
+                    result
+                } else {
+                    // There should be at least one tuple in the build side iterator.
+                    unreachable!("The build side returned an empty iterator");
+                }
+            } else {
+                self.current = None;
+                // No match found. Output the probe tuple with nulls for the build side.
+                self.nulls.merge(&probe)
+            };
+            Ok(Some(result))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+pub struct PHashJoinRightSemiIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightSemiIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T, E, M>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            probe_side,
+            build_side,
+            exprs,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_semi(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push('[');
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("HashJoinRightSemiIter::next");
+        // If there is a match in the build side, output the probe tuple.
+        // Otherwise go to the next probe tuple
+        loop {
+            if let Some(probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                if let Some(iter) = build_iter {
+                    if iter.next().is_some() {
+                        return Ok(Some(probe));
+                    } else {
+                        unreachable!("The build side returned an empty iterator")
+                    }
+                }
+                // No match found. Continue to the next probe tuple.
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+pub struct PHashJoinRightAntiIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightAntiIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T, E, M>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            probe_side,
+            build_side,
+            exprs,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_anti(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push('[');
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("HashJoinRightAntiIter::next");
+        // If there is no match in the build side, output the probe tuple.
+        // Otherwise go to the next probe tuple
+        loop {
+            if let Some(probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                if let Some(_iter) = build_iter {
+                    // Match found. Continue to the next probe tuple.
+                } else {
+                    return Ok(Some(probe));
+                }
+                // No match found. Continue to the next probe tuple.
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+// Mark join is similar to semi/anti join but returns all the probe tuples.
+// The tuples are marked with a boolean value indicating if there is a match in the build side.
+// If there is a matching tuple, the mark is true.
+// If there is no matching tuple, if the build side has nulls, the mark is null.
+// Otherwise, the mark is false.
+pub struct PHashJoinRightMarkIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef,                 // Output schema
+    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+    build_side: PipelineID,
+    exprs: Vec<ByteCodeExpr>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightMarkIter<T> {
+    pub fn new(
+        schema: SchemaRef, // Output schema
+        probe_side: Box<NonBlockingOp<T, E, M>>,
+        build_side: PipelineID,
+        exprs: Vec<ByteCodeExpr>,
+    ) -> Self {
+        Self {
+            schema,
+            probe_side,
+            build_side,
+            exprs,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.probe_side.rewind();
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.probe_side.deps();
+        deps.insert(self.build_side);
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!(
+            "{}-> hash_join_right_mark(build_p_id({}), ",
+            " ".repeat(indent),
+            self.build_side
+        ));
+        let mut split = "";
+        out.push('[');
+        for expr in &self.exprs {
+            out.push_str(split);
+            out.push_str(&format!("{}", expr));
+            split = ", ";
+        }
+        out.push_str("])\n");
+        self.probe_side.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        log_debug!("HashJoinRightMarkIter::next");
+        // If there is a match in the build side, output the probe tuple.
+        // Otherwise go to the next probe tuple
+        let build_side = context.get(&self.build_side).unwrap();
+        loop {
+            if let Some(mut probe) = self.probe_side.next(context)? {
+                let key = self
+                    .exprs
+                    .iter()
+                    .map(|expr| expr.eval(&probe))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let build_iter = build_side.iter_key(key);
+                let mark = if let Some(iter) = build_iter {
+                    if iter.next().is_some() {
+                        Field::from_bool(true)
+                    } else {
+                        unreachable!("The build side returned an empty iterator")
+                    }
+                } else if build_side.has_null() {
+                    Field::null(&DataType::Boolean)
+                } else {
+                    Field::from_bool(false)
+                };
+                probe.push(mark);
+                return Ok(Some(probe));
+            } else {
+                return Ok(None);
+            }
+        }
+    }
+}
+
+pub struct PNestedLoopJoinIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    schema: SchemaRef,            // Output schema
+    outer: Box<NonBlockingOp<T, E, M>>, // Outer loop of NLJ
+    inner: Box<NonBlockingOp<T, E, M>>, // Inner loop of NLJ
+    current_outer: Option<Tuple>,
+    current_inner: Option<Tuple>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PNestedLoopJoinIter<T, E, M> {
+    pub fn new(
+        schema: SchemaRef,
+        outer: Box<NonBlockingOp<T, E, M>>,
+        inner: Box<NonBlockingOp<T, E, M>>,
+    ) -> Self {
+        Self {
+            schema,
+            outer,
+            inner,
+            current_outer: None,
+            current_inner: None,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    pub fn rewind(&mut self) {
+        self.outer.rewind();
+        self.inner.rewind();
+        self.current_outer = None;
+        self.current_inner = None;
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        let mut deps = self.outer.deps();
+        deps.extend(self.inner.deps());
+        deps
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}-> nested_loop_join\n", " ".repeat(indent)));
+        self.outer.print_inner(indent + 2, out);
+        self.inner.print_inner(indent + 2, out);
+    }
+
+    pub fn next(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    ) -> Result<Option<Tuple>, ExecError> {
+        loop {
+            // Set the outer
+            if self.current_outer.is_none() {
+                match self.outer.next(context)? {
+                    Some(tuple) => {
+                        self.current_outer = Some(tuple);
+                        self.inner.rewind();
+                    }
+                    None => return Ok(None),
+                }
+            }
+            // Set the inner
+            if self.current_inner.is_none() {
+                match self.inner.next(context)? {
+                    Some(tuple) => {
+                        self.current_inner = Some(tuple);
+                    }
+                    None => {
+                        self.current_outer = None;
+                        continue;
+                    }
+                }
+            }
+
+            // Outer and inner are set. Merge the tuples.
+            let new_tuple = self
+                .current_outer
+                .as_ref()
+                .unwrap()
+                .merge(self.current_inner.as_ref().unwrap());
+            self.current_inner = None;
+            return Ok(Some(new_tuple));
+        }
+    }
+}
+*/
+
+#[derive(Debug)]
+pub enum MemoryPolicy {
+    FixedSize(usize),  // Fixed number of frames
+    Proportional(f64), // Proportional to the data size
+    Unbounded,
+}
+
+pub enum BlockingOp<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    Dummy(NonBlockingOp<T, E, M>),
+    OnDiskSort(OnDiskSort<T, E, M>),
+    // InMemHashTableCreation(InMemHashTableCreation<T, E, M>),
+    // InMemHashAggregate(InMemHashAggregation<T, E, M>),
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<T, E, M> {
+    pub fn schema(&self) -> &SchemaRef {
+        match self {
+            BlockingOp::Dummy(plan) => plan.schema(),
+            BlockingOp::OnDiskSort(sort) => sort.schema(),
+            // BlockingOp::InMemHashTableCreation(creation) => creation.schema(),
+            // BlockingOp::InMemHashAggregate(agg) => agg.schema(),
+        }
+    }
+
+    pub fn deps(&self) -> HashSet<PipelineID> {
+        match self {
+            BlockingOp::Dummy(plan) => plan.deps(),
+            BlockingOp::OnDiskSort(sort) => sort.deps(),
+            // BlockingOp::InMemHashTableCreation(creation) => creation.deps(),
+            // BlockingOp::InMemHashAggregate(agg) => agg.deps(),
+        }
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        match self {
+            BlockingOp::Dummy(plan) => plan.print_inner(indent, out),
+            BlockingOp::OnDiskSort(sort) => sort.print_inner(indent, out),
+            // BlockingOp::InMemHashTableCreation(creation) => creation.print_inner(indent, out),
+            // BlockingOp::InMemHashAggregate(agg) => agg.print_inner(indent, out),
+        }
+    }
+
+    pub fn execute(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        policy: &Arc<MemoryPolicy>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+    ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+        match self {
+            BlockingOp::Dummy(plan) => {
+                log_debug!("Dummy blocking op");
+                let output = Arc::new(AppendOnlyStore::new(dest_c_key, mem_pool.clone()));
+                while let Some(tuple) = plan.next(context)? {
+                    output.append(&tuple.to_bytes())?
+                }
+                Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(output)))
+            }
+            BlockingOp::OnDiskSort(sort) => sort.execute(context, policy, mem_pool, dest_c_key),
+            // BlockingOp::InMemHashTableCreation(creation) => creation.execute(context),
+            // BlockingOp::InMemHashAggregate(agg) => agg.execute(context),
+        }
+    }
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> From<NonBlockingOp<T, E, M>>
+    for BlockingOp<T, E, M>
+{
+    fn from(plan: NonBlockingOp<T, E, M>) -> Self {
+        BlockingOp::Dummy(plan)
+    }
+}
+
+pub type PipelineID = u16;
+
+pub struct Pipeline<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    id: PipelineID,
+    context: HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    exec_plan: BlockingOp<T, E, M>,
+    deps_cache: HashSet<PipelineID>,
+    policy: Arc<MemoryPolicy>,
+    mem_pool: Arc<M>,
+    dest_c_key: ContainerKey,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Pipeline<T, E, M> {
+    pub fn new(
+        id: PipelineID,
+        execution_plan: BlockingOp<T, E, M>,
+        mem_pool: &Arc<M>,
+        policy: &Arc<MemoryPolicy>,
+        dest_c_key: ContainerKey,
+    ) -> Self {
+        Self {
+            id,
+            context: HashMap::new(),
+            deps_cache: execution_plan.deps(),
+            exec_plan: execution_plan,
+            mem_pool: mem_pool.clone(),
+            policy: policy.clone(),
+            dest_c_key,
+        }
+    }
+
+    pub fn new_with_context(
+        id: PipelineID,
+        execution_plan: BlockingOp<T, E, M>,
+        context: HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        mem_pool: &Arc<M>,
+        policy: &Arc<MemoryPolicy>,
+        dest_c_key: ContainerKey,
+    ) -> Self {
+        Self {
+            id,
+            context,
+            deps_cache: execution_plan.deps(),
+            exec_plan: execution_plan,
+            mem_pool: mem_pool.clone(),
+            policy: policy.clone(),
+            dest_c_key,
+        }
+    }
+
+    pub fn schema(&self) -> &SchemaRef {
+        self.exec_plan.schema()
+    }
+
+    pub fn get_id(&self) -> PipelineID {
+        self.id
+    }
+
+    pub fn deps(&self) -> &HashSet<PipelineID> {
+        &self.deps_cache
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.deps_cache
+            .iter()
+            .all(|id| self.context.contains_key(id))
+    }
+
+    /// Set context.
+    pub fn set_context(&mut self, id: PipelineID, buffer: Arc<OnDiskBuffer<T, E, M>>) {
+        self.context.insert(id, buffer);
+    }
+
+    pub fn print_inner(&self, indent: usize, out: &mut String) {
+        out.push_str(&format!("{}Pipeline ID: {}\n", " ".repeat(indent), self.id));
+        out.push_str(&format!(
+            "{}Schema: {}\n",
+            " ".repeat(indent),
+            self.schema()
+        ));
+        out.push_str(&format!(
+            "{}Dependencies: {:?}\n",
+            " ".repeat(indent),
+            self.deps()
+        ));
+        out.push_str(&format!(
+            "{}Is ready: {}\n",
+            " ".repeat(indent),
+            self.is_ready()
+        ));
+        self.exec_plan.print_inner(indent, out);
+    }
+
+    pub fn execute(&mut self) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+        self.exec_plan
+            .execute(&self.context, &self.policy, &self.mem_pool, self.dest_c_key)
+    }
+}
+
+pub struct OnDiskPipelineGraph<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    pipelines: Vec<Pipeline<T, E, M>>,
+    queue: VecDeque<Pipeline<T, E, M>>,
+    mem_pool: Arc<M>,
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipelineGraph<T, E, M> {
+    pub fn new(
+        db_id: DatabaseId,
+        catalog: &CatalogRef,
+        storage: &Arc<T>,
+        mem_pool: &Arc<M>,
+        policy: &Arc<MemoryPolicy>,
+        physical_plan: PhysicalRelExpr,
+    ) -> Self {
+        let converter = PhysicalRelExprToPipelineQueue::new(db_id, &storage, &mem_pool, &policy);
+        let pipeline_queue = converter
+            .convert(catalog.clone(), physical_plan)
+            .expect("Failed to convert physical plan");
+        pipeline_queue
+    }
+
+    fn empty(mem_pool: &Arc<M>) -> Self {
+        Self {
+            pipelines: Vec::new(),
+            queue: VecDeque::new(),
+            mem_pool: mem_pool.clone(),
+        }
+    }
+
+    fn add_pipeline(&mut self, pipeline: Pipeline<T, E, M>) {
+        self.pipelines.push(pipeline);
+    }
+
+    // Identify the pipelines that do not have any dependencies and push that to the queue
+    // This pipeline's dependencies can be removed from the other pipelines since it is empty
+    fn push_no_deps_to_queue(&mut self) {
+        // Push the pipelines that do not have any dependencies to the queue
+        // drain_filter is not stable yet so use retain instead
+        let mut with_deps: Vec<Pipeline<T, E, M>> = Vec::new();
+        for p in self.pipelines.drain(..) {
+            if p.is_ready() {
+                self.queue.push_back(p);
+            } else {
+                with_deps.push(p);
+            }
+        }
+        self.pipelines = with_deps;
+    }
+
+    // Remove the completed pipeline from the dependencies of other pipelines
+    // Set the output of the completed pipeline as the input of the dependent pipelines
+    fn notify_dependants(&mut self, id: PipelineID, output: Arc<OnDiskBuffer<T, E, M>>) {
+        for p in self.pipelines.iter_mut() {
+            if p.deps().contains(&id) {
+                // p is a dependant of the completed pipeline
+                p.set_context(id, output.clone())
+            }
+        }
+    }
+}
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Executor<T>
+    for OnDiskPipelineGraph<T, E, M>
+{
+    type Buffer = OnDiskBuffer<T, E, M>;
+
+    fn to_pretty_string(&self) -> String {
+        let mut result = String::new();
+        for pipeline in self.pipelines.iter() {
+            let id = pipeline.get_id();
+            result.push_str(&format!("Pipeline ID: {}\n", id));
+            pipeline.print_inner(2, &mut result);
+        }
+        result
+    }
+
+    fn execute(mut self, _txn: &T::TxnHandle) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+        let mut result = None;
+        self.push_no_deps_to_queue();
+        log_info!(
+            "Initial queue: {:?}",
+            self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+        );
+        while let Some(mut pipeline) = self.queue.pop_front() {
+            let current_result = pipeline.execute()?;
+            log_info!(
+                "Pipeline ID: {} executed with output size: {:?}",
+                pipeline.get_id(),
+                current_result.num_tuples()
+            );
+            self.notify_dependants(pipeline.get_id(), current_result.clone());
+            self.push_no_deps_to_queue();
+            log_info!(
+                "Queue: {:?}",
+                self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+            );
+            result = Some(current_result);
+        }
+        result.ok_or(ExecError::Pipeline("No pipeline executed".to_string()))
+    }
+}
+
+struct PhysicalRelExprToPipelineQueue<
+    T: TxnStorageTrait,
+    E: EvictionPolicy + 'static,
+    M: MemPool<E>,
+> {
+    current_id: PipelineID, // Incremental pipeline ID
+    db_id: DatabaseId,
+    dest_c_id: ContainerId,
+    storage: Arc<T>,
+    mem_pool: Arc<M>,
+    policy: Arc<MemoryPolicy>,
+    pipeline_queue: OnDiskPipelineGraph<T, E, M>,
+}
+
+type ColIdToIdx = BTreeMap<ColumnId, usize>;
+
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
+    PhysicalRelExprToPipelineQueue<T, E, M>
+{
+    fn new(
+        db_id: DatabaseId,
+        storage: &Arc<T>,
+        mem_pool: &Arc<M>,
+        policy: &Arc<MemoryPolicy>,
+    ) -> Self {
+        Self {
+            current_id: 0,
+            db_id,
+            dest_c_id: 1000, // Arbitrary container ID for the output of the pipelines
+            storage: storage.clone(),
+            mem_pool: mem_pool.clone(),
+            policy: policy.clone(),
+            pipeline_queue: OnDiskPipelineGraph::empty(&mem_pool),
+        }
+    }
+
+    fn fetch_add_id(&mut self) -> PipelineID {
+        let id = self.current_id;
+        self.current_id += 1;
+        id
+    }
+
+    fn convert(
+        mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> Result<OnDiskPipelineGraph<T, E, M>, ExecError> {
+        let (op, context, _) = self.convert_inner(catalog, expr)?;
+        // if let NonBlockingOp::Scan(PScanIter {
+        //     schema,
+        //     id,
+        //     column_indices,
+        //     iter,
+        // }) = &op
+        // {
+        //     // If column_indices are the same as the original schema, we do not need this scan.
+        //     let num_cols = schema.columns().len();
+        //     if column_indices.len() == num_cols
+        //         && column_indices
+        //             .iter()
+        //             .enumerate()
+        //             .all(|(idx, col_id)| *col_id == idx)
+        //     {
+        //         return Ok(self.pipeline_queue);
+        //     }
+        // }
+        // // Other cases.
+        let blocking_op = BlockingOp::Dummy(op);
+        let pipeline = Pipeline::new_with_context(
+            self.fetch_add_id(),
+            blocking_op,
+            context,
+            &self.mem_pool,
+            &self.policy,
+            ContainerKey::new(self.db_id, self.dest_c_id),
+        );
+        self.pipeline_queue.add_pipeline(pipeline);
+        Ok(self.pipeline_queue)
+    }
+
+    fn convert_inner(
+        &mut self,
+        catalog: CatalogRef,
+        expr: PhysicalRelExpr,
+    ) -> Result<
+        (
+            NonBlockingOp<T, E, M>,
+            HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+            ColIdToIdx,
+        ),
+        ExecError,
+    > {
+        match expr {
+            PhysicalRelExpr::Scan {
+                db_id,
+                c_id,
+                table_name: _,
+                column_indices,
+            } => {
+                let col_id_to_idx = column_indices
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col_id)| (*col_id, idx))
+                    .collect();
+
+                let in_schema = catalog
+                    .get_schema(c_id)
+                    .ok_or(ExecError::Catalog("Schema not found".to_string()))?;
+                let out_schema = Arc::new(in_schema.project(&column_indices));
+                let p_id = self.fetch_add_id();
+                let scan_buffer = Arc::new(OnDiskBuffer::txn_storage(
+                    in_schema,
+                    db_id,
+                    c_id,
+                    self.storage.clone(),
+                ));
+
+                let scan = NonBlockingOp::Scan(PScanIter::new(out_schema, p_id, column_indices));
+                Ok((
+                    scan,
+                    [(p_id, scan_buffer)].into_iter().collect(),
+                    col_id_to_idx,
+                ))
+            }
+            PhysicalRelExpr::Rename { src, src_to_dest } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let col_id_to_idx = src_to_dest
+                    .iter()
+                    .map(|(src, dest)| (*dest, col_id_to_idx[src]))
+                    .collect();
+                Ok((input_op, context, col_id_to_idx))
+            }
+            PhysicalRelExpr::Select { src, predicates } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let predicate = Expression::merge_conjunction(predicates);
+                let expr: ByteCodeExpr = ByteCodeExpr::from_ast(predicate, &col_id_to_idx)?;
+                let filter = PFilterIter::new(input_op.schema().clone(), Box::new(input_op), expr);
+                Ok((NonBlockingOp::Filter(filter), context, col_id_to_idx))
+            }
+            PhysicalRelExpr::Project { src, column_names } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let (column_indices, new_col_id_to_idx) = {
+                    let mut new_col_id_to_idx = ColIdToIdx::new();
+                    let mut column_indices = Vec::new();
+                    for (idx, col_id) in column_names.iter().enumerate() {
+                        new_col_id_to_idx.insert(*col_id, idx);
+                        column_indices.push(col_id_to_idx[col_id]);
+                    }
+                    (column_indices, new_col_id_to_idx)
+                };
+                let schema = input_op.schema().project(&column_indices);
+                let project =
+                    PProjectIter::new(Arc::new(schema), Box::new(input_op), column_indices);
+                Ok((NonBlockingOp::Project(project), context, new_col_id_to_idx))
+            }
+            PhysicalRelExpr::Map { input, exprs } => {
+                let (input_op, context, mut col_id_to_idx) = self.convert_inner(catalog, *input)?;
+                let mut bytecode_exprs = Vec::new();
+                let input_schema = input_op.schema();
+                let mut new_cols = Vec::new();
+                for (dest, expr) in exprs {
+                    let expr = ByteCodeExpr::from_ast(expr, &col_id_to_idx)?;
+                    bytecode_exprs.push(expr);
+                    col_id_to_idx.insert(dest, col_id_to_idx.len());
+                    new_cols.push(ColumnDef::new("dest", DataType::Unknown, true));
+                }
+                let schema = input_schema.merge(&Schema::new(new_cols, Vec::new()));
+                let map = PMapIter::new(Arc::new(schema), Box::new(input_op), bytecode_exprs);
+                Ok((NonBlockingOp::Map(map), context, col_id_to_idx))
+            }
+            /*
+            PhysicalRelExpr::NestedLoopJoin {
+                join_type: _,
+                left,
+                right,
+                predicates,
+            } => {
+                let (left_op, left_context, left_col_id_to_idx) =
+                    self.convert_inner(catalog.clone(), *left)?;
+                let left_len = left_col_id_to_idx.len();
+                let (right_op, right_context, right_col_id_to_idx) =
+                    self.convert_inner(catalog, *right)?;
+                let context = left_context.into_iter().chain(right_context).collect();
+
+                let mut col_id_to_idx = left_col_id_to_idx;
+                for (col_name, col_idx) in right_col_id_to_idx {
+                    col_id_to_idx.insert(col_name, col_idx + left_len);
+                }
+                let schema = Arc::new(left_op.schema().merge(right_op.schema()));
+                let cross_join =
+                    PNestedLoopJoinIter::new(schema.clone(), Box::new(left_op), Box::new(right_op));
+                if predicates.is_empty() {
+                    Ok((
+                        NonBlockingOp::NestedLoopJoin(cross_join),
+                        context,
+                        col_id_to_idx,
+                    ))
+                } else {
+                    let filter = ByteCodeExpr::from_ast(
+                        Expression::merge_conjunction(predicates),
+                        &col_id_to_idx,
+                    )?;
+                    let filter = PFilterIter::new(
+                        schema.clone(),
+                        Box::new(NonBlockingOp::NestedLoopJoin(cross_join)),
+                        filter,
+                    );
+                    Ok((NonBlockingOp::Filter(filter), context, col_id_to_idx))
+                }
+            }
+            PhysicalRelExpr::HashJoin {
+                join_type,
+                left,
+                right,
+                equalities,
+                filter,
+            } => {
+                let (left_op, left_context, left_col_id_to_idx) =
+                    self.convert_inner(catalog.clone(), *left)?;
+                let (right_op, right_context, right_col_id_to_idx) =
+                    self.convert_inner(catalog, *right)?;
+                let left_len = left_col_id_to_idx.len();
+
+                // The left will be the build side and the right will be the probe side
+                // The physical plan should not contain left outer/semi/anti join
+                let mut left_exprs = Vec::new();
+                let mut right_exprs = Vec::new();
+                for (left_expr, right_expr) in equalities {
+                    left_exprs.push(ByteCodeExpr::from_ast(left_expr, &left_col_id_to_idx)?);
+                    right_exprs.push(ByteCodeExpr::from_ast(right_expr, &right_col_id_to_idx)?);
+                }
+
+                // First, create the pipeline for the hash table build side
+                let left_schema = left_op.schema().clone();
+                let left_id = self.fetch_add_id();
+                let left_hash_table_creation = BlockingOp::InMemHashTableCreation(
+                    InMemHashTableCreation::new(left_schema.clone(), left_op, left_exprs),
+                );
+                let left_p =
+                    Pipeline::new_with_context(left_id, left_hash_table_creation, left_context);
+                self.pipeline_queue.add_pipeline(left_p); // Add the build side to the graph
+
+                // Then create the non-blocking pipeline for the probe side
+                let (iter, col_id_to_idx) = match join_type {
+                    JoinType::CrossJoin => {
+                        panic!("Cross join is not supported in hash join")
+                    }
+                    JoinType::Inner => {
+                        let mut col_id_to_idx = left_col_id_to_idx;
+                        for (col_name, col_idx) in right_col_id_to_idx {
+                            let res = col_id_to_idx.insert(col_name, col_idx + left_len);
+                            assert_eq!(res, None);
+                        }
+                        let schema = left_schema.merge(right_op.schema());
+                        let probe = PHashJoinIter::Inner(PHashJoinInnerIter::new(
+                            Arc::new(schema),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, col_id_to_idx)
+                    }
+                    JoinType::RightOuter => {
+                        let mut col_id_to_idx = left_col_id_to_idx;
+                        for (col_name, col_idx) in right_col_id_to_idx {
+                            let res = col_id_to_idx.insert(col_name, col_idx + left_len);
+                            assert_eq!(res, None);
+                        }
+                        // Make the left side columns nullable
+                        let left_schema = left_schema.make_nullable();
+                        let schema = left_schema.merge(right_op.schema());
+                        let nulls = Tuple::from_fields(
+                            left_schema
+                                .columns()
+                                .iter()
+                                .map(|col| Field::null(col.data_type()))
+                                .collect(),
+                        );
+                        let probe = PHashJoinIter::RightOuter(PHashJoinRightOuterIter::new(
+                            Arc::new(schema),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                            nulls,
+                        ));
+                        (probe, col_id_to_idx)
+                    }
+                    JoinType::RightSemi => {
+                        let probe = PHashJoinIter::RightSemi(PHashJoinRightSemiIter::new(
+                            right_op.schema().clone(),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, right_col_id_to_idx)
+                    }
+                    JoinType::RightAnti => {
+                        let probe = PHashJoinIter::RightAnti(PHashJoinRightAntiIter::new(
+                            right_op.schema().clone(),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, right_col_id_to_idx)
+                    }
+                    JoinType::RightMarkJoin(col_id) => {
+                        // insert col_id to right_col_id_to_idx
+                        let right_len = right_col_id_to_idx.len();
+                        let mut col_id_to_idx = right_col_id_to_idx;
+                        let res = col_id_to_idx.insert(col_id, right_len);
+                        assert_eq!(res, None);
+
+                        // Mark join returns the right side with a new nullable boolean column
+                        let right_schema = right_op.schema();
+                        let col_def = ColumnDef::new("mark", DataType::Boolean, true);
+                        let schema = right_schema.merge(&Schema::new(vec![col_def], Vec::new()));
+                        let probe = PHashJoinIter::RightMark(PHashJoinRightMarkIter::new(
+                            Arc::new(schema),
+                            Box::new(right_op),
+                            left_id,
+                            right_exprs,
+                        ));
+                        (probe, col_id_to_idx)
+                    }
+                    other => {
+                        panic!("Join type {:?} is not supported", other)
+                    }
+                };
+
+                // Add the filter if necessary
+                let iter = if filter.is_empty() {
+                    NonBlockingOp::HashJoin(iter)
+                } else {
+                    let filter = ByteCodeExpr::from_ast(
+                        Expression::merge_conjunction(filter),
+                        &col_id_to_idx,
+                    )?;
+                    let filter = PFilterIter::new(
+                        iter.schema().clone(),
+                        Box::new(NonBlockingOp::HashJoin(iter)),
+                        filter,
+                    );
+                    NonBlockingOp::Filter(filter)
+                };
+
+                Ok((iter, right_context, col_id_to_idx))
+            }
+            PhysicalRelExpr::HashAggregate {
+                src,
+                group_by,
+                aggrs,
+            } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let group_by_indices = group_by
+                    .iter()
+                    .map(|col_id| col_id_to_idx[col_id])
+                    .collect();
+                let agg_op_indices = aggrs
+                    .iter()
+                    .map(|(_dest, (src, op))| (*op, col_id_to_idx[src]))
+                    .collect();
+                // Project the group by and aggregation columns
+                let input_schema = input_op.schema();
+                let mut schema = input_schema.project(&group_by_indices);
+                for &(op, col) in &agg_op_indices {
+                    match op {
+                        AggOp::Count => {
+                            schema.push_column(ColumnDef::new("dest", DataType::Int, false))
+                        }
+                        AggOp::Sum | AggOp::Max | AggOp::Min => {
+                            let col_type = input_schema.get_column(col).data_type();
+                            schema.push_column(ColumnDef::new("dest", col_type.clone(), true))
+                        }
+                        AggOp::Avg => {
+                            // float
+                            schema.push_column(ColumnDef::new("dest", DataType::Float, true))
+                        }
+                    }
+                }
+                let schema = Arc::new(schema);
+                let hash_agg = BlockingOp::InMemHashAggregate(InMemHashAggregation::new(
+                    schema.clone(),
+                    input_op,
+                    group_by_indices,
+                    agg_op_indices,
+                ));
+                let mut new_col_id_to_idx: ColIdToIdx = group_by
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, col_id)| (*col_id, idx))
+                    .collect();
+                let group_by_len = group_by.len();
+                for (idx, (dest, _)) in aggrs.iter().enumerate() {
+                    new_col_id_to_idx.insert(*dest, group_by_len + idx);
+                }
+
+                // Add the aggregation pipeline to the graph
+                let agg_id = self.fetch_add_id();
+                let p = Pipeline::new_with_context(agg_id, hash_agg, context);
+                self.pipeline_queue.add_pipeline(p);
+
+                // Create the scan operator for the aggregation pipeline
+                let column_indices = (0..schema.columns().len()).collect();
+                let scan = PScanIter::new(schema, agg_id, column_indices);
+
+                Ok((NonBlockingOp::Scan(scan), HashMap::new(), new_col_id_to_idx))
+            }
+            */
+            PhysicalRelExpr::Sort { src, column_names } => {
+                let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
+                let sort_cols = column_names
+                    .iter()
+                    .map(|(col_id, asc, nulls_first)| (col_id_to_idx[col_id], *asc, *nulls_first))
+                    .collect();
+                let schema = input_op.schema().clone();
+                let sort =
+                    BlockingOp::OnDiskSort(OnDiskSort::new(schema.clone(), input_op, sort_cols));
+
+                let sort_id = self.fetch_add_id();
+                let p = Pipeline::new_with_context(
+                    sort_id,
+                    sort,
+                    context,
+                    &self.mem_pool,
+                    &self.policy,
+                    ContainerKey::new(self.db_id, self.dest_c_id),
+                );
+                self.pipeline_queue.add_pipeline(p);
+
+                // Create the scan operator for the sort pipeline
+                let scan = PScanIter::new(
+                    schema.clone(),
+                    sort_id,
+                    (0..schema.columns().len()).collect(),
+                );
+                Ok((NonBlockingOp::Scan(scan), HashMap::new(), col_id_to_idx))
+            }
+            other => {
+                panic!("PhysicalRelExpr {:?} is not currently supported", other)
+            }
+        }
+    }
+}

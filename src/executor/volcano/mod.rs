@@ -38,11 +38,6 @@ pub enum VolcanoIterator<T: TxnStorageTrait> {
 impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
     type Buffer = ResultBuffer;
 
-    fn new(catalog: CatalogRef, storage: Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
-        let mut physical_to_op = PhysicalRelExprToOpIter::new(storage);
-        physical_to_op.convert(catalog, physical_plan)
-    }
-
     fn to_pretty_string(&self) -> String {
         let mut out = String::new();
         self.print_inner(0, &mut out);
@@ -66,6 +61,11 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
 }
 
 impl<T: TxnStorageTrait> VolcanoIterator<T> {
+    pub fn new(catalog: &CatalogRef, storage: &Arc<T>, physical_plan: PhysicalRelExpr) -> Self {
+        let mut physical_to_op = PhysicalRelExprToOpIter::new(storage.clone());
+        physical_to_op.convert(catalog.clone(), physical_plan)
+    }
+
     fn next(&mut self, txn: &T::TxnHandle) -> Result<Option<(Key, Tuple)>, ExecError> {
         // (key, tuple)
         match self {
