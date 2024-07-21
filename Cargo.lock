@@ -127,9 +127,9 @@ dependencies = [
 
 [[package]]
 name = "arrayref"
-version = "0.3.7"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b4930d2cb77ce62f89ee5d5289b4ac049559b1c45539271f5ed4fdc7db34545"
+checksum = "9d151e35f61089500b617991b791fc8bfd237ae50cd5950803758a179b41e67a"
 
 [[package]]
 name = "arrayvec"
@@ -1093,12 +1093,14 @@ checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 [[package]]
 name = "fbtree"
 version = "0.1.0"
-source = "git+https://github.com/rotaki/FosterBtree.git?branch=master#f075a11ce3eff9c057a219d7d1807a3665e6a128"
+source = "git+https://github.com/rotaki/FosterBtree.git?branch=master#b7ae313a91af6c6ee48a72ff3d89e971710f4e8f"
 dependencies = [
  "chrono",
  "clap",
  "getrandom",
+ "io-uring",
  "lazy_static",
+ "libc",
  "rand",
  "serde",
  "tempfile",
@@ -1381,6 +1383,16 @@ name = "integer-encoding"
 version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
+
+[[package]]
+name = "io-uring"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "595a0399f411a508feb2ec1e970a4a30c249351e30208960d58298de8660b0e5"
+dependencies = [
+ "bitflags 1.3.2",
+ "libc",
+]
 
 [[package]]
 name = "is_terminal_polyfill"

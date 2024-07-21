@@ -14,6 +14,7 @@ pub mod prelude {
     pub use super::*;
 }
 
+#[derive(Debug)]
 pub struct Table {
     name: String,
     schema: SchemaRef,
@@ -35,6 +36,7 @@ impl Table {
 pub type TableRef = Arc<Table>;
 
 /// Per DB catalog
+#[derive(Debug)]
 pub struct Catalog {
     tables: Mutex<HashMap<ContainerId, TableRef>>,
 }

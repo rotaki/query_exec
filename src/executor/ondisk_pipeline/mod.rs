@@ -1179,6 +1179,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
         mem_pool: &Arc<M>,
         policy: &Arc<MemoryPolicy>,
         physical_plan: PhysicalRelExpr,
+        exclude_last_pipeline: bool, // This option is used to exclude the last pipeline from the graph
     ) -> Self {
         let converter = PhysicalRelExprToPipelineQueue::new(
             db_id,
@@ -1189,7 +1190,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
         );
 
         converter
-            .convert(catalog.clone(), physical_plan)
+            .convert(catalog.clone(), physical_plan, exclude_last_pipeline)
             .expect("Failed to convert physical plan")
     }
 
@@ -1320,6 +1321,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
         mut self,
         catalog: CatalogRef,
         expr: PhysicalRelExpr,
+        exclude_last_pipeline: bool,
     ) -> Result<OnDiskPipelineGraph<T, E, M>, ExecError> {
         let (op, context, _) = self.convert_inner(catalog, expr)?;
         // if let NonBlockingOp::Scan(PScanIter {
@@ -1341,16 +1343,18 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
         //     }
         // }
         // // Other cases.
-        let blocking_op = BlockingOp::Dummy(op);
-        let pipeline = Pipeline::new_with_context(
-            self.fetch_add_id(),
-            blocking_op,
-            context,
-            &self.mem_pool,
-            &self.policy,
-            ContainerKey::new(self.db_id, self.dest_c_id),
-        );
-        self.pipeline_queue.add_pipeline(pipeline);
+        if !exclude_last_pipeline {
+            let blocking_op = BlockingOp::Dummy(op);
+            let pipeline = Pipeline::new_with_context(
+                self.fetch_add_id(),
+                blocking_op,
+                context,
+                &self.mem_pool,
+                &self.policy,
+                ContainerKey::new(self.db_id, self.dest_c_id),
+            );
+            self.pipeline_queue.add_pipeline(pipeline);
+        }
         Ok(self.pipeline_queue)
     }
 

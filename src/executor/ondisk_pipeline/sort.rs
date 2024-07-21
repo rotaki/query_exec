@@ -580,9 +580,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
+        println!("Stats after run generation: {}", mem_pool.stats());
 
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
+        println!("Stats after merge: {}", mem_pool.stats());
 
         Ok(Arc::new(OnDiskBuffer::BTree(final_run)))
     }
@@ -676,15 +678,11 @@ mod tests {
 
     mod sort_buffer {
         use fbtree::{
-            bp::{BufferPoolForTest, ContainerKey, LRUEvictionPolicy, MemPool},
+            bp::{get_test_bp, ContainerKey, MemPool},
             random::gen_random_permutation,
         };
 
         use super::*;
-
-        fn get_mem_pool() -> BufferPoolForTest<LRUEvictionPolicy> {
-            BufferPoolForTest::new(10)
-        }
 
         fn c_key() -> ContainerKey {
             ContainerKey::new(0, 0)
@@ -692,7 +690,7 @@ mod tests {
 
         #[test]
         fn test_sort_buffer_append() {
-            let bp = get_mem_pool();
+            let bp = get_test_bp(10);
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
@@ -712,7 +710,7 @@ mod tests {
 
         #[test]
         fn test_sort_buffer_append_to_next_page() {
-            let bp = get_mem_pool();
+            let bp = get_test_bp(10);
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
@@ -737,7 +735,7 @@ mod tests {
 
         #[test]
         fn test_sort_buffer_sort() {
-            let bp = get_mem_pool();
+            let bp = get_test_bp(10);
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
@@ -783,7 +781,7 @@ mod tests {
 
         #[test]
         fn test_sort_buffer_reuse() {
-            let bp = get_mem_pool();
+            let bp = get_test_bp(10);
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
@@ -872,7 +870,7 @@ mod tests {
 
     mod external_sort {
         use fbtree::{
-            bp::{BufferPoolForTest, ContainerKey, LRUEvictionPolicy},
+            bp::{get_test_bp, BufferPool, ContainerKey, LRUEvictionPolicy},
             prelude::AppendOnlyStore,
             random::{gen_random_permutation, RandomKVs},
             txn_storage::InMemStorage,
@@ -885,10 +883,6 @@ mod tests {
 
         use super::*;
 
-        fn get_mem_pool() -> BufferPoolForTest<LRUEvictionPolicy> {
-            BufferPoolForTest::new(100)
-        }
-
         fn get_c_key(c_id: u16) -> ContainerKey {
             ContainerKey::new(0, c_id)
         }
@@ -896,7 +890,7 @@ mod tests {
         #[test]
         fn test_merge() {
             // Generate three foster btrees
-            let bp = Arc::new(get_mem_pool());
+            let bp = get_test_bp(100);
             let mut runs = Vec::new();
             let num_runs = 3;
             let kvs = RandomKVs::new(true, true, num_runs, 3000, 50, 100, 100);
@@ -939,7 +933,7 @@ mod tests {
         #[test]
         fn test_run_generation() {
             // Create a append only store with 10000 random kvs
-            let bp = Arc::new(get_mem_pool());
+            let bp = get_test_bp(100);
             let c_key = get_c_key(0);
             let num_kvs = 10000;
             let append_only_store = Arc::new(AppendOnlyStore::new(c_key, bp.clone()));
@@ -962,11 +956,12 @@ mod tests {
             ));
 
             // Scan the append only store with the scan operator
-            let scan = PScanIter::<
-                InMemStorage,
-                LRUEvictionPolicy,
-                BufferPoolForTest<LRUEvictionPolicy>,
-            >::new(schema.clone(), 0, (0..4).collect());
+            let scan =
+                PScanIter::<InMemStorage, LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>::new(
+                    schema.clone(),
+                    0,
+                    (0..4).collect(),
+                );
 
             let mut context = HashMap::new();
             context.insert(
@@ -1011,7 +1006,7 @@ mod tests {
         #[test]
         fn test_external_sorting() {
             // Create a append only store with 10000 random kvs
-            let bp = Arc::new(get_mem_pool());
+            let bp = get_test_bp(100);
             let c_key = get_c_key(0);
             let num_kvs = 10000;
             let append_only_store = Arc::new(AppendOnlyStore::new(c_key, bp.clone()));
@@ -1034,11 +1029,12 @@ mod tests {
             ));
 
             // Scan the append only store with the scan operator
-            let scan = PScanIter::<
-                InMemStorage,
-                LRUEvictionPolicy,
-                BufferPoolForTest<LRUEvictionPolicy>,
-            >::new(schema.clone(), 0, (0..4).collect());
+            let scan =
+                PScanIter::<InMemStorage, LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>::new(
+                    schema.clone(),
+                    0,
+                    (0..4).collect(),
+                );
 
             let mut context = HashMap::new();
             context.insert(

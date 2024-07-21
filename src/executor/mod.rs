@@ -11,6 +11,7 @@ mod volcano;
 
 pub mod prelude {
     pub use super::inmem_pipeline::InMemPipelineGraph;
+    pub use super::ondisk_pipeline::{MemoryPolicy, OnDiskPipelineGraph};
     pub use super::volcano::VolcanoIterator;
     pub use super::{Executor, TupleBuffer, TupleBufferIter};
 }
