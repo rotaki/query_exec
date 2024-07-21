@@ -74,8 +74,9 @@ fn main() {
         let path = format!("tpch/data/sf-{}/input/{}.csv", opt.scale_factor, table);
         import_csv(&catalog, &storage, db_id, c_id, path, true, b'|').unwrap();
     }
+    bp.flush_all().unwrap();
 
-    println!("Data loaded. Running query...");
+    println!("Data loaded and flushed. Running query...");
     let sql_string = "
         SELECT *
         FROM LINEITEM
@@ -103,11 +104,11 @@ fn main() {
 
     println!("Result num rows: {}", result.num_tuples());
     // Print the first 10 rows
-    let result_iter = result.iter();
-    for i in 0..10 {
-        let tuple = result_iter.next().unwrap().unwrap();
-        println!("Row {}: {:?}", i, tuple);
-    }
+    // let result_iter = result.iter();
+    // for i in 0..10 {
+    //     let tuple = result_iter.next().unwrap().unwrap();
+    //     println!("Row {}: {:?}", i, tuple);
+    // }
 
     /*
     if opt.bench_all {
