@@ -35,6 +35,8 @@ fn main() {
             "Data directory {} does not exist. Generate data first.",
             data_dir
         );
+    } else {
+        println!("Importing data from {}.", data_dir);
     }
 
     let catalog = get_catalog();
@@ -48,9 +50,10 @@ fn main() {
     let storage = Arc::new(OnDiskStorage::new(&bp));
     let db_id = create_db(&storage, "TPCH").unwrap();
 
-    let table_names = vec![
-        "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
-    ];
+    // let table_names = vec![
+    //     "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
+    // ];
+    let table_names = vec!["lineitem"];
 
     println!("Creating tables...");
 
@@ -64,7 +67,7 @@ fn main() {
             &storage,
             db_id,
             sql.as_ref(),
-            ContainerType::BTree,
+            ContainerType::AppendOnly,
         )
         .unwrap();
         tables.insert(table, c_id);

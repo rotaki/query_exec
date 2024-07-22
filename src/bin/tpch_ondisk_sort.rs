@@ -13,11 +13,15 @@ pub struct SortParam {
     /// Load database from path. If not set, load from scratch.
     #[clap(short = 'p', long = "path", default_value = "bp-dir-tpch-sf-0.1")]
     pub path: String,
-    /// Buffer pool size.
-    #[clap(short = 'b', long = "buffer pool size", default_value = "1024")]
+    /// Buffer pool size. Default is 16GB = 32K * 524288
+    #[clap(short = 'b', long = "buffer pool size", default_value = "524288")]
     pub buffer_pool_size: usize,
-    /// Memory size per operator.
-    #[clap(short = 'm', long = "memory size per operator", default_value = "10")]
+    /// Memory size per operator. Default is 4GB = 32K * 131072
+    #[clap(
+        short = 'm',
+        long = "memory size per operator",
+        default_value = "131072"
+    )]
     pub memory_size_per_operator: usize,
     /// Input query
     #[clap(short = 'q', long = "query id", default_value = "100")]
@@ -25,6 +29,9 @@ pub struct SortParam {
     /// Temp c_id. This is the container id for the intermediate results.
     #[clap(short = 't', long = "temp c_id", default_value = "1000")]
     pub temp_c_id: usize,
+    /// Exclude last pipeline. If set, the last pipeline is excluded.
+    #[clap(short = 'e', long = "exclude last pipeline", default_value = "true")]
+    pub exclude_last_pipeline: bool,
 }
 
 fn main() {
@@ -54,12 +61,11 @@ fn main() {
         &bp,
         &mem_policy,
         physical.clone(),
-        true,
+        opt.exclude_last_pipeline,
     );
 
     let result = execute(db_id, &storage, exe, true);
 
     println!("stats: \n{}", bp.stats());
-
     println!("Result num rows: {}", result.num_tuples());
 }

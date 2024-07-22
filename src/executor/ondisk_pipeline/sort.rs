@@ -16,6 +16,7 @@ use std::{
 use crate::{
     error::ExecError,
     executor::TupleBuffer,
+    log_warn,
     prelude::{Page, PageId, SchemaRef, AVAILABLE_PAGE_SIZE},
     tuple::Tuple,
     ColumnId,
@@ -268,9 +269,9 @@ impl AppendOnlyKVPage for Page {
 
 pub struct SortBuffer<'a, E: EvictionPolicy> {
     sort_cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
-    ptrs: Vec<(u16, u16)>,                  // Slot pointers. (page index, slot_id)
+    ptrs: Vec<(usize, u16)>,                // Slot pointers. (page index, slot_id)
     data_buffer: Vec<FrameWriteGuard<'a, E>>,
-    current_page_idx: u16,
+    current_page_idx: usize,
 }
 
 impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
@@ -478,6 +479,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
             }
         };
 
+        println!("Stats after allocating frames: \n{}", mem_pool.stats());
+        // reset stats
+        println!("Resetting stats");
+        mem_pool.reset_stats();
+
         let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
 
         let mut result_buffers = Vec::new();
@@ -517,7 +523,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         };
         result_buffers.push(output);
 
-        println!("Generated {} runs", result_buffers.len());
         Ok(result_buffers)
     }
 
@@ -591,12 +596,24 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+        println!("Stats before run generation: \n{}", mem_pool.stats());
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
+        println!(
+            "Runs: {:?}",
+            runs.iter()
+                .map(|r| format!("(t: {}, p: {})", r.num_kvs(), r.num_pages()))
+                .collect::<Vec<_>>()
+        );
         println!("Stats after run generation: \n{}", mem_pool.stats());
 
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
+        println!(
+            "Final run: (t: {}, p: {})",
+            final_run.num_kvs(),
+            final_run.num_pages()
+        );
         println!("Stats after merge: \n{}", mem_pool.stats());
 
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))

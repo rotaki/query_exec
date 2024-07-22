@@ -32,11 +32,13 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
         db_id: DatabaseId,
         c_id: ContainerId,
     ) -> Result<(), String> {
-        let num_tuples = 1000; // Insert 1000 tuples at a time
+        println!("Loading data into container: {}", c_id);
+        let mut count = 0;
+        let num_tuples = 1000000; // Insert 1000 tuples at a time
         let txn = self.storage.begin_txn(&db_id, TxnOptions::default())?;
         let primary_key_indices = schema_ref.primary_key_indices();
         loop {
-            let mut tuples = Vec::with_capacity(num_tuples);
+            let mut tuples = Vec::new();
             for result in self.rdr.records() {
                 match result {
                     Ok(rec) => {
@@ -65,13 +67,16 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
                     }
                 }
             }
+            count += tuples.len();
             if tuples.is_empty() {
                 break;
             } else {
                 self.storage.insert_values(&txn, &c_id, tuples)?;
+                println!("Inserted {} tuples", count);
             }
         }
         self.storage.commit_txn(&txn, false)?;
+        println!("Inserted {} tuples in total", count);
         Ok(())
     }
 }

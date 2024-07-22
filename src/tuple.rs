@@ -10,6 +10,7 @@ use crate::{
 };
 
 use chrono::{Datelike, Days, Months, NaiveDate};
+use serde::{Deserialize, Serialize};
 
 fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     let mut val_bits = val.to_bits();
@@ -25,7 +26,7 @@ fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     val_bits.to_be_bytes()
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Tuple {
     fields: Vec<Field>,
 }
@@ -100,34 +101,36 @@ impl Tuple {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let num_fields = self.fields.len() as u32;
-        bytes.extend_from_slice(&num_fields.to_be_bytes());
-        for field in &self.fields {
-            let field_bytes = field.to_bytes();
-            let field_len = field_bytes.len() as u32;
-            bytes.extend_from_slice(&field_len.to_be_bytes());
-            bytes.extend_from_slice(&field_bytes);
-        }
-        bytes
+        bincode::serialize(&self).unwrap()
+        // let mut bytes = Vec::new();
+        // let num_fields = self.fields.len() as u32;
+        // bytes.extend_from_slice(&num_fields.to_be_bytes());
+        // for field in &self.fields {
+        //     let field_bytes = field.to_bytes();
+        //     let field_len = field_bytes.len() as u32;
+        //     bytes.extend_from_slice(&field_len.to_be_bytes());
+        //     bytes.extend_from_slice(&field_bytes);
+        // }
+        // bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let num_fields = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-        let mut offset = 4;
-        let mut fields = Vec::with_capacity(num_fields);
-        for _ in 0..num_fields {
-            let field_len = u32::from_be_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]) as usize;
-            let field_bytes = &bytes[offset + 4..offset + 4 + field_len];
-            fields.push(Field::from_bytes(field_bytes));
-            offset += 4 + field_len;
-        }
-        Tuple { fields }
+        bincode::deserialize(bytes).unwrap()
+        // let num_fields = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        // let mut offset = 4;
+        // let mut fields = Vec::with_capacity(num_fields);
+        // for _ in 0..num_fields {
+        //     let field_len = u32::from_be_bytes([
+        //         bytes[offset],
+        //         bytes[offset + 1],
+        //         bytes[offset + 2],
+        //         bytes[offset + 3],
+        //     ]) as usize;
+        //     let field_bytes = &bytes[offset + 4..offset + 4 + field_len];
+        //     fields.push(Field::from_bytes(field_bytes));
+        //     offset += 4 + field_len;
+        // }
+        // Tuple { fields }
     }
 
     pub fn project(mut self, col_ids: &Vec<usize>) -> Tuple {
@@ -312,7 +315,7 @@ impl std::fmt::Display for Tuple {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Field {
     Boolean(Option<bool>),
     Int(Option<i64>),
@@ -325,6 +328,8 @@ pub enum Field {
 
 impl Field {
     pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(&self).unwrap()
+        /*
         let mut bytes = Vec::new();
         // [type, is_null, value]
         match self {
@@ -383,9 +388,12 @@ impl Field {
             }
         }
         bytes
+        */
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
+        bincode::deserialize(bytes).unwrap()
+        /*
         let data_type = bytes[0];
         let is_null = bytes[1] == 1;
         let offset = 2;
@@ -456,6 +464,7 @@ impl Field {
             }
             _ => panic!("Unknown data type"),
         }
+        */
     }
 }
 
