@@ -93,9 +93,8 @@ mod slot {
     }
 }
 use fbtree::{
-    access_method::fbt::FosterBtreeRangeScanner,
     bp::{ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
-    prelude::FosterBtree,
+    prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
 };
 use slot::*;
@@ -338,6 +337,16 @@ impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
     }
 }
 
+impl<'a, E: EvictionPolicy> Drop for SortBuffer<'a, E> {
+    fn drop(&mut self) {
+        // Make all the pages undirty because they don't need to be written back.
+        for page in &mut self.data_buffer {
+            page.dirty()
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 /// Iterator for sort buffer. Output key, value by sorting order.
 pub struct SortBufferIter<'a, E: EvictionPolicy> {
     sort_buffer: &'a SortBuffer<'a, E>,
@@ -371,12 +380,12 @@ impl<'a, E: EvictionPolicy> Iterator for SortBufferIter<'a, E> {
 }
 
 pub struct MergeIter<E: EvictionPolicy + 'static, M: MemPool<E>> {
-    run_iters: Vec<FosterBtreeRangeScanner<E, M>>,
+    run_iters: Vec<AppendOnlyStoreScanner<E, M>>,
     heap: BinaryHeap<Reverse<(Vec<u8>, usize, Vec<u8>)>>,
 }
 
 impl<E: EvictionPolicy + 'static, M: MemPool<E>> MergeIter<E, M> {
-    pub fn new(mut run_iters: Vec<FosterBtreeRangeScanner<E, M>>) -> Self {
+    pub fn new(mut run_iters: Vec<AppendOnlyStoreScanner<E, M>>) -> Self {
         let mut heap = BinaryHeap::new();
         for (i, iter) in run_iters.iter_mut().enumerate() {
             if let Some((k, v)) = iter.next() {
@@ -454,7 +463,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<FosterBtree<E, M>>>, ExecError> {
+    ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
         let frames = match policy.as_ref() {
             MemoryPolicy::FixedSize(working_mem) => {
                 let working_mem = *working_mem;
@@ -480,7 +489,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 sort_buffer.sort();
                 let iter = SortBufferIter::new(&sort_buffer);
                 let output = {
-                    Arc::new(FosterBtree::bulk_insert_create(
+                    Arc::new(AppendOnlyStore::bulk_insert_create(
                         dest_c_key,
                         mem_pool.clone(),
                         iter,
@@ -500,7 +509,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         sort_buffer.sort();
         let iter = SortBufferIter::new(&sort_buffer);
         let output = {
-            Arc::new(FosterBtree::bulk_insert_create(
+            Arc::new(AppendOnlyStore::bulk_insert_create(
                 dest_c_key,
                 mem_pool.clone(),
                 iter,
@@ -515,16 +524,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     fn run_merge(
         &mut self,
         policy: &Arc<MemoryPolicy>,
-        mut runs: Vec<Arc<FosterBtree<E, M>>>,
+        mut runs: Vec<Arc<AppendOnlyStore<E, M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<FosterBtree<E, M>>, ExecError> {
+    ) -> Result<Arc<AppendOnlyStore<E, M>>, ExecError> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSize(working_mem) => {
-                let mut num_merge_steps = 0;
+                let mut merge_steps_per_level = Vec::new();
 
                 let working_mem = *working_mem;
                 while runs.len() > 1 {
+                    let mut num_merge_steps = 0;
                     // Sort the runs by the number of kvs
                     runs.sort_by_key(|r| r.num_kvs());
 
@@ -542,9 +552,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                             merged_runs.push(merged_run);
                         }
                     }
+
+                    merge_steps_per_level.push(num_merge_steps);
                     runs = merged_runs;
                 }
-                println!("Total merge steps: {}", num_merge_steps);
+
+                println!("Total merge steps: {:?}", merge_steps_per_level);
                 runs.pop().unwrap()
             }
             MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
@@ -558,13 +571,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
 
     fn merge_step(
         &mut self,
-        runs: Vec<Arc<FosterBtree<E, M>>>,
+        runs: Vec<Arc<AppendOnlyStore<E, M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Arc<FosterBtree<E, M>> {
+    ) -> Arc<AppendOnlyStore<E, M>> {
         println!("Merging {} runs", runs.len());
-        let merge_iter = MergeIter::new(runs.iter().map(|r| r.scan(&[], &[])).collect());
-        Arc::new(FosterBtree::bulk_insert_create(
+        let merge_iter = MergeIter::new(runs.iter().map(|r| r.scan()).collect());
+        Arc::new(AppendOnlyStore::bulk_insert_create(
             dest_c_key,
             mem_pool.clone(),
             merge_iter,
@@ -580,13 +593,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
-        println!("Stats after run generation: {}", mem_pool.stats());
+        println!("Stats after run generation: \n{}", mem_pool.stats());
 
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
-        println!("Stats after merge: {}", mem_pool.stats());
+        println!("Stats after merge: \n{}", mem_pool.stats());
 
-        Ok(Arc::new(OnDiskBuffer::BTree(final_run)))
+        Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 }
 
@@ -897,7 +910,7 @@ mod tests {
             for (i, kv) in kvs.iter().enumerate() {
                 let c_key = get_c_key(i as u16);
                 // Each kv is sorted so we can bulk insert them
-                let tree = Arc::new(FosterBtree::bulk_insert_create(
+                let tree = Arc::new(AppendOnlyStore::bulk_insert_create(
                     c_key,
                     bp.clone(),
                     kv.iter(),
@@ -906,7 +919,7 @@ mod tests {
             }
 
             // Merge the runs and check if they contain the same kvs
-            let merge = MergeIter::new(runs.iter().map(|r| r.scan(&[], &[])).collect());
+            let merge = MergeIter::new(runs.iter().map(|r| r.scan()).collect());
             let mut result = Vec::new();
             for (k, v) in merge {
                 result.push((k, v));
@@ -941,7 +954,7 @@ mod tests {
             let mut expected = Vec::new();
             for k in keys {
                 let tuple = Tuple::from_fields(vec![k.into(), 1.into(), 2.into(), 3.into()]);
-                append_only_store.append(&tuple.to_bytes()).unwrap();
+                append_only_store.append(&[], &tuple.to_bytes()).unwrap();
                 expected.push(tuple);
             }
 
@@ -983,7 +996,7 @@ mod tests {
             println!("Num runs: {}", runs.len());
 
             // Check if the result contains all the kvs
-            let merge = MergeIter::new(runs.iter().map(|r| r.scan(&[], &[])).collect());
+            let merge = MergeIter::new(runs.iter().map(|r| r.scan()).collect());
             let mut result = Vec::new();
 
             for (k, v) in merge {
@@ -1014,7 +1027,7 @@ mod tests {
             let mut expected = Vec::new();
             for k in keys {
                 let tuple = Tuple::from_fields(vec![k.into(), 1.into(), 2.into(), 3.into()]);
-                append_only_store.append(&tuple.to_bytes()).unwrap();
+                append_only_store.append(&[], &tuple.to_bytes()).unwrap();
                 expected.push(tuple);
             }
 

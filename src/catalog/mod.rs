@@ -31,6 +31,22 @@ impl Table {
     pub fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let name_len = self.name.len() as u32;
+        bytes.extend_from_slice(&name_len.to_be_bytes());
+        bytes.extend_from_slice(self.name.as_bytes());
+        bytes.extend_from_slice(&self.schema.to_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let name_len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let name = String::from_utf8(bytes[4..4 + name_len].to_vec()).unwrap();
+        let schema = Schema::from_bytes(&bytes[4 + name_len..]);
+        Table::new(&name, Arc::new(schema))
+    }
 }
 
 pub type TableRef = Arc<Table>;
@@ -91,3 +107,27 @@ impl Catalog {
 }
 
 pub type CatalogRef = Arc<Catalog>;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_catalog_to_bytes_from_bytes() {
+        use super::*;
+        let schema = Schema::new(
+            vec![
+                ColumnDef::new("c1", DataType::Int, false),
+                ColumnDef::new("c2", DataType::Int, false),
+            ],
+            vec![0],
+        );
+        let table = Table::new("t1", Arc::new(schema));
+        let bytes = table.to_bytes();
+        let table2 = Table::from_bytes(&bytes);
+        assert_eq!(table.name, table2.name);
+        assert_eq!(table.schema().columns(), table2.schema().columns());
+        assert_eq!(
+            table.schema().primary_key_indices(),
+            table2.schema().primary_key_indices()
+        );
+    }
+}

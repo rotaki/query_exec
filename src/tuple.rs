@@ -4,8 +4,6 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::{
     catalog::{ColumnDef, DataType},
     error::ExecError,
@@ -27,7 +25,7 @@ fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     val_bits.to_be_bytes()
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Tuple {
     fields: Vec<Field>,
 }
@@ -102,13 +100,34 @@ impl Tuple {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(&self.fields).unwrap()
+        let mut bytes = Vec::new();
+        let num_fields = self.fields.len() as u32;
+        bytes.extend_from_slice(&num_fields.to_be_bytes());
+        for field in &self.fields {
+            let field_bytes = field.to_bytes();
+            let field_len = field_bytes.len() as u32;
+            bytes.extend_from_slice(&field_len.to_be_bytes());
+            bytes.extend_from_slice(&field_bytes);
+        }
+        bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Tuple {
-            fields: bincode::deserialize(bytes).unwrap(),
+        let num_fields = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let mut offset = 4;
+        let mut fields = Vec::with_capacity(num_fields);
+        for _ in 0..num_fields {
+            let field_len = u32::from_be_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]) as usize;
+            let field_bytes = &bytes[offset + 4..offset + 4 + field_len];
+            fields.push(Field::from_bytes(field_bytes));
+            offset += 4 + field_len;
         }
+        Tuple { fields }
     }
 
     pub fn project(mut self, col_ids: &Vec<usize>) -> Tuple {
@@ -293,7 +312,7 @@ impl std::fmt::Display for Tuple {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum Field {
     Boolean(Option<bool>),
     Int(Option<i64>),
@@ -302,6 +321,142 @@ pub enum Field {
     Date(Option<NaiveDate>),
     Months(Option<u32>),
     Days(Option<u64>),
+}
+
+impl Field {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // [type, is_null, value]
+        match self {
+            Field::Boolean(val) => {
+                bytes.push(0);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    bytes.push(*val as u8);
+                }
+            }
+            Field::Int(val) => {
+                bytes.push(1);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    bytes.extend_from_slice(&val.to_be_bytes());
+                }
+            }
+            Field::Float(val) => {
+                bytes.push(2);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    bytes.extend_from_slice(&val.to_be_bytes());
+                }
+            }
+            Field::String(val) => {
+                bytes.push(3);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    let val_bytes = val.as_bytes();
+                    let len = val_bytes.len() as u32;
+                    bytes.extend_from_slice(&len.to_be_bytes());
+                    bytes.extend_from_slice(val_bytes);
+                }
+            }
+            Field::Date(val) => {
+                bytes.push(4);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    let val_bytes = val.num_days_from_ce().to_be_bytes();
+                    bytes.extend_from_slice(&val_bytes);
+                }
+            }
+            Field::Months(val) => {
+                bytes.push(5);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    bytes.extend_from_slice(&val.to_be_bytes());
+                }
+            }
+            Field::Days(val) => {
+                bytes.push(6);
+                bytes.push(val.is_none() as u8);
+                if let Some(val) = val {
+                    bytes.extend_from_slice(&val.to_be_bytes());
+                }
+            }
+        }
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let data_type = bytes[0];
+        let is_null = bytes[1] == 1;
+        let offset = 2;
+        match data_type {
+            0 => {
+                let val = if is_null { None } else { Some(bytes[2] == 1) };
+                Field::Boolean(val)
+            }
+            1 => {
+                let val = if is_null {
+                    None
+                } else {
+                    let mut val_bytes = [0; 8];
+                    val_bytes.copy_from_slice(&bytes[2..10]);
+                    Some(i64::from_be_bytes(val_bytes))
+                };
+                Field::Int(val)
+            }
+            2 => {
+                let val = if is_null {
+                    None
+                } else {
+                    let mut val_bytes = [0; 8];
+                    val_bytes.copy_from_slice(&bytes[2..10]);
+                    Some(f64::from_be_bytes(val_bytes))
+                };
+                Field::Float(val)
+            }
+            3 => {
+                let val = if is_null {
+                    None
+                } else {
+                    let len = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]) as usize;
+                    let val_bytes = &bytes[6..6 + len];
+                    Some(String::from_utf8(val_bytes.to_vec()).unwrap())
+                };
+                Field::String(val)
+            }
+            4 => {
+                let val = if is_null {
+                    None
+                } else {
+                    let val_bytes = i32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+                    Some(NaiveDate::from_num_days_from_ce_opt(val_bytes).unwrap())
+                };
+                Field::Date(val)
+            }
+            5 => {
+                let val = if is_null {
+                    None
+                } else {
+                    let val_bytes = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+                    Some(val_bytes)
+                };
+                Field::Months(val)
+            }
+            6 => {
+                let val = if is_null {
+                    None
+                } else {
+                    let val_bytes = u64::from_be_bytes([
+                        bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
+                        bytes[9],
+                    ]);
+                    Some(val_bytes)
+                };
+                Field::Days(val)
+            }
+            _ => panic!("Unknown data type"),
+        }
+    }
 }
 
 impl PartialEq for Field {
@@ -921,5 +1076,61 @@ impl From<(i32, u32, u32)> for Field {
     fn from(val: (i32, u32, u32)) -> Self {
         let date = NaiveDate::from_ymd_opt(val.0, val.1, val.2);
         Field::Date(date)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_to_and_from_bytes_tuple_field() {
+        use super::*;
+        let field = Field::Int(Some(123));
+        let bytes = field.to_bytes();
+        let field2 = Field::from_bytes(&bytes);
+        assert_eq!(field, field2);
+
+        let field = Field::Float(Some(123.456));
+        let bytes = field.to_bytes();
+        let field2 = Field::from_bytes(&bytes);
+        assert_eq!(field, field2);
+
+        let field = Field::String(Some("hello".to_string()));
+        let bytes = field.to_bytes();
+        let field2 = Field::from_bytes(&bytes);
+        assert_eq!(field, field2);
+
+        let field = Field::Date(Some(NaiveDate::from_ymd_opt(2021, 1, 1).unwrap()));
+        let bytes = field.to_bytes();
+        let field2 = Field::from_bytes(&bytes);
+        assert_eq!(field, field2);
+
+        let field = Field::Months(Some(123));
+        let bytes = field.to_bytes();
+        let field2 = Field::from_bytes(&bytes);
+        assert_eq!(field, field2);
+
+        let field = Field::Days(Some(123));
+        let bytes = field.to_bytes();
+        let field2 = Field::from_bytes(&bytes);
+        assert_eq!(field, field2);
+
+        let tuple = Tuple::from_fields(vec![
+            Field::Int(Some(123)),
+            Field::Float(Some(123.456)),
+            Field::String(Some("hello".to_string())),
+            Field::Date(Some(NaiveDate::from_ymd_opt(2021, 1, 1).unwrap())),
+            Field::Months(Some(123)),
+            Field::Days(Some(123)),
+            Field::Int(None),
+            Field::Float(None),
+            Field::String(None),
+            Field::Date(None),
+            Field::Months(None),
+            Field::Days(None),
+        ]);
+
+        let bytes = tuple.to_bytes();
+        let tuple2 = Tuple::from_bytes(&bytes);
+        assert_eq!(tuple, tuple2);
     }
 }

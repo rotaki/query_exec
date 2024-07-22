@@ -18,7 +18,7 @@ use crate::expression::prelude::{
 use crate::loader::prelude::SimpleCsvLoader;
 use crate::loader::DataLoader;
 use crate::parser::{Translator, TranslatorError};
-use crate::prelude::{ColumnDef, DataType, Schema, SchemaRef, Table};
+use crate::prelude::{Catalog, ColumnDef, DataType, Schema, SchemaRef, Table};
 
 pub fn print_tuples(tuples: Arc<impl TupleBuffer>) {
     let mut count = 0;
@@ -225,12 +225,47 @@ fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorErr
     }
 }
 
+/// Create a database
+/// This will create a container with container_id 0 for the catalog.
 pub fn create_db<T: TxnStorageTrait>(
     storage: &Arc<T>,
     db_name: &str,
 ) -> Result<DatabaseId, QueryExecutorError> {
     let db_id = storage.open_db(DBOptions::new(db_name))?;
+    // Create a container for the catalog
+    let txn = storage.begin_txn(&db_id, Default::default())?;
+    let c_id = storage
+        .create_container(
+            &txn,
+            &db_id,
+            ContainerOptions::new("catalog", ContainerType::BTree),
+        )
+        .unwrap();
+    assert_eq!(c_id, 0);
+    storage.commit_txn(&txn, false)?;
     Ok(db_id)
+}
+
+/// Load a database from storage
+/// The catalog is loaded into memory.
+/// Catalog has a mapping from container_id to Table, which is created at container_id 0.
+pub fn load_db<T: TxnStorageTrait>(
+    storage: &Arc<T>,
+    db_name: &str,
+) -> Result<(DatabaseId, CatalogRef), QueryExecutorError> {
+    let db_id = storage.open_db(DBOptions::new(db_name))?;
+    // Scan container_id 0 to load the catalog
+    let txn = storage.begin_txn(&db_id, Default::default())?;
+    let catalog = Arc::new(Catalog::new());
+    let catalog_c_id = 0; // catalog container_id is 0
+    let iter = storage.scan_range(&txn, &catalog_c_id, Default::default())?;
+    while let Some((k, v)) = storage.iter_next(&iter)? {
+        let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
+        let table = Table::from_bytes(&v);
+        catalog.add_table(c_id, Arc::new(table));
+    }
+    storage.commit_txn(&txn, false)?;
+    Ok((db_id, catalog))
 }
 
 pub fn create_table_from_sql<T: TxnStorageTrait>(
@@ -265,7 +300,17 @@ pub fn create_table<T: TxnStorageTrait>(
         &db_id,
         ContainerOptions::new(table_name, container_type),
     )?;
+    // Insert the catalog entry into the catalog container
+    let catalog_c_id = 0;
+    let table = Table::new(table_name, schema.clone());
+    storage.insert_value(
+        &txn,
+        &catalog_c_id,
+        c_id.to_be_bytes().to_vec(),
+        table.to_bytes(),
+    )?;
     catalog_ref.add_table(c_id, Arc::new(Table::new(table_name, schema)));
+
     storage.commit_txn(&txn, false)?;
     Ok(c_id)
 }
@@ -299,220 +344,17 @@ pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
     Ok(())
 }
 
-/*
-pub struct QueryExecutor<T: TxnStorageTrait> {
-    pub db_id: DatabaseId,
-    pub catalog_ref: CatalogRef,
-    pub storage: Arc<T>,
-    pub logical_rules: HeuristicRulesRef,
-}
-
-impl<T: TxnStorageTrait> QueryExecutor<T> {
-    pub fn new(
-        db_id: DatabaseId,
-        catalog_ref: CatalogRef,
-        storage: Arc<T>,
-    ) -> Self {
-        let logical_rules = HeuristicRules::default();
-        QueryExecutor {
-            db_id,
-            catalog_ref,
-            storage,
-            logical_rules: Arc::new(logical_rules),
-        }
-    }
-
-    pub fn parse_sql(sql: &str) -> Result<sqlparser::ast::Query, QueryExecutorError> {
-        let dialect = GenericDialect {};
-        let statements = Parser::new(&dialect)
-            .try_with_sql(sql)?
-            .parse_statements()?;
-        let query = {
-            let statement = statements.into_iter().next().unwrap();
-            match statement {
-                sqlparser::ast::Statement::Query(query) => query,
-                other => {
-                    return Err(QueryExecutorError::InvalidSqlString(
-                        ParserError::ParserError(format!("Expected a query, got {:?}", other)),
-                    ))
-                }
-            }
-        };
-        Ok(*query)
-    }
-
-    pub fn to_logical(&self, sql_string: &str) -> Result<LogicalRelExpr, QueryExecutorError> {
-        pub fn parse_query(sql: &str) -> Result<sqlparser::ast::Query, QueryExecutorError> {
-            let dialect = GenericDialect {};
-            let statements = Parser::new(&dialect)
-                .try_with_sql(sql)?
-                .parse_statements()?;
-            let query = {
-                let statement = statements.into_iter().next().unwrap();
-                match statement {
-                    sqlparser::ast::Statement::Query(query) => query,
-                    other => {
-                        return Err(QueryExecutorError::InvalidSqlString(
-                            ParserError::ParserError(format!("Expected a query, got {:?}", other)),
-                        ))
-                    }
-                }
-            };
-            Ok(*query)
-        }
-        let query = parse_query(sql_string)?;
-        let mut translator = Translator::new(self.db_id, &self.catalog_ref, &self.logical_rules);
-        let result = translator.process_query(&query)?;
-        Ok(result.plan)
-    }
-
-    pub fn to_physical(&self, logical_plan: LogicalRelExpr) -> PhysicalRelExpr {
-        LogicalToPhysicalRelExpr.to_physical(logical_plan)
-    }
-
-    // Executes the query and returns the result.
-    pub fn execute<Exec: Executor<T>>(
-        &self,
-        exec: Exec,
-    ) -> Result<Arc<Exec::Buffer>, QueryExecutorError> {
-        let txn = self.storage.begin_txn(&self.db_id, Default::default())?;
-        let result = exec.execute(&txn)?;
-        self.storage.commit_txn(&txn, false)?;
-        Ok(result)
-    }
-
-    pub fn create_table_from_sql(
-        &self,
-        sql_string: &str,
-        container_type: ContainerType,
-    ) -> Result<ContainerId, QueryExecutorError> {
-        fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorError> {
-            let dialect = GenericDialect {};
-            let statements = Parser::new(&dialect)
-                .try_with_sql(sql)?
-                .parse_statements()?;
-            let statement = statements.into_iter().next().unwrap();
-            match statement {
-                sqlparser::ast::Statement::CreateTable {
-                    name,
-                    columns,
-                    constraints,
-                    ..
-                } => {
-                    // Create a schema
-                    let col_defs = columns
-                        .iter()
-                        .map(|c| {
-                            let data_type = match &c.data_type {
-                                sqlparser::ast::DataType::Int(_)
-                                | sqlparser::ast::DataType::Integer(_) => DataType::Int,
-                                sqlparser::ast::DataType::Text => DataType::String,
-                                sqlparser::ast::DataType::Boolean => DataType::Boolean,
-                                sqlparser::ast::DataType::Float(_)
-                                | sqlparser::ast::DataType::Double
-                                | sqlparser::ast::DataType::Decimal(_) => DataType::Float,
-                                sqlparser::ast::DataType::Char(_) => DataType::String,
-                                sqlparser::ast::DataType::Varchar(_) => DataType::String,
-                                sqlparser::ast::DataType::Date => DataType::Date,
-                                other => {
-                                    return Err(QueryExecutorError::InvalidSqlString(
-                                        ParserError::ParserError(format!(
-                                            "Unsupported data type: {:?}",
-                                            other
-                                        )),
-                                    ))
-                                }
-                            };
-                            let not_null = c
-                                .options
-                                .iter()
-                                .any(|o| matches!(o.option, sqlparser::ast::ColumnOption::NotNull));
-                            Ok(ColumnDef::new(&c.name.value, data_type, !not_null))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-
-                    // Find the column index of the primary key.
-                    let inline_pk = columns
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, c)| {
-                            c.options
-                                .iter()
-                                .find(|o| {
-                                    matches!(
-                                        o.option,
-                                        sqlparser::ast::ColumnOption::Unique {
-                                            is_primary: true,
-                                            ..
-                                        }
-                                    )
-                                })
-                                .map(|_| i)
-                        })
-                        .collect::<Vec<_>>();
-                    let external_pk = constraints.iter().find_map(|c| match c {
-                        sqlparser::ast::TableConstraint::PrimaryKey { columns: pks, .. } => Some(
-                            pks.iter()
-                                .map(|pk| {
-                                    columns
-                                        .iter()
-                                        .position(|c| c.name.value == pk.value)
-                                        .unwrap()
-                                })
-                                .collect::<Vec<_>>(),
-                        ),
-                        _ => None,
-                    });
-                    let primary_key = match (inline_pk.len(), external_pk) {
-                        (0, None) => {
-                            return Err(QueryExecutorError::InvalidSqlString(
-                                ParserError::ParserError("Primary key not found".to_string()),
-                            ));
-                        }
-                        (1, None) => inline_pk,
-                        (0, Some(pk)) => pk,
-                        _ => {
-                            return Err(QueryExecutorError::InvalidSqlString(
-                                ParserError::ParserError(
-                                    "Multiple primary keys are not supported".to_string(),
-                                ),
-                            ))
-                        }
-                    };
-                    let schema = Arc::new(Schema::new(col_defs, primary_key));
-                    // name joined with a .
-                    let table_name = name.to_string();
-                    Ok((table_name, schema))
-                }
-                other => Err(QueryExecutorError::InvalidSqlString(
-                    ParserError::ParserError(format!(
-                        "Expected a CREATE TABLE statement, got {:?}",
-                        other
-                    )),
-                )),
-            }
-        }
-
-        let (table_name, schema) = parse_create_table(sql_string)?;
-        self.create_table(&table_name, schema, container_type)
-    }
-
-
-}
-    */
-
 #[cfg(test)]
 mod tests {
     use fbtree::{
-        bp::get_test_bp,
-        prelude::{
-            ContainerId, ContainerOptions, ContainerType, DBOptions, InMemStorage, TxnOptions,
-        },
+        bp::{get_test_bp, BufferPool, LRUEvictionPolicy},
+        prelude::{ContainerId, ContainerType, InMemStorage, TxnOptions},
+        random::gen_random_pathname,
         txn_storage::OnDiskStorage,
     };
 
     use crate::{
-        catalog::{Catalog, ColumnDef, DataType, Schema, Table},
+        catalog::Catalog,
         executor::prelude::{
             InMemPipelineGraph, MemoryPolicy, OnDiskPipelineGraph, VolcanoIterator,
         },
@@ -522,23 +364,15 @@ mod tests {
 
     use super::*;
 
-    // Catalog implementation is common
-    // Storage implementation varies (InMemStorage, OnDiskStorage, ...)
-    // Logical Plans and Physical Plans are common
-    // Executor implementation varies (InMemPipelineQueue, OnDiskPipelineQueue, VolcanoIterator, ...)
-    // Different executors have different ways to construct it from a physical plan
-
     fn get_in_mem_storage() -> Arc<InMemStorage> {
         Arc::new(InMemStorage::new())
     }
 
     fn setup_employees_table<T: TxnStorageTrait>(
-        storage: impl AsRef<T>,
+        storage: &Arc<T>,
         db_id: DatabaseId,
         catalog: &CatalogRef,
     ) -> ContainerId {
-        let storage = storage.as_ref();
-        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         // Create Employees table
         // Schema: id, name, age, department_id
         // 5 tuples
@@ -554,25 +388,16 @@ mod tests {
         4,David,28,2
         5,Eva,40,NULL
          */
-        let c_id = storage
-            .create_container(
-                &txn,
-                &db_id,
-                ContainerOptions::new("Employees", ContainerType::BTree),
-            )
-            .unwrap();
+        let c_id = create_table_from_sql(
+            catalog,
+            storage,
+            db_id,
+            "CREATE TABLE Employees (id INT, name VARCHAR, age INT, department_id INT, PRIMARY KEY (id))",
+            ContainerType::BTree,
+        ).unwrap();
+        let schema = catalog.get_schema(c_id).unwrap();
 
-        let schema = Arc::new(Schema::new(
-            vec![
-                ColumnDef::new("id", DataType::Int, false),
-                ColumnDef::new("name", DataType::String, false),
-                ColumnDef::new("age", DataType::Int, false),
-                ColumnDef::new("department_id", DataType::Int, true),
-            ],
-            vec![0],
-        ));
-        catalog.add_table(c_id, Arc::new(Table::new("Employees", schema.clone())));
-
+        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         let data = vec![
             Tuple::from_fields(vec![1.into(), "Alice".into(), 30.into(), 1.into()]),
             Tuple::from_fields(vec![2.into(), "Bob".into(), 22.into(), 2.into()]),
@@ -602,31 +427,22 @@ mod tests {
     }
 
     fn setup_departments_table<T: TxnStorageTrait>(
-        storage: impl AsRef<T>,
+        storage: &Arc<T>,
         db_id: DatabaseId,
         catalog: &CatalogRef,
     ) -> ContainerId {
-        let storage = storage.as_ref();
-        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         // Create Departments table
         // Schema: id, name
         // 3 tuples
-        let c_id = storage
-            .create_container(
-                &txn,
-                &db_id,
-                ContainerOptions::new("Departments", ContainerType::BTree),
-            )
-            .unwrap();
-
-        let schema = Arc::new(Schema::new(
-            vec![
-                ColumnDef::new("id", DataType::Int, false),
-                ColumnDef::new("name", DataType::String, false),
-            ],
-            vec![0],
-        ));
-        catalog.add_table(c_id, Arc::new(Table::new("Departments", schema.clone())));
+        let c_id = create_table_from_sql(
+            catalog,
+            storage,
+            db_id,
+            "CREATE TABLE Departments (id INT, name VARCHAR, PRIMARY KEY (id))",
+            ContainerType::BTree,
+        )
+        .unwrap();
+        let schema = catalog.get_schema(c_id).unwrap();
 
         /*
         id,name
@@ -635,6 +451,7 @@ mod tests {
         3,Marketing
         */
 
+        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         let data = vec![
             Tuple::from_fields(vec![1.into(), "HR".into()]),
             Tuple::from_fields(vec![2.into(), "Engineering".into()]),
@@ -659,6 +476,37 @@ mod tests {
         storage.commit_txn(&txn, false).unwrap();
 
         c_id
+    }
+
+    #[test]
+    fn test_catalog_durability() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db_name = gen_random_pathname(Some("test_db"));
+
+        let (db_id, emp_id, dep_id, original_catalog) = {
+            let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&tempdir, 10, false).unwrap());
+            let storage = Arc::new(OnDiskStorage::new(&bp));
+            let db_id = create_db(&storage, &db_name).unwrap();
+
+            let catalog = Catalog::new();
+            let catalog_ref = catalog.into();
+            let c_id = setup_employees_table(&storage, db_id, &catalog_ref);
+            let d_id = setup_departments_table(&storage, db_id, &catalog_ref);
+            (db_id, c_id, d_id, catalog_ref)
+        };
+
+        let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&tempdir, 10, false).unwrap());
+        let storage = Arc::new(OnDiskStorage::load(&bp));
+        let (new_db_id, new_catalog) = load_db(&storage, &db_name).unwrap();
+        assert_eq!(db_id, new_db_id);
+        assert_eq!(
+            original_catalog.get_schema(emp_id).unwrap(),
+            new_catalog.get_schema(emp_id).unwrap()
+        );
+        assert_eq!(
+            original_catalog.get_schema(dep_id).unwrap(),
+            new_catalog.get_schema(dep_id).unwrap()
+        );
     }
 
     fn check_result(
@@ -719,7 +567,7 @@ mod tests {
 
     fn volcano_executor(sql: &str) -> Arc<impl TupleBuffer> {
         let storage = get_in_mem_storage();
-        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let db_id = create_db(&storage, "test").unwrap();
         let catalog = Catalog::new();
         let catalog_ref = catalog.into();
         let _ = setup_employees_table(&storage, db_id, &catalog_ref);
@@ -731,7 +579,7 @@ mod tests {
 
     fn inmem_pipeline_executor(sql: &str) -> Arc<impl TupleBuffer> {
         let storage = get_in_mem_storage();
-        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let db_id = create_db(&storage, "test").unwrap();
         let catalog = Catalog::new();
         let catalog_ref = catalog.into();
         let _ = setup_employees_table(&storage, db_id, &catalog_ref);
@@ -744,7 +592,7 @@ mod tests {
     fn ondisk_pipeline_executor(sql: &str) -> Arc<impl TupleBuffer> {
         let mem_pool = get_test_bp(1024);
         let storage = Arc::new(OnDiskStorage::new(&mem_pool));
-        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let db_id = create_db(&storage, "test").unwrap();
         let catalog = Catalog::new();
         let catalog_ref = catalog.into();
         let _ = setup_employees_table(&storage, db_id, &catalog_ref);

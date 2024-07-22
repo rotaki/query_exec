@@ -7,7 +7,6 @@ use crate::{
     ColumnId,
 };
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
@@ -109,7 +108,7 @@ pub fn colidx_expr(colidx: usize) -> ByteCodeExpr {
 
 type ByteCodeType = u16;
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone)]
 pub struct ByteCodeExpr {
     pub bytecodes: Vec<ByteCodeType>,
     pub literals: Vec<Field>,

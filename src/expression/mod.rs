@@ -3,7 +3,6 @@ mod physical;
 
 use crate::{prelude::DataType, tuple::Field};
 use chrono::NaiveDate;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
@@ -39,7 +38,7 @@ pub trait PlanTrait: Clone + std::fmt::Debug + PartialEq + Eq + PartialOrd + Ord
     fn free(&self) -> HashSet<ColumnId>;
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -74,7 +73,7 @@ impl std::fmt::Display for BinaryOp {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AggOp {
     Avg,
     Count,

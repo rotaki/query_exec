@@ -1,88 +1,44 @@
 use clap::Parser;
 use query_exec::{
-    get_test_bp,
     prelude::{
-        create_db, create_table_from_sql, execute, import_csv, to_logical, to_physical, Catalog,
-        MemoryPolicy, OnDiskPipelineGraph, TupleBuffer, TupleBufferIter,
+        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
     },
-    ContainerType, OnDiskStorage,
+    BufferPool, LRUEvictionPolicy, OnDiskStorage,
 };
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Debug, Parser)]
 #[clap(name = "TPC-H", about = "TPC-H Benchmarks.")]
 pub struct SortParam {
-    /// Scale factor. Should be in range [0.01, 100].
-    #[clap(short = 's', long = "scale factor", default_value = "0.1")]
-    pub scale_factor: f64,
+    /// Load database from path. If not set, load from scratch.
+    #[clap(short = 'p', long = "path", default_value = "bp-dir-tpch-sf-0.1")]
+    pub path: String,
     /// Buffer pool size.
     #[clap(short = 'b', long = "buffer pool size", default_value = "1024")]
     pub buffer_pool_size: usize,
     /// Memory size per operator.
     #[clap(short = 'm', long = "memory size per operator", default_value = "10")]
     pub memory_size_per_operator: usize,
-}
-
-fn get_catalog() -> Arc<Catalog> {
-    Arc::new(Catalog::new())
+    /// Input query
+    #[clap(short = 'q', long = "query id", default_value = "100")]
+    pub query_id: usize,
 }
 
 fn main() {
     let opt = SortParam::parse();
 
-    // check if data dir exists (BASE_DIR/sql/tpch/data/sf-<scale_factor>)
-    let data_dir = format!("tpch/data/sf-{}", opt.scale_factor);
-    if !PathBuf::from(&data_dir).exists() {
-        panic!(
-            "Data directory {} does not exist. Generate data first.",
-            data_dir
-        );
-    }
+    let bp = Arc::new(
+        BufferPool::<LRUEvictionPolicy>::new(&opt.path, opt.buffer_pool_size, false).unwrap(),
+    );
+    let storage = Arc::new(OnDiskStorage::load(&bp));
+    let (db_id, catalog) = load_db(&storage, "TPCH").unwrap();
 
-    let catalog = get_catalog();
-    let bp = get_test_bp(opt.buffer_pool_size);
-    let storage = Arc::new(OnDiskStorage::new(&bp));
-    let db_id = create_db(&storage, "TPCH").unwrap();
-
-    // let table_names = vec![
-    //     "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
-    // ];
-    let table_names = vec!["lineitem"];
-
-    println!("Creating tables...");
-
-    let mut tables = HashMap::new();
-
-    for table in &table_names {
-        let path = format!("tpch/tables/{}.sql", table);
-        let sql = std::fs::read_to_string(path).unwrap();
-        let c_id = create_table_from_sql(
-            &catalog,
-            &storage,
-            db_id,
-            sql.as_ref(),
-            ContainerType::BTree,
-        )
-        .unwrap();
-        tables.insert(table, c_id);
-    }
-
-    println!("Tables created. Loading data...");
-
-    for table in &table_names {
-        let c_id = tables[table];
-        let path = format!("tpch/data/sf-{}/input/{}.csv", opt.scale_factor, table);
-        import_csv(&catalog, &storage, db_id, c_id, path, true, b'|').unwrap();
-    }
-    bp.flush_all().unwrap();
+    bp.reset_stats();
 
     println!("Data loaded and flushed. Running query...");
-    let sql_string = "
-        SELECT *
-        FROM LINEITEM
-        ORDER BY L_RETURNFLAG, L_LINESTATUS, L_ORDERKEY, L_LINENUMBER
-    ";
-    let logical = to_logical(db_id, &catalog, sql_string).unwrap();
+    let query_path = format!("tpch/queries/q{}.sql", opt.query_id);
+    let sql_string = std::fs::read_to_string(query_path).unwrap();
+    let logical = to_logical(db_id, &catalog, &sql_string).unwrap();
     let physical = to_physical(logical);
 
     let mem_policy = Arc::new(MemoryPolicy::FixedSize(opt.memory_size_per_operator));
@@ -100,7 +56,7 @@ fn main() {
 
     let result = execute(db_id, &storage, exe, true);
 
-    println!("stats: {}", bp.stats());
+    println!("stats: \n{}", bp.stats());
 
     println!("Result num rows: {}", result.num_tuples());
     // Print the first 10 rows

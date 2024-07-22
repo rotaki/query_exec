@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -25,7 +24,6 @@ const STARTING_COL_ID: ColumnId = 10000;
 /// IDs starting from 10000. The IDs are used to represent columns in the logical plan.
 /// These IDs will be useful for self-joins, and other queries that contain temporary
 /// columns (e.g., SELECT a+b FROM t1).
-#[derive(Serialize, Deserialize)]
 pub struct ColIdGen {
     current_id: AtomicUsize,
 }

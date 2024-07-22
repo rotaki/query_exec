@@ -161,9 +161,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> TupleBufferIter
             OnDiskBufferIter::TxnStorage(iter) => {
                 Ok(iter.next()?.map(|(_, v)| Tuple::from_bytes(&v)))
             }
-            OnDiskBufferIter::AppendOnlyStore(iter) => {
-                Ok(iter.lock().unwrap().next().map(|v| Tuple::from_bytes(&v)))
-            }
+            OnDiskBufferIter::AppendOnlyStore(iter) => Ok(iter
+                .lock()
+                .unwrap()
+                .next()
+                .map(|(_, v)| Tuple::from_bytes(&v))),
             OnDiskBufferIter::FosterBTree(iter) => Ok(iter
                 .lock()
                 .unwrap()

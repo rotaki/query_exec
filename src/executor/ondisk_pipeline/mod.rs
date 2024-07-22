@@ -1047,7 +1047,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
                 log_debug!("Dummy blocking op");
                 let output = Arc::new(AppendOnlyStore::new(dest_c_key, mem_pool.clone()));
                 while let Some(tuple) = plan.next(context)? {
-                    output.append(&tuple.to_bytes())?
+                    output.append(&[], &tuple.to_bytes())?
                 }
                 Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(output)))
             }
