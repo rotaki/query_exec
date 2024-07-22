@@ -9,7 +9,8 @@ parser.add_argument("--sf", default=0.01, type=float, help="Scale factor")
 
 sf = parser.parse_args().sf
 
-path = Path("./sf-{}".format(sf))
+# If sf has no decimal part, convert it to an integer
+path = Path("./sf-{0:g}".format(sf))
 if path.exists():
     print("TPCH data already exists")
     # Ask the user if they want to overwrite the data

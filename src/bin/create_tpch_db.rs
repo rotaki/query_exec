@@ -12,7 +12,8 @@ pub struct TpchOpt {
     #[clap(short = 's', long = "scale factor", default_value = "0.1")]
     pub scale_factor: f64,
     /// Buffer pool size.
-    #[clap(short = 'b', long = "buffer pool size", default_value = "100000")]
+    #[clap(short = 'b', long = "buffer pool size", default_value = "1000000")]
+    // 4K * 1000000 = 4GB
     pub buffer_pool_size: usize,
 }
 
@@ -38,6 +39,11 @@ fn main() {
 
     let catalog = get_catalog();
     let bp_name = format!("bp-dir-tpch-sf-{}", opt.scale_factor);
+
+    if PathBuf::from(&bp_name).exists() {
+        panic!("Buffer pool directory {} already exists.", bp_name);
+    }
+
     let bp = get_bp(&bp_name, opt.buffer_pool_size);
     let storage = Arc::new(OnDiskStorage::new(&bp));
     let db_id = create_db(&storage, "TPCH").unwrap();
@@ -71,7 +77,6 @@ fn main() {
         let path = format!("tpch/data/sf-{}/input/{}.csv", opt.scale_factor, table);
         import_csv(&catalog, &storage, db_id, c_id, path, true, b'|').unwrap();
     }
-    bp.clear_frames().unwrap();
 
     println!("Data written to {}.", bp_name);
 }

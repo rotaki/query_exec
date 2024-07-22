@@ -3,7 +3,7 @@ use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
     },
-    BufferPool, LRUEvictionPolicy, OnDiskStorage,
+    BufferPool, ContainerId, LRUEvictionPolicy, OnDiskStorage,
 };
 use std::sync::Arc;
 
@@ -22,6 +22,9 @@ pub struct SortParam {
     /// Input query
     #[clap(short = 'q', long = "query id", default_value = "100")]
     pub query_id: usize,
+    /// Temp c_id. This is the container id for the intermediate results.
+    #[clap(short = 't', long = "temp c_id", default_value = "1000")]
+    pub temp_c_id: usize,
 }
 
 fn main() {
@@ -42,7 +45,7 @@ fn main() {
     let physical = to_physical(logical);
 
     let mem_policy = Arc::new(MemoryPolicy::FixedSize(opt.memory_size_per_operator));
-    let temp_c_id = 1000;
+    let temp_c_id = opt.temp_c_id as ContainerId;
     let exe = OnDiskPipelineGraph::new(
         db_id,
         temp_c_id,
