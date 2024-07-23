@@ -523,6 +523,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         };
         result_buffers.push(output);
 
+        println!("Number of runs: {}", result_buffers.len());
+
         Ok(result_buffers)
     }
 
@@ -535,34 +537,60 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     ) -> Result<Arc<AppendOnlyStore<E, M>>, ExecError> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSize(working_mem) => {
-                let mut merge_steps_per_level = Vec::new();
+                let mut merge_fanins = Vec::new();
 
                 let working_mem = *working_mem;
+
+                if runs.len() > working_mem {
+                    // Plan the sorting wisely
+                    // Reduce the number of runs to F + k(F-1) so that
+                    // maximal fan-in is achieved. To do this, we need to
+                    // first merge a small number of runs.
+                    //
+                    // X: number of runs.
+                    // F: fan-in. working_mem
+                    // k: number of merge steps except the last one.
+                    // a: number of runs to merge first.
+                    //
+                    // X - a + 1 = F + k(F-1) <=> X + 1 = F + k(F-1) + a
+                    let k = (runs.len() + 1 - working_mem) / (working_mem - 1);
+                    let a = runs.len() + 1 - (working_mem + k * (working_mem - 1));
+
+                    // If a == 0, then the last merge step will have F-1 runs. Others will have F runs.
+                    // If a == 1, then you keep merging F runs.
+                    // If a > 1, then you first merge a runs, then F runs.
+
+                    assert!(working_mem + k * (working_mem - 1) == runs.len() - a + 1);
+                    assert!(a <= working_mem - 1);
+
+                    if a > 1 {
+                        // Merge a runs first
+                        runs.sort_by(|a, b| a.num_kvs().cmp(&b.num_kvs()));
+                        let a_runs = runs.drain(0..a).collect::<Vec<_>>();
+
+                        merge_fanins.push(a_runs.len());
+
+                        let a_result = self.merge_step(a_runs, mem_pool, dest_c_key);
+                        runs.push(a_result);
+                    }
+                }
+
                 while runs.len() > 1 {
-                    let mut num_merge_steps = 0;
                     // Sort the runs by the number of kvs
                     runs.sort_by_key(|r| r.num_kvs());
 
-                    let mut merged_runs = Vec::new();
+                    let runs_to_merge = runs
+                        .drain(0..working_mem.min(runs.len()))
+                        .collect::<Vec<_>>();
 
-                    while !runs.is_empty() {
-                        let k_runs = runs
-                            .drain(0..working_mem.min(runs.len()))
-                            .collect::<Vec<_>>();
-                        if k_runs.len() == 1 {
-                            merged_runs.push(k_runs[0].clone());
-                        } else {
-                            num_merge_steps += 1;
-                            let merged_run = self.merge_step(k_runs, mem_pool, dest_c_key);
-                            merged_runs.push(merged_run);
-                        }
-                    }
+                    merge_fanins.push(runs_to_merge.len());
 
-                    merge_steps_per_level.push(num_merge_steps);
-                    runs = merged_runs;
+                    let merged_run = self.merge_step(runs_to_merge, mem_pool, dest_c_key);
+                    runs.push(merged_run);
                 }
 
-                println!("Total merge steps: {:?}", merge_steps_per_level);
+                println!("Total merge steps: {:?}", merge_fanins.len());
+                println!("Fan-ins: {:?}", merge_fanins);
                 runs.pop().unwrap()
             }
             MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
