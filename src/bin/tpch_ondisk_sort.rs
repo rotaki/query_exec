@@ -34,7 +34,16 @@ pub struct SortParam {
     pub exclude_last_pipeline: bool,
 }
 
+fn clear_cache() {
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("echo 3 > /proc/sys/vm/drop_caches")
+        .output();
+}
+
 fn main() {
+    clear_cache();
+
     let opt = SortParam::parse();
 
     let bp = Arc::new(
@@ -51,7 +60,7 @@ fn main() {
     let logical = to_logical(db_id, &catalog, &sql_string).unwrap();
     let physical = to_physical(logical);
 
-    let mem_policy = Arc::new(MemoryPolicy::FixedSize(opt.memory_size_per_operator));
+    let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(opt.memory_size_per_operator));
     let temp_c_id = opt.temp_c_id as ContainerId;
     let exe = OnDiskPipelineGraph::new(
         db_id,
@@ -64,7 +73,9 @@ fn main() {
         opt.exclude_last_pipeline,
     );
 
+    let time = std::time::Instant::now();
     let result = execute(db_id, &storage, exe, true);
+    println!("Time: {} ms", time.elapsed().as_millis());
 
     println!("stats: \n{}", bp.stats());
     println!("Result num rows: {}", result.num_tuples());

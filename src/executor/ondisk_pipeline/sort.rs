@@ -94,7 +94,7 @@ mod slot {
     }
 }
 use fbtree::{
-    bp::{ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
+    bp::{self, ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
     prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
 };
@@ -267,25 +267,30 @@ impl AppendOnlyKVPage for Page {
     }
 }
 
-pub struct SortBuffer<'a, E: EvictionPolicy> {
+pub struct SortBuffer<E: EvictionPolicy + 'static, M: MemPool<E>> {
+    mem_pool: Arc<M>,
+    dest_c_key: ContainerKey,
+    policy: Arc<MemoryPolicy>,
     sort_cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
     ptrs: Vec<(usize, u16)>,                // Slot pointers. (page index, slot_id)
-    data_buffer: Vec<FrameWriteGuard<'a, E>>,
+    data_buffer: Vec<FrameWriteGuard<'static, E>>,
     current_page_idx: usize,
 }
 
-impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> SortBuffer<E, M> {
     pub fn new(
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        policy: &Arc<MemoryPolicy>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
-        mut data_buffer: Vec<FrameWriteGuard<'a, E>>,
     ) -> Self {
-        for page in &mut data_buffer {
-            page.init();
-        }
         Self {
+            mem_pool: mem_pool.clone(),
+            dest_c_key,
+            policy: policy.clone(),
             sort_cols,
             ptrs: Vec::new(),
-            data_buffer,
+            data_buffer: Vec::new(),
             current_page_idx: 0,
         }
     }
@@ -301,29 +306,68 @@ impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
     pub fn append(&mut self, tuple: &Tuple) -> bool {
         let key = tuple.to_normalized_key_bytes(&self.sort_cols);
         let val = tuple.to_bytes();
-        let mut page = &mut self.data_buffer[self.current_page_idx as usize];
+
+        if self.data_buffer.is_empty() {
+            self.current_page_idx = 0;
+            let frame = self
+                .mem_pool
+                .create_new_page_for_write(self.dest_c_key)
+                .unwrap();
+            let mut frame = unsafe {
+                std::mem::transmute::<FrameWriteGuard<'_, E>, FrameWriteGuard<'static, E>>(frame)
+            };
+            frame.init();
+            self.data_buffer.push(frame);
+        }
+
+        let page = self.data_buffer.get_mut(self.current_page_idx).unwrap();
         if page.append(&key, &val) {
             self.ptrs
                 .push((self.current_page_idx, page.slot_count() - 1));
             true
         } else {
-            // Push to the next page. If there is no next page, return false.
-            self.current_page_idx += 1;
-            if self.current_page_idx as usize >= self.data_buffer.len() {
-                self.current_page_idx -= 1;
-                false
-            } else {
-                page = &mut self.data_buffer[self.current_page_idx as usize];
+            // If the current page is full, try to use the next page.
+            // If the next page is not available, allocate a new page based on the memory policy.
+            // If allocation is not possible, return false.
+            let next_page_idx = self.current_page_idx + 1;
+            if next_page_idx < self.data_buffer.len() {
+                self.current_page_idx = next_page_idx;
+                let page = self.data_buffer.get_mut(self.current_page_idx).unwrap();
                 assert!(page.append(&key, &val), "Record too large to fit in a page");
                 self.ptrs
                     .push((self.current_page_idx, page.slot_count() - 1));
                 true
+            } else {
+                assert!(next_page_idx == self.data_buffer.len());
+                match self.policy.as_ref() {
+                    MemoryPolicy::FixedSizeLimit(max_length) => {
+                        if self.data_buffer.len() < *max_length {
+                            self.current_page_idx += 1;
+                            let frame = self
+                                .mem_pool
+                                .create_new_page_for_write(self.dest_c_key)
+                                .unwrap();
+                            let mut frame = unsafe {
+                                std::mem::transmute::<
+                                    FrameWriteGuard<'_, E>,
+                                    FrameWriteGuard<'static, E>,
+                                >(frame)
+                            };
+                            frame.init();
+                            self.data_buffer.push(frame);
+                            let page = self.data_buffer.get_mut(self.current_page_idx).unwrap();
+                            assert!(page.append(&key, &val), "Record too large to fit in a page");
+                            self.ptrs
+                                .push((self.current_page_idx, page.slot_count() - 1));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => unimplemented!("Memory policy is not implemented yet"),
+                }
             }
         }
-    }
-
-    pub fn grow(&mut self, frame: FrameWriteGuard<'a, E>) {
-        self.data_buffer.push(frame);
     }
 
     pub fn sort(&mut self) {
@@ -338,7 +382,7 @@ impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
     }
 }
 
-impl<'a, E: EvictionPolicy> Drop for SortBuffer<'a, E> {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> Drop for SortBuffer<E, M> {
     fn drop(&mut self) {
         // Make all the pages undirty because they don't need to be written back.
         for page in &mut self.data_buffer {
@@ -349,13 +393,13 @@ impl<'a, E: EvictionPolicy> Drop for SortBuffer<'a, E> {
 }
 
 /// Iterator for sort buffer. Output key, value by sorting order.
-pub struct SortBufferIter<'a, E: EvictionPolicy> {
-    sort_buffer: &'a SortBuffer<'a, E>,
+pub struct SortBufferIter<'a, E: EvictionPolicy + 'static, M: MemPool<E>> {
+    sort_buffer: &'a SortBuffer<E, M>,
     idx: usize,
 }
 
-impl<'a, E: EvictionPolicy> SortBufferIter<'a, E> {
-    pub fn new(sort_buffer: &'a SortBuffer<'a, E>) -> Self {
+impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> SortBufferIter<'a, E, M> {
+    pub fn new(sort_buffer: &'a SortBuffer<E, M>) -> Self {
         Self {
             sort_buffer,
             idx: 0,
@@ -363,7 +407,7 @@ impl<'a, E: EvictionPolicy> SortBufferIter<'a, E> {
     }
 }
 
-impl<'a, E: EvictionPolicy> Iterator for SortBufferIter<'a, E> {
+impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for SortBufferIter<'a, E, M> {
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -465,26 +509,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
-        let frames = match policy.as_ref() {
-            MemoryPolicy::FixedSize(working_mem) => {
-                let working_mem = *working_mem;
-                let mut frames = Vec::new();
-                for _ in 0..working_mem {
-                    frames.push(mem_pool.create_new_page_for_write(dest_c_key).unwrap());
-                }
-                frames
-            }
-            other => {
-                unimplemented!("Memory policy {:?} is not implemented yet", other);
-            }
-        };
-
-        println!("Stats after allocating frames: \n{}", mem_pool.stats());
         // reset stats
         println!("Resetting stats");
         mem_pool.reset_stats();
 
-        let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
+        let mut sort_buffer = SortBuffer::new(mem_pool, dest_c_key, policy, self.sort_cols.clone());
 
         let mut result_buffers = Vec::new();
 
@@ -536,7 +565,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<E, M>>, ExecError> {
         let result = match policy.as_ref() {
-            MemoryPolicy::FixedSize(working_mem) => {
+            MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let mut merge_fanins = Vec::new();
 
                 let working_mem = *working_mem;
@@ -751,12 +780,10 @@ mod tests {
             let bp = get_test_bp(10);
             let c_key = c_key();
 
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(16));
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
-            for _ in 0..2 {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             let tuple = Tuple::from_fields(vec![0.into(), 1.into(), 2.into(), 3.into()]);
             let success = sort_buffer.append(&tuple);
@@ -772,12 +799,9 @@ mod tests {
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
             let buffer_size = 10;
-            for _ in 0..buffer_size {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(buffer_size));
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             // Keep appending until the all the pages are full.
             let tuple = Tuple::from_fields(vec![0.into(), 1.into(), 2.into(), 3.into()]);
@@ -797,12 +821,9 @@ mod tests {
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
             let buffer_size = 10;
-            for _ in 0..buffer_size {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(buffer_size));
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             // Keep appending until the all the pages are full.
             let mut tuples = Vec::new();
@@ -843,12 +864,9 @@ mod tests {
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
             let buffer_size = 10;
-            for _ in 0..buffer_size {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(buffer_size));
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             // Dataset 1. Insert tuples to the sort buffer and sort them.
             let mut tuples_1 = Vec::new();
@@ -1030,7 +1048,7 @@ mod tests {
             // Sort iterator
             let dest_c_key = get_c_key(1);
             let sort_cols = vec![(0, true, true)];
-            let policy = Arc::new(MemoryPolicy::FixedSize(10)); // Use 10 pages for the sort buffer
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(10)); // Use 10 pages for the sort buffer
             let mut external_sort =
                 OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone());
 
@@ -1103,7 +1121,7 @@ mod tests {
             // Sort iterator
             let dest_c_key = get_c_key(1);
             let sort_cols = vec![(0, true, true)];
-            let policy = Arc::new(MemoryPolicy::FixedSize(10)); // Use 10 pages for the sort buffer
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(10)); // Use 10 pages for the sort buffer
             let mut external_sort =
                 OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone());
 

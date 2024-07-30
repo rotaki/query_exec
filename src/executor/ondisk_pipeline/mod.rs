@@ -1,4 +1,5 @@
 mod disk_buffer;
+mod hash_table;
 mod sort;
 
 use std::{
@@ -10,11 +11,12 @@ use fbtree::{
     bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
     prelude::{AppendOnlyStore, TxnStorageTrait},
 };
+use hash_table::{HashTableKeyIter, OnDiskHashAggregation, OnDiskHashTableCreation};
 use sort::OnDiskSort;
 
 use crate::{
     error::ExecError,
-    expression::Expression,
+    expression::{AggOp, Expression, JoinType},
     log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
@@ -32,8 +34,8 @@ pub enum NonBlockingOp<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPo
     Filter(PFilterIter<T, E, M>),
     Project(PProjectIter<T, E, M>),
     Map(PMapIter<T, E, M>),
-    // HashJoin(PHashJoinIter<T, E, M>),
-    // NestedLoopJoin(PNestedLoopJoinIter<T, E, M>),
+    HashJoin(PHashJoinIter<T, E, M>),
+    NestedLoopJoin(PNestedLoopJoinIter<T, E, M>),
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M> {
@@ -43,8 +45,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
             NonBlockingOp::Filter(iter) => iter.schema(),
             NonBlockingOp::Project(iter) => iter.schema(),
             NonBlockingOp::Map(iter) => iter.schema(),
-            // NonBlockingOp::HashJoin(iter) => iter.schema(),
-            // NonBlockingOp::NestedLoopJoin(iter) => iter.schema(),
+            NonBlockingOp::HashJoin(iter) => iter.schema(),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.schema(),
         }
     }
 
@@ -54,8 +56,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
             NonBlockingOp::Filter(iter) => iter.rewind(),
             NonBlockingOp::Project(iter) => iter.rewind(),
             NonBlockingOp::Map(iter) => iter.rewind(),
-            // NonBlockingOp::HashJoin(iter) => iter.rewind(),
-            // NonBlockingOp::NestedLoopJoin(iter) => iter.rewind(),
+            NonBlockingOp::HashJoin(iter) => iter.rewind(),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.rewind(),
         }
     }
 
@@ -65,8 +67,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
             NonBlockingOp::Filter(iter) => iter.deps(),
             NonBlockingOp::Project(iter) => iter.deps(),
             NonBlockingOp::Map(iter) => iter.deps(),
-            // NonBlockingOp::HashJoin(iter) => iter.deps(),
-            // NonBlockingOp::NestedLoopJoin(iter) => iter.deps(),
+            NonBlockingOp::HashJoin(iter) => iter.deps(),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.deps(),
         }
     }
 
@@ -76,8 +78,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
             NonBlockingOp::Filter(iter) => iter.print_inner(indent, out),
             NonBlockingOp::Project(iter) => iter.print_inner(indent, out),
             NonBlockingOp::Map(iter) => iter.print_inner(indent, out),
-            // NonBlockingOp::HashJoin(iter) => iter.print_inner(indent, out),
-            // NonBlockingOp::NestedLoopJoin(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::HashJoin(iter) => iter.print_inner(indent, out),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.print_inner(indent, out),
         }
     }
 
@@ -90,8 +92,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
             NonBlockingOp::Filter(iter) => iter.next(context),
             NonBlockingOp::Project(iter) => iter.next(context),
             NonBlockingOp::Map(iter) => iter.next(context),
-            // NonBlockingOp::HashJoin(iter) => iter.next(context),
-            // NonBlockingOp::NestedLoopJoin(iter) => iter.next(context),
+            NonBlockingOp::HashJoin(iter) => iter.next(context),
+            NonBlockingOp::NestedLoopJoin(iter) => iter.next(context),
         }
     }
 
@@ -104,8 +106,14 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
             NonBlockingOp::Filter(iter) => iter.estimate_num_tuples(context),
             NonBlockingOp::Project(iter) => iter.estimate_num_tuples(context),
             NonBlockingOp::Map(iter) => iter.estimate_num_tuples(context),
-            // NonBlockingOp::HashJoin(iter) => iter.estimate_num_tuples(),
-            // NonBlockingOp::NestedLoopJoin(iter) => iter.estimate_num_tuples(),
+            NonBlockingOp::HashJoin(iter) => {
+                unimplemented!("estimate_num_tuples for HashJoin")
+                // iter.estimate_num_tuples(),
+            }
+            NonBlockingOp::NestedLoopJoin(iter) => {
+                unimplemented!("estimate_num_tuples for NestedLoopJoin")
+                // iter.estimate_num_tuples(),
+            }
         }
     }
 }
@@ -386,7 +394,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PMapIter<T,
     }
 }
 
-/*
 pub enum PHashJoinIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
     Inner(PHashJoinInnerIter<T, E, M>),
     RightOuter(PHashJoinRightOuterIter<T, E, M>), // Probe side is the right
@@ -450,12 +457,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIt
     }
 }
 
-pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy +'static, M: MemPool<E>> {
+pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
     schema: SchemaRef, // Output schema
     probe_side: Box<NonBlockingOp<T, E, M>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, OnDiskBufferIter<T, E, M>)>,
+    current: Option<(Tuple, HashTableKeyIter)>,
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinInnerIter<T, E, M> {
@@ -512,11 +519,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinInnerIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
-            if let Some(build) = build_iter.next()? {
+            if let Some(build) = build_iter.next() {
                 let result = build.merge_mut(probe);
                 return Ok(Some(result));
             }
         }
+        let build_side =
+            if let OnDiskBuffer::HashTable(tb) = context.get(&self.build_side).unwrap().as_ref() {
+                tb
+            } else {
+                unreachable!("The build side is not a hash table");
+            };
         // Reset the current tuple and build iterator.
         loop {
             // Iterate the probe side until a match is found.
@@ -527,8 +540,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
-                if let Some(iter) = build_iter {
+                let build_iter = build_side.iter_key(&key);
+                if let Some(mut iter) = build_iter {
                     // There should be at least one tuple in the build side iterator.
                     if let Some(build) = iter.next() {
                         let result = build.merge_mut(&probe);
@@ -547,15 +560,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
 }
 
 pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                 // Output schema
+    schema: SchemaRef,                       // Output schema
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, OnDiskBuffer<T, E, M>)>,
+    current: Option<(Tuple, HashTableKeyIter)>,
     nulls: Tuple,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightOuterIter<T, E, M> {
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
+    PHashJoinRightOuterIter<T, E, M>
+{
     pub fn new(
         schema: SchemaRef, // Output schema
         probe_side: Box<NonBlockingOp<T, E, M>>,
@@ -616,6 +631,14 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
                 return Ok(Some(result));
             }
         }
+
+        let build_side =
+            if let OnDiskBuffer::HashTable(tb) = context.get(&self.build_side).unwrap().as_ref() {
+                tb
+            } else {
+                unreachable!("The build side is not a hash table");
+            };
+
         // Reset the current tuple and build iterator.
         if let Some(probe) = self.probe_side.next(context)? {
             let key = self
@@ -624,8 +647,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
                 .map(|expr| expr.eval(&probe))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
-            let result = if let Some(iter) = build_iter {
+            let build_iter = build_side.iter_key(&key);
+            let result = if let Some(mut iter) = build_iter {
                 // Try to iterate the build side once to check if there is any match.
 
                 if let Some(build) = iter.next() {
@@ -649,13 +672,15 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
 }
 
 pub struct PHashJoinRightSemiIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                 // Output schema
+    schema: SchemaRef,                       // Output schema
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightSemiIter<T, E, M> {
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
+    PHashJoinRightSemiIter<T, E, M>
+{
     pub fn new(
         schema: SchemaRef, // Output schema
         probe_side: Box<NonBlockingOp<T, E, M>>,
@@ -706,6 +731,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
         context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightSemiIter::next");
+        let build_side =
+            if let OnDiskBuffer::HashTable(tb) = context.get(&self.build_side).unwrap().as_ref() {
+                tb
+            } else {
+                unreachable!("The build side is not a hash table");
+            };
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         loop {
@@ -715,8 +746,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
-                if let Some(iter) = build_iter {
+                let build_iter = build_side.iter_key(&key);
+                if let Some(mut iter) = build_iter {
                     if iter.next().is_some() {
                         return Ok(Some(probe));
                     } else {
@@ -732,13 +763,15 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
 }
 
 pub struct PHashJoinRightAntiIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                 // Output schema
+    schema: SchemaRef,                       // Output schema
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightAntiIter<T, E, M> {
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
+    PHashJoinRightAntiIter<T, E, M>
+{
     pub fn new(
         schema: SchemaRef, // Output schema
         probe_side: Box<NonBlockingOp<T, E, M>>,
@@ -789,6 +822,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
         context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightAntiIter::next");
+        let build_side =
+            if let OnDiskBuffer::HashTable(tb) = context.get(&self.build_side).unwrap().as_ref() {
+                tb
+            } else {
+                unreachable!("The build side is not a hash table");
+            };
         // If there is no match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
         loop {
@@ -798,7 +837,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = context.get(&self.build_side).unwrap().iter_key(key);
+                let build_iter = build_side.iter_key(&key);
                 if let Some(_iter) = build_iter {
                     // Match found. Continue to the next probe tuple.
                 } else {
@@ -818,13 +857,15 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
 // If there is no matching tuple, if the build side has nulls, the mark is null.
 // Otherwise, the mark is false.
 pub struct PHashJoinRightMarkIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                 // Output schema
+    schema: SchemaRef,                       // Output schema
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRightMarkIter<T> {
+impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
+    PHashJoinRightMarkIter<T, E, M>
+{
     pub fn new(
         schema: SchemaRef, // Output schema
         probe_side: Box<NonBlockingOp<T, E, M>>,
@@ -877,7 +918,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
         log_debug!("HashJoinRightMarkIter::next");
         // If there is a match in the build side, output the probe tuple.
         // Otherwise go to the next probe tuple
-        let build_side = context.get(&self.build_side).unwrap();
+        let build_side =
+            if let OnDiskBuffer::HashTable(tb) = context.get(&self.build_side).unwrap().as_ref() {
+                tb
+            } else {
+                unreachable!("The build side is not a hash table");
+            };
+
         loop {
             if let Some(mut probe) = self.probe_side.next(context)? {
                 let key = self
@@ -885,8 +932,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = build_side.iter_key(key);
-                let mark = if let Some(iter) = build_iter {
+                let build_iter = build_side.iter_key(&key);
+                let mark = if let Some(mut iter) = build_iter {
                     if iter.next().is_some() {
                         Field::from_bool(true)
                     } else {
@@ -907,7 +954,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinRi
 }
 
 pub struct PNestedLoopJoinIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,            // Output schema
+    schema: SchemaRef,                  // Output schema
     outer: Box<NonBlockingOp<T, E, M>>, // Outer loop of NLJ
     inner: Box<NonBlockingOp<T, E, M>>, // Inner loop of NLJ
     current_outer: Option<Tuple>,
@@ -991,20 +1038,19 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PNestedLoop
         }
     }
 }
-*/
 
 #[derive(Debug)]
 pub enum MemoryPolicy {
-    FixedSize(usize),  // Fixed number of frames
-    Proportional(f64), // Proportional to the data size
+    FixedSizeLimit(usize), // Fixed number of frames
+    Proportional(f64),     // Proportional to the data size
     Unbounded,
 }
 
 pub enum BlockingOp<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
     Dummy(NonBlockingOp<T, E, M>),
     OnDiskSort(OnDiskSort<T, E, M>),
-    // InMemHashTableCreation(InMemHashTableCreation<T, E, M>),
-    // InMemHashAggregate(InMemHashAggregation<T, E, M>),
+    OnDiskHashTableCreation(OnDiskHashTableCreation<T, E, M>),
+    OnDiskHashAggregate(OnDiskHashAggregation<T, E, M>),
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<T, E, M> {
@@ -1012,8 +1058,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
         match self {
             BlockingOp::Dummy(plan) => plan.schema(),
             BlockingOp::OnDiskSort(sort) => sort.schema(),
-            // BlockingOp::InMemHashTableCreation(creation) => creation.schema(),
-            // BlockingOp::InMemHashAggregate(agg) => agg.schema(),
+            BlockingOp::OnDiskHashTableCreation(creation) => creation.schema(),
+            BlockingOp::OnDiskHashAggregate(agg) => agg.schema(),
         }
     }
 
@@ -1021,8 +1067,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
         match self {
             BlockingOp::Dummy(plan) => plan.deps(),
             BlockingOp::OnDiskSort(sort) => sort.deps(),
-            // BlockingOp::InMemHashTableCreation(creation) => creation.deps(),
-            // BlockingOp::InMemHashAggregate(agg) => agg.deps(),
+            BlockingOp::OnDiskHashTableCreation(creation) => creation.deps(),
+            BlockingOp::OnDiskHashAggregate(agg) => agg.deps(),
         }
     }
 
@@ -1030,8 +1076,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
         match self {
             BlockingOp::Dummy(plan) => plan.print_inner(indent, out),
             BlockingOp::OnDiskSort(sort) => sort.print_inner(indent, out),
-            // BlockingOp::InMemHashTableCreation(creation) => creation.print_inner(indent, out),
-            // BlockingOp::InMemHashAggregate(agg) => agg.print_inner(indent, out),
+            BlockingOp::OnDiskHashTableCreation(creation) => creation.print_inner(indent, out),
+            BlockingOp::OnDiskHashAggregate(agg) => agg.print_inner(indent, out),
         }
     }
 
@@ -1052,8 +1098,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
                 Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(output)))
             }
             BlockingOp::OnDiskSort(sort) => sort.execute(context, policy, mem_pool, dest_c_key),
-            // BlockingOp::InMemHashTableCreation(creation) => creation.execute(context),
-            // BlockingOp::InMemHashAggregate(agg) => agg.execute(context),
+            BlockingOp::OnDiskHashTableCreation(creation) => {
+                creation.execute(context, policy, mem_pool, dest_c_key)
+            }
+            BlockingOp::OnDiskHashAggregate(agg) => {
+                agg.execute(context, policy, mem_pool, dest_c_key)
+            }
         }
     }
 }
@@ -1448,7 +1498,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                 let map = PMapIter::new(Arc::new(schema), Box::new(input_op), bytecode_exprs);
                 Ok((NonBlockingOp::Map(map), context, col_id_to_idx))
             }
-            /*
             PhysicalRelExpr::NestedLoopJoin {
                 join_type: _,
                 left,
@@ -1513,11 +1562,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                 // First, create the pipeline for the hash table build side
                 let left_schema = left_op.schema().clone();
                 let left_id = self.fetch_add_id();
-                let left_hash_table_creation = BlockingOp::InMemHashTableCreation(
-                    InMemHashTableCreation::new(left_schema.clone(), left_op, left_exprs),
+                let left_hash_table_creation = BlockingOp::OnDiskHashTableCreation(
+                    OnDiskHashTableCreation::new(left_schema.clone(), left_op, left_exprs),
                 );
-                let left_p =
-                    Pipeline::new_with_context(left_id, left_hash_table_creation, left_context);
+                let left_p = Pipeline::new_with_context(
+                    left_id,
+                    left_hash_table_creation,
+                    left_context,
+                    &self.mem_pool,
+                    &self.policy,
+                    ContainerKey::new(self.db_id, self.dest_c_id),
+                );
                 self.pipeline_queue.add_pipeline(left_p); // Add the build side to the graph
 
                 // Then create the non-blocking pipeline for the probe side
@@ -1658,7 +1713,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                     }
                 }
                 let schema = Arc::new(schema);
-                let hash_agg = BlockingOp::InMemHashAggregate(InMemHashAggregation::new(
+                let hash_agg = BlockingOp::OnDiskHashAggregate(OnDiskHashAggregation::new(
                     schema.clone(),
                     input_op,
                     group_by_indices,
@@ -1676,7 +1731,14 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
                 // Add the aggregation pipeline to the graph
                 let agg_id = self.fetch_add_id();
-                let p = Pipeline::new_with_context(agg_id, hash_agg, context);
+                let p = Pipeline::new_with_context(
+                    agg_id,
+                    hash_agg,
+                    context,
+                    &self.mem_pool,
+                    &self.policy,
+                    ContainerKey::new(self.db_id, self.dest_c_id),
+                );
                 self.pipeline_queue.add_pipeline(p);
 
                 // Create the scan operator for the aggregation pipeline
@@ -1685,7 +1747,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
                 Ok((NonBlockingOp::Scan(scan), HashMap::new(), new_col_id_to_idx))
             }
-            */
             PhysicalRelExpr::Sort { src, column_names } => {
                 let (input_op, context, col_id_to_idx) = self.convert_inner(catalog, *src)?;
                 let sort_cols = column_names

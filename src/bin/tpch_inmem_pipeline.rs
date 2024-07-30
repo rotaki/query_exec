@@ -66,7 +66,7 @@ fn main() {
             &storage,
             db_id,
             sql.as_ref(),
-            ContainerType::BTree,
+            ContainerType::AppendOnly,
         )
         .unwrap();
         tables.insert(table, c_id);

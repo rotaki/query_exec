@@ -598,7 +598,7 @@ mod tests {
         let _ = setup_employees_table(&storage, db_id, &catalog_ref);
         let _ = setup_departments_table(&storage, db_id, &catalog_ref);
         let physical_plan = get_physical_plan(db_id, &catalog_ref, sql, true);
-        let mem_policy = Arc::new(MemoryPolicy::FixedSize(10));
+        let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(10));
         let temp_c_id = 1000;
         let exe = OnDiskPipelineGraph::new(
             db_id,
@@ -618,6 +618,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_projection<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let result = exec("SELECT name, age FROM Employees");
         let mut expected = vec![
@@ -633,6 +634,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_projection_with_expression<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let result = exec("SELECT name, age + 1 FROM Employees");
         let mut expected = vec![
@@ -648,6 +650,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_filter<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT name, age FROM Employees WHERE age > 30";
         let result = exec(sql_string);
@@ -661,6 +664,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT e.name, e.age, d.name AS department FROM Employees e JOIN Departments d ON e.department_id = d.id";
         let result = exec(sql_string);
@@ -676,6 +680,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_left_outer_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, sum(e.age) FROM Departments d LEFT OUTER JOIN Employees e ON e.department_id = d.id GROUP BY d.name";
         let result = exec(sql_string);
@@ -690,6 +695,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_right_outer_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =  "SELECT d.name, sum(e.age) FROM Employees e RIGHT OUTER JOIN Departments d ON e.department_id = d.id GROUP BY d.name";
         let result = exec(sql_string);
@@ -704,6 +710,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_left_semi_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT d.name FROM Departments d LEFT SEMI JOIN Employees e ON e.department_id = d.id";
@@ -718,6 +725,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_right_semi_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name FROM Employees e RIGHT SEMI JOIN Departments d ON e.department_id = d.id";
         let result = exec(sql_string);
@@ -731,6 +739,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_left_anti_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT d.name FROM Departments d LEFT ANTI JOIN Employees e ON e.department_id = d.id";
@@ -742,6 +751,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_right_anti_join<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name FROM Employees e RIGHT ANTI JOIN Departments d ON e.department_id = d.id";
         let result = exec(sql_string);
@@ -779,6 +789,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_aggregate<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT COUNT(*), AVG(age) FROM Employees";
         let result = exec(sql_string);
@@ -789,6 +800,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_groupby_aggregate<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name;";
         let result = exec(sql_string);
@@ -802,6 +814,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_groupby_aggregate_having<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name HAVING AVG(e.age) > 30";
         let result = exec(sql_string);
@@ -812,6 +825,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_subquery<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         // For each department, count the number of employees and sum of their ages
         let sql_string = "SELECT d.name, cnt, sum_age FROM Departments d, (SELECT department_id, COUNT(*) AS cnt, SUM(age) AS sum_age FROM Employees e WHERE e.department_id = d.id)";
@@ -827,6 +841,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_correlated_exists<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees e WHERE e.department_id = d.id ); ";
         let result = exec(sql_string);
@@ -840,6 +855,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_uncorrelated_exists<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string =
             "SELECT d.name FROM Departments d WHERE EXISTS ( SELECT 1 FROM Employees ); ";
@@ -889,6 +905,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_groupby_orderby<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT d.name, AVG(e.age) AS average_age FROM Employees e JOIN Departments d ON e.department_id = d.id GROUP BY d.name ORDER BY average_age DESC";
         let result = exec(sql_string);
@@ -902,6 +919,7 @@ mod tests {
     #[rstest]
     #[case::volcano(volcano_executor)]
     #[case::inmem_pipeline(inmem_pipeline_executor)]
+    #[case::ondisk_pipeline(ondisk_pipeline_executor)]
     fn test_in_subquery<B: TupleBuffer>(#[case] exec: impl Fn(&str) -> Arc<B>) {
         let sql_string = "SELECT name FROM Employees WHERE department_id IN (SELECT id FROM Departments WHERE name = 'HR')";
         let result = exec(sql_string);

@@ -50,10 +50,10 @@ fn main() {
     let storage = Arc::new(OnDiskStorage::new(&bp));
     let db_id = create_db(&storage, "TPCH").unwrap();
 
-    // let table_names = vec![
-    //     "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
-    // ];
-    let table_names = vec!["lineitem"];
+    let table_names = vec![
+        "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
+    ];
+    // let table_names = vec!["lineitem"];
 
     println!("Creating tables...");
 

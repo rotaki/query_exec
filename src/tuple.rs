@@ -89,6 +89,10 @@ impl Tuple {
         &self.fields[field_idx]
     }
 
+    pub fn get_mut(&mut self, field_idx: usize) -> &mut Field {
+        &mut self.fields[field_idx]
+    }
+
     pub fn get_cols(&self, col_ids: &Vec<usize>) -> Vec<Field> {
         col_ids
             .iter()
