@@ -7,7 +7,7 @@ use fbtree::{
         hash_fbt::HashFosterBtreeIter,
     },
     bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
-    prelude::{AppendOnlyStoreScanner, HashFosterBtree, PagedHashMap, PagedHashMapIter},
+    prelude::{AppendOnlyStoreScanner, HashFosterBtree},
     txn_storage::{ScanOptions, TxnOptions, TxnStorageTrait},
 };
 

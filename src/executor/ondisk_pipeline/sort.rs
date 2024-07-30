@@ -16,7 +16,6 @@ use std::{
 use crate::{
     error::ExecError,
     executor::TupleBuffer,
-    log_warn,
     prelude::{Page, PageId, SchemaRef, AVAILABLE_PAGE_SIZE},
     tuple::Tuple,
     ColumnId,
@@ -94,7 +93,7 @@ mod slot {
     }
 }
 use fbtree::{
-    bp::{self, ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
+    bp::{ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
     prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
 };
@@ -373,8 +372,8 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> SortBuffer<E, M> {
     pub fn sort(&mut self) {
         // Sort the ptrs
         self.ptrs.sort_by(|a, b| {
-            let page_a = &self.data_buffer[a.0 as usize];
-            let page_b = &self.data_buffer[b.0 as usize];
+            let page_a = &self.data_buffer[a.0];
+            let page_b = &self.data_buffer[b.0];
             let key_a = page_a.get_key(a.1);
             let key_b = page_b.get_key(b.1);
             key_a.cmp(key_b)
@@ -413,7 +412,7 @@ impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for SortBufferIter
     fn next(&mut self) -> Option<Self::Item> {
         if self.idx < self.sort_buffer.ptrs.len() {
             let (page_idx, slot_id) = self.sort_buffer.ptrs[self.idx];
-            let page = &self.sort_buffer.data_buffer[page_idx as usize];
+            let page = &self.sort_buffer.data_buffer[page_idx];
             let key = page.get_key(slot_id);
             let val = page.get_val(slot_id);
             self.idx += 1;
@@ -590,11 +589,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                     // If a > 1, then you first merge a runs, then F runs.
 
                     assert!(working_mem + k * (working_mem - 1) == runs.len() - a + 1);
-                    assert!(a <= working_mem - 1);
+                    assert!(a < working_mem);
 
                     if a > 1 {
                         // Merge a runs first
-                        runs.sort_by(|a, b| a.num_kvs().cmp(&b.num_kvs()));
+                        runs.sort_by_key(|a| a.num_kvs());
                         let a_runs = runs.drain(0..a).collect::<Vec<_>>();
 
                         merge_fanins.push(a_runs.len());
@@ -765,7 +764,7 @@ mod tests {
 
     mod sort_buffer {
         use fbtree::{
-            bp::{get_test_bp, ContainerKey, MemPool},
+            bp::{get_test_bp, ContainerKey},
             random::gen_random_permutation,
         };
 
