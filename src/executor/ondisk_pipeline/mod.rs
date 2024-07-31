@@ -1694,8 +1694,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                     .collect();
                 let schema = input_op.schema().clone();
                 let sort =
-                    BlockingOp::OnDiskSort(OnDiskSort::new(schema.clone(), input_op, sort_cols));
-
+                    BlockingOp::OnDiskSort(OnDiskSort::new(schema.clone(), input_op, sort_cols, 10));
+                    // BlockingOp::OnDiskSort(OnDiskSort::new(schema.clone(), input_op, sort_cols));
                 let sort_id = self.fetch_add_id();
                 let p = Pipeline::new_with_context(
                     sort_id,

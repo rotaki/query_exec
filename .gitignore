@@ -1,2 +1,5 @@
 /target
 /tpch/data/sf-*
+/test_bp_*
+/tpch/*
+/bp-dir-tpch-sf-*

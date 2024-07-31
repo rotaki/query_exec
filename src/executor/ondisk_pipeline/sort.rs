@@ -7,6 +7,8 @@
 // 2 byte: slot count
 // 2 byte: free space offset
 
+use rayon::prelude::*;
+
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
@@ -21,6 +23,44 @@ use crate::{
     tuple::Tuple,
     ColumnId,
 };
+
+pub struct Quantiles {
+    num_quantiles: usize,
+    quantiles: Vec<Vec<u32>>,
+}
+
+impl Quantiles {
+    pub fn new(num_quantiles: usize) -> Self {
+        Quantiles {
+            num_quantiles,
+            quantiles: Vec::new(),
+        }
+    }
+
+    pub fn compute_quantiles(&mut self, run: &[u32]) {
+        let run_len = run.len();
+        let mut quantile_values = Vec::new();
+
+        for i in 1..self.num_quantiles {
+            let quantile_index = (i * run_len) / self.num_quantiles;
+            quantile_values.push(run[quantile_index]);
+        }
+
+        self.quantiles.push(quantile_values);
+    }
+
+    pub fn estimate_global_quantiles_mean(&self) -> Vec<u32> {
+        let mut all_quantiles: Vec<u32> = self.quantiles.iter().flatten().cloned().collect();
+        all_quantiles.sort_unstable();
+        let mut global_quantiles = Vec::new();
+        let len = all_quantiles.len();
+        for i in 1..self.num_quantiles {
+            let index = (i * len) / self.num_quantiles;
+            global_quantiles.push(all_quantiles[index]);
+        }
+        global_quantiles
+    }
+}
 
 mod slot {
     pub const SLOT_SIZE: usize = 6;
@@ -266,12 +306,29 @@ impl AppendOnlyKVPage for Page {
         &self[offset..offset + slot.val_size() as usize]
     }
 }
-
+#[derive(Clone)]
 pub struct SortBuffer<'a, E: EvictionPolicy> {
     sort_cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
     ptrs: Vec<(usize, u16)>,                // Slot pointers. (page index, slot_id)
     data_buffer: Vec<FrameWriteGuard<'a, E>>,
     current_page_idx: usize,
+}
+
+// Implement the method to access the first page
+impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
+    pub fn get_first_page(&self) -> &Page {
+        &self.data_buffer[0]
+    }
+}
+
+// In sort.rs
+impl<'a, E: EvictionPolicy> Clone for SortBufferIter<'a, E> {
+    fn clone(&self) -> Self {
+        Self {
+            sort_buffer: self.sort_buffer,
+            idx: self.idx,
+        }
+    }
 }
 
 impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
@@ -417,6 +474,7 @@ pub struct OnDiskSort<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPoo
     schema: SchemaRef,
     exec_plan: NonBlockingOp<T, E, M>,
     sort_cols: Vec<(ColumnId, bool, bool)>,
+    quantiles: Quantiles, 
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<T, E, M> {
@@ -424,11 +482,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         schema: SchemaRef,
         exec_plan: NonBlockingOp<T, E, M>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
+        num_quantiles: usize, 
     ) -> Self {
         Self {
             schema,
             exec_plan,
             sort_cols,
+            quantiles: Quantiles::new(num_quantiles),
         }
     }
 
@@ -458,74 +518,107 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         self.exec_plan.print_inner(indent + 2, out);
     }
 
-    fn run_generation(
-        &mut self,
-        policy: &Arc<MemoryPolicy>,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
-        mem_pool: &Arc<M>,
-        dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
-        let frames = match policy.as_ref() {
-            MemoryPolicy::FixedSize(working_mem) => {
-                let working_mem = *working_mem;
-                let mut frames = Vec::new();
-                for _ in 0..working_mem {
-                    frames.push(mem_pool.create_new_page_for_write(dest_c_key).unwrap());
-                }
-                frames
+fn run_generation(
+    &mut self,
+    policy: &Arc<MemoryPolicy>,
+    context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+    mem_pool: &Arc<M>,
+    dest_c_key: ContainerKey,
+) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
+    let frames = match policy.as_ref() {
+        MemoryPolicy::FixedSize(working_mem) => {
+            let working_mem = *working_mem;
+            let mut frames = Vec::new();
+            for _ in 0..working_mem {
+                frames.push(mem_pool.create_new_page_for_write(dest_c_key).unwrap());
             }
-            other => {
-                unimplemented!("Memory policy {:?} is not implemented yet", other);
-            }
-        };
+            frames
+        }
+        other => {
+            unimplemented!("Memory policy {:?} is not implemented yet", other);
+        }
+    };
 
-        println!("Stats after allocating frames: \n{}", mem_pool.stats());
-        // reset stats
-        println!("Resetting stats");
-        mem_pool.reset_stats();
+    println!("Stats after allocating frames: \n{}", mem_pool.stats());
+    // reset stats
+    println!("Resetting stats");
+    mem_pool.reset_stats();
 
-        let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
+    let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
 
-        let mut result_buffers = Vec::new();
+    let mut result_buffers = Vec::new();
 
-        while let Some(tuple) = self.exec_plan.next(context)? {
-            if sort_buffer.append(&tuple) {
-                continue;
-            } else {
-                sort_buffer.sort();
-                let iter = SortBufferIter::new(&sort_buffer);
-                let output = {
-                    Arc::new(AppendOnlyStore::bulk_insert_create(
-                        dest_c_key,
-                        mem_pool.clone(),
-                        iter,
-                    ))
-                };
-                result_buffers.push(output);
+    while let Some(tuple) = self.exec_plan.next(context)? {
+        if sort_buffer.append(&tuple) {
+            // println!("tuplee appended {:?}", tuple);
+            continue;
+        } else {
+            sort_buffer.sort();
+            let iter = SortBufferIter::new(&sort_buffer);
 
-                // Reset the sort buffer
-                sort_buffer.reset();
-                if !sort_buffer.append(&tuple) {
-                    panic!("Record too large to fit in a page");
-                }
+            // Compute quantiles for the run
+            let run_values: Vec<u32> = iter.clone().map(|(_, v)| {
+                // Assuming the value can be parsed to u32
+                println!("value {:?}",v);
+                u32::from_be_bytes([0,0,0,0]) //xtx remove
+                // u32::from_be_bytes(v.try_into().unwrap())
+            }).collect();
+            self.quantiles.compute_quantiles(&run_values);
+
+            // Write quantiles to the first page
+            let first_page = sort_buffer.get_first_page();
+            let mut page = Page::new_empty();
+            page.append(&[], &self.quantiles.estimate_global_quantiles_mean().iter().flat_map(|&q| q.to_be_bytes().to_vec()).collect::<Vec<_>>());
+
+
+
+            let output = {
+                Arc::new(AppendOnlyStore::bulk_insert_create(
+                    dest_c_key,
+                    mem_pool.clone(),
+                    iter,
+                ))
+            };
+            result_buffers.push(output);
+
+            // Reset the sort buffer
+            sort_buffer.reset();
+            if !sort_buffer.append(&tuple) {
+                panic!("Record too large to fit in a page");
             }
         }
+    }
 
-        // Finally sort and output the remaining records
-        sort_buffer.sort();
-        let iter = SortBufferIter::new(&sort_buffer);
-        let output = {
-            Arc::new(AppendOnlyStore::bulk_insert_create(
-                dest_c_key,
-                mem_pool.clone(),
-                iter,
-            ))
-        };
-        result_buffers.push(output);
+    // Finally sort and output the remaining records
+    sort_buffer.sort();
+    let iter = SortBufferIter::new(&sort_buffer);
 
-        println!("Number of runs: {}", result_buffers.len());
+    // Compute quantiles for the last run
+    let run_values: Vec<u32> = iter.clone().map(|(_, v)| {
+        // Assuming the value can be parsed to u32
+        println!("value {:?}",v);
+        u32::from_be_bytes([0,0,0,0]) //xtx remove
+        // u32::from_be_bytes(v.try_into().unwrap())
+    }).collect();
+    self.quantiles.compute_quantiles(&run_values);
 
-        Ok(result_buffers)
+    // Write quantiles to the first page
+    let first_page = sort_buffer.get_first_page();
+    let mut page = Page::new_empty();
+    page.append(&[], &self.quantiles.estimate_global_quantiles_mean().iter().flat_map(|&q| q.to_be_bytes().to_vec()).collect::<Vec<_>>());
+
+    let output = {
+        Arc::new(AppendOnlyStore::bulk_insert_create(
+            dest_c_key,
+            mem_pool.clone(),
+            iter,
+        ))
+    };
+    result_buffers.push(output);
+
+    println!("Number of runs: {}", result_buffers.len());
+
+    Ok(result_buffers)
     }
 
     fn run_merge(
@@ -1032,7 +1125,7 @@ mod tests {
             let sort_cols = vec![(0, true, true)];
             let policy = Arc::new(MemoryPolicy::FixedSize(10)); // Use 10 pages for the sort buffer
             let mut external_sort =
-                OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone());
+                OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone(), 10);
 
             let runs = external_sort
                 .run_generation(&policy, &context, &bp, dest_c_key)
@@ -1105,7 +1198,7 @@ mod tests {
             let sort_cols = vec![(0, true, true)];
             let policy = Arc::new(MemoryPolicy::FixedSize(10)); // Use 10 pages for the sort buffer
             let mut external_sort =
-                OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone());
+                OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone(), 10);
 
             let final_run = external_sort
                 .execute(&context, &policy, &bp, dest_c_key)
@@ -1130,3 +1223,5 @@ mod tests {
         }
     }
 }
+
+
