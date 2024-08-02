@@ -1,5 +1,6 @@
 mod disk_buffer;
-mod hash_table;
+// mod hash_table;
+mod hash_table_2;
 mod sort;
 
 use std::{
@@ -8,11 +9,14 @@ use std::{
 };
 
 use fbtree::{
-    access_method::hash_fbt::HashFosterBtreeIter,
+    access_method::{
+        hash_fbt::HashFosterBtreeIter, hashindex::pagedhashmap::PagedHashMapIterWithKey,
+    },
     bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
     prelude::{AppendOnlyStore, TxnStorageTrait},
 };
-use hash_table::{OnDiskHashAggregation, OnDiskHashTableCreation};
+// use hash_table::{OnDiskHashAggregation, OnDiskHashTableCreation};
+use hash_table_2::{OnDiskHashAggregation, OnDiskHashTableCreation};
 use sort::OnDiskSort;
 
 use crate::{
@@ -463,7 +467,7 @@ pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M
     probe_side: Box<NonBlockingOp<T, E, M>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, HashFosterBtreeIter<E, M>)>,
+    current: Option<(Tuple, PagedHashMapIterWithKey<E, M>)>,
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinInnerIter<T, E, M> {
@@ -567,7 +571,7 @@ pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, E: EvictionPolicy + 'stat
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, HashFosterBtreeIter<E, M>)>,
+    current: Option<(Tuple, PagedHashMapIterWithKey<E, M>)>,
     nulls: Tuple,
 }
 

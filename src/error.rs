@@ -10,6 +10,7 @@ pub enum ExecError {
     Catalog(String),
     Storage(String),
     Pipeline(String),
+    PagedHashMapError(PagedHashMapError),
 }
 
 impl From<TxnStorageStatus> for ExecError {
@@ -38,6 +39,6 @@ impl From<TreeStatus> for ExecError {
 
 impl From<PagedHashMapError> for ExecError {
     fn from(err: PagedHashMapError) -> ExecError {
-        ExecError::Storage("PagedHashMapError".to_string())
+        ExecError::PagedHashMapError(err)
     }
 }

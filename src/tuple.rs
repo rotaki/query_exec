@@ -9,7 +9,7 @@ use crate::{
     error::ExecError,
 };
 
-use bitcode::{Decode, Encode};
+// use bitcode::{Decode, Encode};
 use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,7 @@ fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     val_bits.to_be_bytes()
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Tuple {
     fields: Vec<Field>,
 }
@@ -320,7 +320,7 @@ impl std::fmt::Display for Tuple {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Field {
     Boolean(Option<bool>),
     Int(Option<i64>),
@@ -333,8 +333,8 @@ pub enum Field {
 
 impl Field {
     pub fn to_bytes(&self) -> Vec<u8> {
-        bitcode::encode(self)
-        // bincode::serialize(&self).unwrap()
+        // bitcode::encode(self)
+        bincode::serialize(&self).unwrap()
         /*
         let mut bytes = Vec::new();
         // [type, is_null, value]
@@ -398,8 +398,8 @@ impl Field {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        bitcode::decode(bytes).unwrap()
-        // bincode::deserialize(bytes).unwrap()
+        // bitcode::decode(bytes).unwrap()
+        bincode::deserialize(bytes).unwrap()
         /*
         let data_type = bytes[0];
         let is_null = bytes[1] == 1;
