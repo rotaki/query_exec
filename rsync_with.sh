@@ -9,7 +9,9 @@ fi
 # Assign the input arguments to variables
 REMOTE_USER=$1
 REMOTE_HOST=$2
-REMOTE_DIR="/mnt/nvme2/query_exe" # Replace with the path to the remote directory
+
+# REMOTE_DIR="/mnt/nvme2/query_exe" # Replace with the path to the remote directory
+# REMOTE_DIR="/tank/local/query_exe" # Replace with the path to the remote directory
 
 # Check if .gitignore file exists
 if [ ! -f .gitignore ]; then

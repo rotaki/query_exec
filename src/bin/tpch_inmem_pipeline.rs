@@ -91,14 +91,14 @@ fn main() {
             let logical = to_logical(db_id, &catalog, &query).unwrap();
             let physical = to_physical(logical);
             // Run the query 3 times to warm up the cache
-            println!("====== Warming up query {} ======", query_id);
-            for _ in 0..3 {
-                let exec = InMemPipelineGraph::new(&catalog, &storage, physical.clone());
-                let result = execute(db_id, &storage, exec, false);
-                println!("Warm up result num rows: {}", result.num_tuples());
-            }
+            // println!("====== Warming up query {} ======", query_id);
+            // for _ in 0..1 {
+            //     let exec = InMemPipelineGraph::new(&catalog, &storage, physical.clone());
+            //     let result = execute(db_id, &storage, exec, false);
+            //     println!("Warm up result num rows: {}", result.num_tuples());
+            // }
             println!("====== Measuring query {} ======", query_id);
-            for _ in 0..10 {
+            for _ in 0..4 {
                 let exec = InMemPipelineGraph::new(&catalog, &storage, physical.clone());
                 let start = std::time::Instant::now();
                 let result = execute(db_id, &storage, exec, false);
@@ -116,17 +116,28 @@ fn main() {
             }
         }
 
-        // Print the results as csv with the following format:
-        // query_id, time1, time2, time3, ...
-        // Name the file tpch_volcano_results_sf_<scale_factor>.csv
-        let file_name = format!("tpch_volcano_results_sf_{}.csv", opt.scale_factor);
+        // print the results as csv with the following format:
+        // query_id, time1, time2, time3, time4, time5, time6, time7, time8, time9, time10
+        // Name the file tpch_ondisk_results_sf_<scale_factor>.csv
+        let file_name = "tpch_nonpaged_results.csv".to_string();
         let mut writer = csv::Writer::from_path(&file_name).unwrap();
-        writer
-            .write_record([
-                "query_id", "time1", "time2", "time3", "time4", "time5", "time6", "time7", "time8",
-                "time9", "time10",
-            ])
-            .unwrap();
+        let mut record_header = Vec::new();
+        record_header.push("query_id".to_string());
+        // for i in results.values().next().unwrap() {
+        //     for j in 0..i.len() {
+        //         record_header.push(format!("time{}", j));
+        //         record_header.push(format!("new_page{}", j));
+        //         record_header.push(format!("read_count{}", j));
+        //         record_header.push(format!("write_count{}", j));
+        //     }
+        // }
+        for (_, results) in &results {
+            for i in 0..results.len() {
+                record_header.push(format!("time{}", i));
+            }
+            break;
+        }
+        writer.write_record(&record_header).unwrap();
         for (query_id, times) in results {
             let mut record = Vec::with_capacity(1 + times.len());
             record.push(query_id.to_string());
