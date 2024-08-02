@@ -508,10 +508,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
-        // reset stats
-        println!("Resetting stats");
-        mem_pool.reset_stats();
-
         let mut sort_buffer = SortBuffer::new(mem_pool, dest_c_key, policy, self.sort_cols.clone());
 
         let mut result_buffers = Vec::new();
@@ -550,8 +546,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
             ))
         };
         result_buffers.push(output);
-
-        println!("Number of runs: {}", result_buffers.len());
 
         Ok(result_buffers)
     }
@@ -617,8 +611,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                     runs.push(merged_run);
                 }
 
-                println!("Total merge steps: {:?}", merge_fanins.len());
-                println!("Fan-ins: {:?}", merge_fanins);
                 runs.pop().unwrap()
             }
             MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
@@ -636,7 +628,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Arc<AppendOnlyStore<E, M>> {
-        println!("Merging {} runs", runs.len());
         let merge_iter = MergeIter::new(runs.iter().map(|r| r.scan()).collect());
         Arc::new(AppendOnlyStore::bulk_insert_create(
             dest_c_key,
@@ -652,25 +643,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
-        println!("Stats before run generation: \n{}", mem_pool.stats());
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
-        println!(
-            "Runs: {:?}",
-            runs.iter()
-                .map(|r| format!("(t: {}, p: {})", r.num_kvs(), r.num_pages()))
-                .collect::<Vec<_>>()
-        );
-        println!("Stats after run generation: \n{}", mem_pool.stats());
 
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
-        println!(
-            "Final run: (t: {}, p: {})",
-            final_run.num_kvs(),
-            final_run.num_pages()
-        );
-        println!("Stats after merge: \n{}", mem_pool.stats());
 
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }

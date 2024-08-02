@@ -132,10 +132,16 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+        let num_buckets = match policy.as_ref() {
+            MemoryPolicy::FixedSizeLimit(size) => *size,
+            _ => {
+                panic!("Other memory policies not supported for hash table creation");
+            }
+        };
         let output = Arc::new(HashTable::new(
             dest_c_key,
             mem_pool.clone(),
-            10,
+            num_buckets,
             self.exprs.clone(),
         ));
         while let Some(tuple) = self.exec_plan.next(context)? {
