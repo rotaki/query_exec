@@ -14,7 +14,7 @@ use fbtree::{
 use crate::{error::ExecError, executor::TupleBuffer, prelude::SchemaRef, tuple::Tuple};
 
 use super::{
-    hash_table::{HashAggregateTable, HashAggregationTableIter, HashTable, HashTableIter},
+    hash_table::{HashAggregateTable, HashAggregationTableIter, HashTable},
     TupleBufferIter,
 };
 
@@ -110,7 +110,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> TupleBuffer
             }
             OnDiskBuffer::HashIndex(hash) => OnDiskBufferIter::HashIndex(Mutex::new(hash.scan())),
             OnDiskBuffer::HashTable(hash_table) => {
-                OnDiskBufferIter::HashTable(Mutex::new(hash_table.iter()))
+                unimplemented!()
+                // OnDiskBufferIter::HashTable(Mutex::new(hash_table.iter()))
             }
             OnDiskBuffer::HashAggregateTable(hash_agg_table) => {
                 OnDiskBufferIter::HashAggregateTable(Mutex::new(hash_agg_table.iter()))
@@ -124,7 +125,7 @@ pub enum OnDiskBufferIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: Me
     AppendOnlyStore(Mutex<AppendOnlyStoreScanner<E, M>>),
     FosterBTree(Mutex<FosterBtreeRangeScanner<E, M>>),
     HashIndex(Mutex<HashFosterBtreeIter<E, M>>),
-    HashTable(Mutex<HashTableIter<E, M>>),
+    // HashTable(Mutex<HashTableIter<E, M>>),
     HashAggregateTable(Mutex<HashAggregationTableIter<E, M>>),
 }
 
@@ -196,7 +197,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> TupleBufferIter
                 .unwrap()
                 .next()
                 .map(|(_k, v)| Tuple::from_bytes(&v))),
-            OnDiskBufferIter::HashTable(iter) => iter.lock().unwrap().next(),
+            // OnDiskBufferIter::HashTable(iter) => iter.lock().unwrap().next(),
             OnDiskBufferIter::HashAggregateTable(iter) => iter.lock().unwrap().next(),
         }
     }

@@ -8,10 +8,11 @@ use std::{
 };
 
 use fbtree::{
+    access_method::hash_fbt::HashFosterBtreeIter,
     bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
     prelude::{AppendOnlyStore, TxnStorageTrait},
 };
-use hash_table::{HashTableKeyIter, OnDiskHashAggregation, OnDiskHashTableCreation};
+use hash_table::{OnDiskHashAggregation, OnDiskHashTableCreation};
 use sort::OnDiskSort;
 
 use crate::{
@@ -462,7 +463,7 @@ pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M
     probe_side: Box<NonBlockingOp<T, E, M>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, HashTableKeyIter)>,
+    current: Option<(Tuple, HashFosterBtreeIter<E, M>)>,
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinInnerIter<T, E, M> {
@@ -519,7 +520,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinInnerIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
-            if let Some(build) = build_iter.next() {
+            if let Some((_, build)) = build_iter.next() {
+                let build = Tuple::from_bytes(&build);
                 let result = build.merge_mut(probe);
                 return Ok(Some(result));
             }
@@ -543,7 +545,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
                 let build_iter = build_side.iter_key(&key);
                 if let Some(mut iter) = build_iter {
                     // There should be at least one tuple in the build side iterator.
-                    if let Some(build) = iter.next() {
+                    if let Some((_, build)) = iter.next() {
+                        let build = Tuple::from_bytes(&build);
                         let result = build.merge_mut(&probe);
                         self.current = Some((probe, iter));
                         return Ok(Some(result));
@@ -564,7 +567,7 @@ pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, E: EvictionPolicy + 'stat
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, HashTableKeyIter)>,
+    current: Option<(Tuple, HashFosterBtreeIter<E, M>)>,
     nulls: Tuple,
 }
 
@@ -626,7 +629,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightOuterIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
-            if let Some(build) = build_iter.next() {
+            if let Some((_, build)) = build_iter.next() {
+                let build = Tuple::from_bytes(&build);
                 let result = build.merge_mut(probe);
                 return Ok(Some(result));
             }
@@ -651,7 +655,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
             let result = if let Some(mut iter) = build_iter {
                 // Try to iterate the build side once to check if there is any match.
 
-                if let Some(build) = iter.next() {
+                if let Some((_, build)) = iter.next() {
+                    let build = Tuple::from_bytes(&build);
                     let result = build.merge_mut(&probe);
                     self.current = Some((probe, iter));
                     result

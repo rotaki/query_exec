@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    u32,
 };
 
 use fbtree::{
@@ -30,38 +31,6 @@ pub struct HashTable<E: EvictionPolicy, M: MemPool<E>> {
 }
 
 impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
-    fn serialize_tuple(t: &Tuple) -> Vec<u8> {
-        let num: usize = 1;
-        let mut result = num.to_be_bytes().to_vec();
-        let mut tuple_bytes = t.to_bytes();
-        result.extend_from_slice(&tuple_bytes.len().to_be_bytes());
-        result.append(&mut tuple_bytes);
-        result
-    }
-
-    fn deserialize_tuples(value: &[u8]) -> Vec<Tuple> {
-        let count = usize::from_be_bytes(value[..8].try_into().unwrap());
-        let mut tuples = Vec::with_capacity(count);
-        let mut offset = 8;
-        for _ in 0..count {
-            let tuple_len = usize::from_be_bytes(value[offset..offset + 8].try_into().unwrap());
-            offset += 8;
-            let tuple = Tuple::from_bytes(&value[offset..offset + tuple_len]);
-            offset += tuple_len;
-            tuples.push(tuple);
-        }
-        tuples
-    }
-
-    fn merge_tuples(old: &[u8], new: &[u8]) -> Vec<u8> {
-        let old_num = usize::from_be_bytes(old[..8].try_into().unwrap());
-        let new_num = usize::from_be_bytes(new[..8].try_into().unwrap());
-        let mut tuple_bytes = (old_num + new_num).to_be_bytes().to_vec();
-        tuple_bytes.extend(&old[8..]);
-        tuple_bytes.extend(&new[8..]);
-        tuple_bytes
-    }
-
     pub fn new(
         c_key: ContainerKey,
         mem_pool: Arc<M>,
@@ -83,15 +52,6 @@ impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
         self.has_null.load(Ordering::Acquire)
     }
 
-    pub fn get(&self, key: &[Field]) -> Result<Option<Vec<Tuple>>, ExecError> {
-        let key_bytes = Tuple::from_fields(key.into()).to_bytes();
-        match self.hash_index.get(&key_bytes) {
-            Ok(value) => Ok(Some(Self::deserialize_tuples(&value))),
-            Err(TreeStatus::NotFound) => Ok(None),
-            Err(err) => Err(ExecError::from(err)),
-        }
-    }
-
     pub fn insert(&self, tuple: &Tuple) -> Result<(), ExecError> {
         // Generate key from tuple
         let key = self
@@ -106,94 +66,20 @@ impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
         let key_bytes = Tuple::from_fields(key).to_bytes();
 
         // Insert tuple into hash table
-        let tuple_bytes = HashTable::<E, M>::serialize_tuple(tuple);
-        self.hash_index
-            .upsert_with_merge(&key_bytes, &tuple_bytes, |old, new| {
-                HashTable::<E, M>::merge_tuples(old, new)
-            })?;
+        let tuple_bytes = tuple.to_bytes();
+        self.hash_index.append(&key_bytes, &tuple_bytes)?;
+
         Ok(())
     }
 
-    pub fn iter(&self) -> HashTableIter<E, M> {
-        HashTableIter::new(self.hash_index.scan())
-    }
-
-    pub fn iter_key(&self, key: &[Field]) -> Option<HashTableKeyIter> {
+    pub fn iter_key(&self, key: &[Field]) -> Option<HashFosterBtreeIter<E, M>> {
         let key_bytes = Tuple::from_fields(key.into()).to_bytes();
-        match self.hash_index.get(&key_bytes) {
-            Ok(value) => Some(HashTableKeyIter::new(Self::deserialize_tuples(&value))),
-            Err(TreeStatus::NotFound) => None,
-            _ => None,
+        // Search the index for the first key. If it does not exist, return None
+        if self.hash_index.check_key(&key_bytes) {
+            Some(self.hash_index.scan_with_prefix(&key_bytes))
+        } else {
+            None
         }
-    }
-}
-
-pub struct HashTableIter<E: EvictionPolicy + 'static, M: MemPool<E>> {
-    iter: HashFosterBtreeIter<E, M>,
-    current: Option<Vec<Tuple>>,
-    initialized: bool,
-    finished: bool,
-}
-
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashTableIter<E, M> {
-    pub fn new(iter: HashFosterBtreeIter<E, M>) -> Self {
-        Self {
-            iter,
-            current: None,
-            initialized: false,
-            finished: false,
-        }
-    }
-
-    fn initialize(&mut self) {
-        if !self.initialized {
-            self.initialized = true;
-            self.current = self
-                .iter
-                .next()
-                .map(|(_key, value)| HashTable::<E, M>::deserialize_tuples(&value));
-        }
-    }
-
-    fn finish(&mut self) {
-        self.finished = true;
-        self.current = None;
-    }
-
-    pub fn next(&mut self) -> Result<Option<Tuple>, ExecError> {
-        if !self.initialized {
-            self.initialize();
-        }
-        if self.finished {
-            return Ok(None);
-        }
-        if let Some(tuples) = &mut self.current {
-            if let Some(tuple) = tuples.pop() {
-                return Ok(Some(tuple));
-            }
-        }
-        self.current = self
-            .iter
-            .next()
-            .map(|(_key, value)| HashTable::<E, M>::deserialize_tuples(&value));
-        if self.current.is_none() {
-            self.finish();
-        }
-        self.next()
-    }
-}
-
-pub struct HashTableKeyIter {
-    tuples: Vec<Tuple>,
-}
-
-impl HashTableKeyIter {
-    pub fn new(tuples: Vec<Tuple>) -> Self {
-        Self { tuples }
-    }
-
-    pub fn next(&mut self) -> Option<Tuple> {
-        self.tuples.pop()
     }
 }
 
@@ -514,7 +400,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use fbtree::bp::{get_test_bp, ContainerKey};
 
@@ -545,30 +431,44 @@ mod tests {
         }
 
         let fields = vec![1.into()];
-        let result = hash_table.get(&fields).unwrap().unwrap();
+        let mut iter = hash_table.iter_key(&fields).unwrap();
+        let mut result = Vec::new();
+        while let Some((_, value)) = iter.next() {
+            result.push(Tuple::from_bytes(&value));
+        }
         println!("{:?}", result);
         assert_eq!(result.len(), 2);
         assert!(result.contains(&Tuple::from_fields(vec![1.into(), 10.into()])));
         assert!(result.contains(&Tuple::from_fields(vec![1.into(), 11.into()])));
 
         let fields = vec![2.into()];
-        let result = hash_table.get(&fields).unwrap().unwrap();
+        let mut iter = hash_table.iter_key(&fields).unwrap();
+        let mut result = Vec::new();
+        while let Some((_, value)) = iter.next() {
+            result.push(Tuple::from_bytes(&value));
+        }
         println!("{:?}", result);
         assert_eq!(result.len(), 2);
         assert!(result.contains(&Tuple::from_fields(vec![2.into(), 12.into()])));
         assert!(result.contains(&Tuple::from_fields(vec![2.into(), 13.into()])));
 
         let fields = vec![3.into()];
-        let result = hash_table.get(&fields).unwrap().unwrap();
+        let mut iter = hash_table.iter_key(&fields).unwrap();
+        let mut result = Vec::new();
+        while let Some((_, value)) = iter.next() {
+            result.push(Tuple::from_bytes(&value));
+        }
         println!("{:?}", result);
         assert_eq!(result.len(), 2);
         assert!(result.contains(&Tuple::from_fields(vec![3.into(), 14.into()])));
         assert!(result.contains(&Tuple::from_fields(vec![3.into(), 15.into()])));
 
+        /*
         let mut scanner = hash_table.iter();
         while let Some(tuple) = scanner.next().unwrap() {
             assert!(values.contains(&tuple));
         }
+        */
     }
 
     #[test]
