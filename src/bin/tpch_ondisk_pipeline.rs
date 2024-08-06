@@ -62,7 +62,7 @@ fn main() {
     if opt.bench_all {
         let mut results = BTreeMap::new();
 
-        for query_id in (1..=22) {
+        for query_id in 1..=22 {
             let query_path = format!("tpch/queries/q{}.sql", query_id);
             let query = std::fs::read_to_string(query_path).unwrap();
             let logical = to_logical(db_id, &catalog, &query).unwrap();

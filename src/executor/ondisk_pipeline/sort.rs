@@ -93,7 +93,7 @@ mod slot {
     }
 }
 use fbtree::{
-    bp::{ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
+    bp::{ContainerKey,  FrameWriteGuard, MemPool},
     prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
 };
@@ -920,7 +920,7 @@ mod tests {
 
     mod external_sort {
         use fbtree::{
-            bp::{get_test_bp, BufferPool, ContainerKey, LRUEvictionPolicy},
+            bp::{get_test_bp, BufferPool, ContainerKey, },
             prelude::AppendOnlyStore,
             random::{gen_random_permutation, RandomKVs},
             txn_storage::InMemStorage,

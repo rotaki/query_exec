@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use fbtree::bp::EvictionPolicy;
 use fbtree::prelude::{
     ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
 };
@@ -347,7 +346,7 @@ pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
 #[cfg(test)]
 mod tests {
     use fbtree::{
-        bp::{get_test_bp, BufferPool, LRUEvictionPolicy},
+        bp::{get_test_bp, BufferPool, },
         prelude::{ContainerId, ContainerType, InMemStorage, TxnOptions},
         random::gen_random_pathname,
         txn_storage::OnDiskStorage,

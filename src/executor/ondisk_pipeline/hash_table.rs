@@ -4,7 +4,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    u32,
 };
 
 use fbtree::{
@@ -12,8 +11,8 @@ use fbtree::{
         fbt::FosterBtreeAppendOnlyRangeScanner,
         hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter},
     },
-    bp::{ContainerKey, EvictionPolicy, MemPool},
-    prelude::{HashFosterBtree, TreeStatus, TxnStorageTrait},
+    bp::{ContainerKey, MemPool},
+    prelude::{HashFosterBtree, TxnStorageTrait},
 };
 
 use crate::{
@@ -400,7 +399,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskHashAggregation<T, M> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::sync::Arc;
 
     use fbtree::bp::{get_test_bp, ContainerKey};
 
@@ -433,7 +432,7 @@ mod tests {
         let fields = vec![1.into()];
         let mut iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
-        while let Some((_, value)) = iter.next() {
+        for (_, value) in iter {
             result.push(Tuple::from_bytes(&value));
         }
         println!("{:?}", result);
@@ -444,7 +443,7 @@ mod tests {
         let fields = vec![2.into()];
         let mut iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
-        while let Some((_, value)) = iter.next() {
+        for (_, value) in iter {
             result.push(Tuple::from_bytes(&value));
         }
         println!("{:?}", result);
@@ -455,7 +454,7 @@ mod tests {
         let fields = vec![3.into()];
         let mut iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
-        while let Some((_, value)) = iter.next() {
+        for (_, value) in iter {
             result.push(Tuple::from_bytes(&value));
         }
         println!("{:?}", result);

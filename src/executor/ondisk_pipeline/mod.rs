@@ -8,8 +8,8 @@ use std::{
 };
 
 use fbtree::{
-    access_method::{fbt::FosterBtreeAppendOnlyRangeScanner, hash_fbt::HashFosterBtreeIter},
-    bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
+    access_method::fbt::FosterBtreeAppendOnlyRangeScanner,
+    bp::{ContainerId, ContainerKey, DatabaseId,  MemPool},
     prelude::{AppendOnlyStore, TxnStorageTrait},
 };
 use hash_table::{OnDiskHashAggregation, OnDiskHashTableCreation};

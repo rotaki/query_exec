@@ -6,7 +6,7 @@ use fbtree::{
         fbt::{FosterBtree, FosterBtreeRangeScanner},
         hash_fbt::HashFosterBtreeIter,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
+    bp::{ContainerId, ContainerKey, DatabaseId,  MemPool},
     prelude::{AppendOnlyStoreScanner, HashFosterBtree},
     txn_storage::{ScanOptions, TxnOptions, TxnStorageTrait},
 };
