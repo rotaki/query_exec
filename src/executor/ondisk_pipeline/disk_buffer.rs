@@ -18,16 +18,16 @@ use super::{
     TupleBufferIter,
 };
 
-pub enum OnDiskBuffer<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> {
+pub enum OnDiskBuffer<T: TxnStorageTrait, M: MemPool> {
     TxnStorage(TxnStorage<T>),
-    AppendOnlyStore(Arc<AppendOnlyStore<E, M>>),
-    BTree(Arc<FosterBtree<E, M>>),
-    HashIndex(Arc<HashFosterBtree<E, M>>),
-    HashTable(Arc<HashTable<E, M>>),
-    HashAggregateTable(Arc<HashAggregateTable<E, M>>),
+    AppendOnlyStore(Arc<AppendOnlyStore<M>>),
+    BTree(Arc<FosterBtree<M>>),
+    HashIndex(Arc<HashFosterBtree<M>>),
+    HashTable(Arc<HashTable<M>>),
+    HashAggregateTable(Arc<HashAggregateTable<M>>),
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskBuffer<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> OnDiskBuffer<T, M> {
     pub fn txn_storage(
         schema: SchemaRef,
         db_id: DatabaseId,
@@ -60,10 +60,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskBuffe
     }
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> TupleBuffer
-    for OnDiskBuffer<T, E, M>
-{
-    type Iter = OnDiskBufferIter<T, E, M>;
+impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
+    type Iter = OnDiskBufferIter<T, M>;
 
     fn num_tuples(&self) -> usize {
         match self {
@@ -120,13 +118,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> TupleBuffer
     }
 }
 
-pub enum OnDiskBufferIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub enum OnDiskBufferIter<T: TxnStorageTrait, M: MemPool> {
     TxnStorage(TxnStorageIter<T>),
-    AppendOnlyStore(Mutex<AppendOnlyStoreScanner<E, M>>),
-    FosterBTree(Mutex<FosterBtreeRangeScanner<E, M>>),
-    HashIndex(Mutex<HashFosterBtreeIter<E, M>>),
-    // HashTable(Mutex<HashTableIter<E, M>>),
-    HashAggregateTable(Mutex<HashAggregationTableIter<E, M>>),
+    AppendOnlyStore(Mutex<AppendOnlyStoreScanner<M>>),
+    FosterBTree(Mutex<FosterBtreeRangeScanner<M>>),
+    HashIndex(Mutex<HashFosterBtreeIter<M>>),
+    // HashTable(Mutex<HashTableIter<M>>),
+    HashAggregateTable(Mutex<HashAggregationTableIter<M>>),
 }
 
 pub struct TxnStorage<T: TxnStorageTrait> {
@@ -174,9 +172,7 @@ impl<T: TxnStorageTrait> Drop for TxnStorageIter<T> {
     }
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> TupleBufferIter
-    for OnDiskBufferIter<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> TupleBufferIter for OnDiskBufferIter<T, M> {
     fn next(&self) -> Result<Option<Tuple>, ExecError> {
         match self {
             OnDiskBufferIter::TxnStorage(iter) => {

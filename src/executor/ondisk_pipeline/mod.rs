@@ -30,16 +30,16 @@ use super::{TupleBuffer, TupleBufferIter};
 use disk_buffer::{OnDiskBuffer, OnDiskBufferIter};
 
 // Pipeline iterators are non-blocking.
-pub enum NonBlockingOp<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    Scan(PScanIter<T, E, M>),
-    Filter(PFilterIter<T, E, M>),
-    Project(PProjectIter<T, E, M>),
-    Map(PMapIter<T, E, M>),
-    HashJoin(PHashJoinIter<T, E, M>),
-    NestedLoopJoin(PNestedLoopJoinIter<T, E, M>),
+pub enum NonBlockingOp<T: TxnStorageTrait, M: MemPool> {
+    Scan(PScanIter<T, M>),
+    Filter(PFilterIter<T, M>),
+    Project(PProjectIter<T, M>),
+    Map(PMapIter<T, M>),
+    HashJoin(PHashJoinIter<T, M>),
+    NestedLoopJoin(PNestedLoopJoinIter<T, M>),
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> NonBlockingOp<T, M> {
     pub fn schema(&self) -> &SchemaRef {
         match self {
             NonBlockingOp::Scan(iter) => iter.schema(),
@@ -86,7 +86,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         match self {
             NonBlockingOp::Scan(iter) => iter.next(context),
@@ -100,7 +100,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
 
     pub fn estimate_num_tuples(
         &self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> usize {
         match self {
             NonBlockingOp::Scan(iter) => iter.estimate_num_tuples(context),
@@ -119,14 +119,14 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> NonBlockingOp<T, E, M
     }
 }
 
-pub struct PScanIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct PScanIter<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef, // Output schema
     id: PipelineID,
     column_indices: Vec<ColumnId>,
-    iter: Option<OnDiskBufferIter<T, E, M>>,
+    iter: Option<OnDiskBufferIter<T, M>>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> PScanIter<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> PScanIter<T, M> {
     pub fn new(
         schema: SchemaRef, // Output schema
         id: PipelineID,
@@ -168,7 +168,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> PScanIter<T, E, M> {
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("ScanIter::next");
         if let Some(iter) = &self.iter {
@@ -187,7 +187,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> PScanIter<T, E, M> {
 
     pub fn estimate_num_tuples(
         &self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> usize {
         context
             .get(&self.id)
@@ -196,17 +196,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> PScanIter<T, E, M> {
     }
 }
 
-pub struct PFilterIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct PFilterIter<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef, // Output schema
-    input: Box<NonBlockingOp<T, E, M>>,
+    input: Box<NonBlockingOp<T, M>>,
     expr: ByteCodeExpr,
     // Counts to estimate selectivity.
     num_tuples_scanned: usize,
     num_tuples_filtered: usize,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PFilterIter<T, E, M> {
-    pub fn new(schema: SchemaRef, input: Box<NonBlockingOp<T, E, M>>, expr: ByteCodeExpr) -> Self {
+impl<T: TxnStorageTrait, M: MemPool> PFilterIter<T, M> {
+    pub fn new(schema: SchemaRef, input: Box<NonBlockingOp<T, M>>, expr: ByteCodeExpr) -> Self {
         Self {
             schema,
             input,
@@ -236,7 +236,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PFilterIter
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("FilterIter::next");
         while let Some(tuple) = self.input.next(context)? {
@@ -251,7 +251,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PFilterIter
 
     pub fn estimate_num_tuples(
         &self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> usize {
         if self.num_tuples_scanned == 0 {
             self.input.estimate_num_tuples(context)
@@ -263,16 +263,16 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PFilterIter
     }
 }
 
-pub struct PProjectIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct PProjectIter<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef, // Output schema
-    input: Box<NonBlockingOp<T, E, M>>,
+    input: Box<NonBlockingOp<T, M>>,
     column_indices: Vec<ColumnId>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PProjectIter<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> PProjectIter<T, M> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<NonBlockingOp<T, E, M>>,
+        input: Box<NonBlockingOp<T, M>>,
         column_indices: Vec<ColumnId>,
     ) -> Self {
         Self {
@@ -309,7 +309,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PProjectIte
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("ProjectIter::next");
         if let Some(tuple) = self.input.next(context)? {
@@ -322,22 +322,22 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PProjectIte
 
     pub fn estimate_num_tuples(
         &self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> usize {
         self.input.estimate_num_tuples(context)
     }
 }
 
-pub struct PMapIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct PMapIter<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef, // Output schema
-    input: Box<NonBlockingOp<T, E, M>>,
+    input: Box<NonBlockingOp<T, M>>,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PMapIter<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> PMapIter<T, M> {
     pub fn new(
         schema: SchemaRef,
-        input: Box<NonBlockingOp<T, E, M>>,
+        input: Box<NonBlockingOp<T, M>>,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
@@ -374,7 +374,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PMapIter<T,
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("MapIter::next");
         if let Some(mut tuple) = self.input.next(context)? {
@@ -389,21 +389,21 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PMapIter<T,
 
     pub fn estimate_num_tuples(
         &self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> usize {
         self.input.estimate_num_tuples(context)
     }
 }
 
-pub enum PHashJoinIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    Inner(PHashJoinInnerIter<T, E, M>),
-    RightOuter(PHashJoinRightOuterIter<T, E, M>), // Probe side is the right
-    RightSemi(PHashJoinRightSemiIter<T, E, M>),   // Probe side is the right
-    RightAnti(PHashJoinRightAntiIter<T, E, M>),   // Probe side is the right
-    RightMark(PHashJoinRightMarkIter<T, E, M>),   // Probe side is the right
+pub enum PHashJoinIter<T: TxnStorageTrait, M: MemPool> {
+    Inner(PHashJoinInnerIter<T, M>),
+    RightOuter(PHashJoinRightOuterIter<T, M>), // Probe side is the right
+    RightSemi(PHashJoinRightSemiIter<T, M>),   // Probe side is the right
+    RightAnti(PHashJoinRightAntiIter<T, M>),   // Probe side is the right
+    RightMark(PHashJoinRightMarkIter<T, M>),   // Probe side is the right
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIter<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> PHashJoinIter<T, M> {
     pub fn schema(&self) -> &SchemaRef {
         match self {
             PHashJoinIter::Inner(iter) => iter.schema(),
@@ -446,7 +446,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIt
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         match self {
             PHashJoinIter::Inner(iter) => iter.next(context),
@@ -458,18 +458,18 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIt
     }
 }
 
-pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct PHashJoinInnerIter<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef, // Output schema
-    probe_side: Box<NonBlockingOp<T, E, M>>,
+    probe_side: Box<NonBlockingOp<T, M>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, FosterBtreeAppendOnlyRangeScanner<E, M>)>,
+    current: Option<(Tuple, FosterBtreeAppendOnlyRangeScanner<M>)>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinInnerIter<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> PHashJoinInnerIter<T, M> {
     pub fn new(
         schema: SchemaRef, // Output schema
-        probe_side: Box<NonBlockingOp<T, E, M>>,
+        probe_side: Box<NonBlockingOp<T, M>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -516,7 +516,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinInnerIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
@@ -559,21 +559,19 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
     }
 }
 
-pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                       // Output schema
-    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, M: MemPool> {
+    schema: SchemaRef,                    // Output schema
+    probe_side: Box<NonBlockingOp<T, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, FosterBtreeAppendOnlyRangeScanner<E, M>)>,
+    current: Option<(Tuple, FosterBtreeAppendOnlyRangeScanner<M>)>,
     nulls: Tuple,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    PHashJoinRightOuterIter<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> PHashJoinRightOuterIter<T, M> {
     pub fn new(
         schema: SchemaRef, // Output schema
-        probe_side: Box<NonBlockingOp<T, E, M>>,
+        probe_side: Box<NonBlockingOp<T, M>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
         nulls: Tuple,
@@ -622,7 +620,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightOuterIter::next");
         if let Some((probe, build_iter)) = &mut self.current {
@@ -667,19 +665,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
     }
 }
 
-pub struct PHashJoinRightSemiIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                       // Output schema
-    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightSemiIter<T: TxnStorageTrait, M: MemPool> {
+    schema: SchemaRef,                    // Output schema
+    probe_side: Box<NonBlockingOp<T, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    PHashJoinRightSemiIter<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> PHashJoinRightSemiIter<T, M> {
     pub fn new(
         schema: SchemaRef, // Output schema
-        probe_side: Box<NonBlockingOp<T, E, M>>,
+        probe_side: Box<NonBlockingOp<T, M>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -724,7 +720,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightSemiIter::next");
         let build_side =
@@ -755,19 +751,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
     }
 }
 
-pub struct PHashJoinRightAntiIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                       // Output schema
-    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightAntiIter<T: TxnStorageTrait, M: MemPool> {
+    schema: SchemaRef,                    // Output schema
+    probe_side: Box<NonBlockingOp<T, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    PHashJoinRightAntiIter<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> PHashJoinRightAntiIter<T, M> {
     pub fn new(
         schema: SchemaRef, // Output schema
-        probe_side: Box<NonBlockingOp<T, E, M>>,
+        probe_side: Box<NonBlockingOp<T, M>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -812,7 +806,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightAntiIter::next");
         let build_side =
@@ -849,19 +843,17 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 // If there is a matching tuple, the mark is true.
 // If there is no matching tuple, if the build side has nulls, the mark is null.
 // Otherwise, the mark is false.
-pub struct PHashJoinRightMarkIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                       // Output schema
-    probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
+pub struct PHashJoinRightMarkIter<T: TxnStorageTrait, M: MemPool> {
+    schema: SchemaRef,                    // Output schema
+    probe_side: Box<NonBlockingOp<T, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    PHashJoinRightMarkIter<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> PHashJoinRightMarkIter<T, M> {
     pub fn new(
         schema: SchemaRef, // Output schema
-        probe_side: Box<NonBlockingOp<T, E, M>>,
+        probe_side: Box<NonBlockingOp<T, M>>,
         build_side: PipelineID,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
@@ -906,7 +898,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("HashJoinRightMarkIter::next");
         // If there is a match in the build side, output the probe tuple.
@@ -942,19 +934,19 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
     }
 }
 
-pub struct PNestedLoopJoinIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    schema: SchemaRef,                  // Output schema
-    outer: Box<NonBlockingOp<T, E, M>>, // Outer loop of NLJ
-    inner: Box<NonBlockingOp<T, E, M>>, // Inner loop of NLJ
+pub struct PNestedLoopJoinIter<T: TxnStorageTrait, M: MemPool> {
+    schema: SchemaRef,               // Output schema
+    outer: Box<NonBlockingOp<T, M>>, // Outer loop of NLJ
+    inner: Box<NonBlockingOp<T, M>>, // Inner loop of NLJ
     current_outer: Option<Tuple>,
     current_inner: Option<Tuple>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PNestedLoopJoinIter<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> PNestedLoopJoinIter<T, M> {
     pub fn new(
         schema: SchemaRef,
-        outer: Box<NonBlockingOp<T, E, M>>,
-        inner: Box<NonBlockingOp<T, E, M>>,
+        outer: Box<NonBlockingOp<T, M>>,
+        inner: Box<NonBlockingOp<T, M>>,
     ) -> Self {
         Self {
             schema,
@@ -990,7 +982,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PNestedLoop
 
     pub fn next(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
     ) -> Result<Option<Tuple>, ExecError> {
         loop {
             // Set the outer
@@ -1035,14 +1027,14 @@ pub enum MemoryPolicy {
     Unbounded,
 }
 
-pub enum BlockingOp<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    Dummy(NonBlockingOp<T, E, M>),
-    OnDiskSort(OnDiskSort<T, E, M>),
-    OnDiskHashTableCreation(OnDiskHashTableCreation<T, E, M>),
-    OnDiskHashAggregate(OnDiskHashAggregation<T, E, M>),
+pub enum BlockingOp<T: TxnStorageTrait, M: MemPool> {
+    Dummy(NonBlockingOp<T, M>),
+    OnDiskSort(OnDiskSort<T, M>),
+    OnDiskHashTableCreation(OnDiskHashTableCreation<T, M>),
+    OnDiskHashAggregate(OnDiskHashAggregation<T, M>),
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> BlockingOp<T, M> {
     pub fn schema(&self) -> &SchemaRef {
         match self {
             BlockingOp::Dummy(plan) => plan.schema(),
@@ -1072,11 +1064,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
 
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         policy: &Arc<MemoryPolicy>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         match self {
             BlockingOp::Dummy(plan) => {
                 log_debug!("Dummy blocking op");
@@ -1097,30 +1089,28 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> BlockingOp<
     }
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> From<NonBlockingOp<T, E, M>>
-    for BlockingOp<T, E, M>
-{
-    fn from(plan: NonBlockingOp<T, E, M>) -> Self {
+impl<T: TxnStorageTrait, M: MemPool> From<NonBlockingOp<T, M>> for BlockingOp<T, M> {
+    fn from(plan: NonBlockingOp<T, M>) -> Self {
         BlockingOp::Dummy(plan)
     }
 }
 
 pub type PipelineID = u16;
 
-pub struct Pipeline<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct Pipeline<T: TxnStorageTrait, M: MemPool> {
     id: PipelineID,
-    context: HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
-    exec_plan: BlockingOp<T, E, M>,
+    context: HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
+    exec_plan: BlockingOp<T, M>,
     deps_cache: HashSet<PipelineID>,
     policy: Arc<MemoryPolicy>,
     mem_pool: Arc<M>,
     dest_c_key: ContainerKey,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Pipeline<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> Pipeline<T, M> {
     pub fn new(
         id: PipelineID,
-        execution_plan: BlockingOp<T, E, M>,
+        execution_plan: BlockingOp<T, M>,
         mem_pool: &Arc<M>,
         policy: &Arc<MemoryPolicy>,
         dest_c_key: ContainerKey,
@@ -1138,8 +1128,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Pipeline<T,
 
     pub fn new_with_context(
         id: PipelineID,
-        execution_plan: BlockingOp<T, E, M>,
-        context: HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        execution_plan: BlockingOp<T, M>,
+        context: HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         mem_pool: &Arc<M>,
         policy: &Arc<MemoryPolicy>,
         dest_c_key: ContainerKey,
@@ -1174,7 +1164,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Pipeline<T,
     }
 
     /// Set context.
-    pub fn set_context(&mut self, id: PipelineID, buffer: Arc<OnDiskBuffer<T, E, M>>) {
+    pub fn set_context(&mut self, id: PipelineID, buffer: Arc<OnDiskBuffer<T, M>>) {
         self.context.insert(id, buffer);
     }
 
@@ -1198,18 +1188,18 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Pipeline<T,
         self.exec_plan.print_inner(indent, out);
     }
 
-    pub fn execute(&mut self) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+    pub fn execute(&mut self) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         self.exec_plan
             .execute(&self.context, &self.policy, &self.mem_pool, self.dest_c_key)
     }
 }
 
-pub struct OnDiskPipelineGraph<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    pipelines: Vec<Pipeline<T, E, M>>,
-    queue: VecDeque<Pipeline<T, E, M>>,
+pub struct OnDiskPipelineGraph<T: TxnStorageTrait, M: MemPool> {
+    pipelines: Vec<Pipeline<T, M>>,
+    queue: VecDeque<Pipeline<T, M>>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipelineGraph<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> OnDiskPipelineGraph<T, M> {
     pub fn new(
         db_id: DatabaseId,
         intermediate_dest_c_id: ContainerId,
@@ -1240,7 +1230,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
         }
     }
 
-    fn add_pipeline(&mut self, pipeline: Pipeline<T, E, M>) {
+    fn add_pipeline(&mut self, pipeline: Pipeline<T, M>) {
         self.pipelines.push(pipeline);
     }
 
@@ -1249,7 +1239,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
     fn push_no_deps_to_queue(&mut self) {
         // Push the pipelines that do not have any dependencies to the queue
         // drain_filter is not stable yet so use retain instead
-        let mut with_deps: Vec<Pipeline<T, E, M>> = Vec::new();
+        let mut with_deps: Vec<Pipeline<T, M>> = Vec::new();
         for p in self.pipelines.drain(..) {
             if p.is_ready() {
                 self.queue.push_back(p);
@@ -1262,7 +1252,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
 
     // Remove the completed pipeline from the dependencies of other pipelines
     // Set the output of the completed pipeline as the input of the dependent pipelines
-    fn notify_dependants(&mut self, id: PipelineID, output: Arc<OnDiskBuffer<T, E, M>>) {
+    fn notify_dependants(&mut self, id: PipelineID, output: Arc<OnDiskBuffer<T, M>>) {
         for p in self.pipelines.iter_mut() {
             if p.deps().contains(&id) {
                 // p is a dependant of the completed pipeline
@@ -1272,10 +1262,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskPipel
     }
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Executor<T>
-    for OnDiskPipelineGraph<T, E, M>
-{
-    type Buffer = OnDiskBuffer<T, E, M>;
+impl<T: TxnStorageTrait, M: MemPool> Executor<T> for OnDiskPipelineGraph<T, M> {
+    type Buffer = OnDiskBuffer<T, M>;
 
     fn to_pretty_string(&self) -> String {
         let mut result = String::new();
@@ -1287,7 +1275,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Executor<T>
         result
     }
 
-    fn execute(mut self, _txn: &T::TxnHandle) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+    fn execute(mut self, _txn: &T::TxnHandle) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         log_info!(
@@ -1313,25 +1301,19 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> Executor<T>
     }
 }
 
-struct PhysicalRelExprToPipelineQueue<
-    T: TxnStorageTrait,
-    E: EvictionPolicy + 'static,
-    M: MemPool<E>,
-> {
+struct PhysicalRelExprToPipelineQueue<T: TxnStorageTrait, M: MemPool> {
     current_id: PipelineID, // Incremental pipeline ID
     db_id: DatabaseId,
     dest_c_id: ContainerId,
     storage: Arc<T>,
     mem_pool: Arc<M>,
     policy: Arc<MemoryPolicy>,
-    pipeline_queue: OnDiskPipelineGraph<T, E, M>,
+    pipeline_queue: OnDiskPipelineGraph<T, M>,
 }
 
 type ColIdToIdx = BTreeMap<ColumnId, usize>;
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    PhysicalRelExprToPipelineQueue<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> PhysicalRelExprToPipelineQueue<T, M> {
     fn new(
         db_id: DatabaseId,
         intermediate_dest_c_id: ContainerId,
@@ -1361,7 +1343,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
         catalog: CatalogRef,
         expr: PhysicalRelExpr,
         exclude_last_pipeline: bool,
-    ) -> Result<OnDiskPipelineGraph<T, E, M>, ExecError> {
+    ) -> Result<OnDiskPipelineGraph<T, M>, ExecError> {
         let (op, context, _) = self.convert_inner(catalog, expr)?;
         // if let NonBlockingOp::Scan(PScanIter {
         //     schema,
@@ -1403,8 +1385,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
         expr: PhysicalRelExpr,
     ) -> Result<
         (
-            NonBlockingOp<T, E, M>,
-            HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+            NonBlockingOp<T, M>,
+            HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
             ColIdToIdx,
         ),
         ExecError,

@@ -3,7 +3,7 @@ use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
     },
-    BufferPool, ContainerId, LRUEvictionPolicy, OnDiskStorage,
+    BufferPool, ContainerId, OnDiskStorage,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -53,9 +53,7 @@ fn main() {
         memory_size_per_operator
     );
 
-    let bp = Arc::new(
-        BufferPool::<LRUEvictionPolicy>::new(&opt.path, opt.buffer_pool_size, false).unwrap(),
-    );
+    let bp = Arc::new(BufferPool::new(&opt.path, opt.buffer_pool_size, false).unwrap());
     let storage = Arc::new(OnDiskStorage::load(&bp));
     let (db_id, catalog) = load_db(&storage, "TPCH").unwrap();
 

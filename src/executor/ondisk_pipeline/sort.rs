@@ -266,17 +266,17 @@ impl AppendOnlyKVPage for Page {
     }
 }
 
-pub struct SortBuffer<E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct SortBuffer<M: MemPool> {
     mem_pool: Arc<M>,
     dest_c_key: ContainerKey,
     policy: Arc<MemoryPolicy>,
     sort_cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
     ptrs: Vec<(usize, u16)>,                // Slot pointers. (page index, slot_id)
-    data_buffer: Vec<FrameWriteGuard<'static, E>>,
+    data_buffer: Vec<FrameWriteGuard<'static>>,
     current_page_idx: usize,
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> SortBuffer<E, M> {
+impl<M: MemPool> SortBuffer<M> {
     pub fn new(
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
@@ -312,9 +312,8 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> SortBuffer<E, M> {
                 .mem_pool
                 .create_new_page_for_write(self.dest_c_key)
                 .unwrap();
-            let mut frame = unsafe {
-                std::mem::transmute::<FrameWriteGuard<'_, E>, FrameWriteGuard<'static, E>>(frame)
-            };
+            let mut frame =
+                unsafe { std::mem::transmute::<FrameWriteGuard, FrameWriteGuard<'static>>(frame) };
             frame.init();
             self.data_buffer.push(frame);
         }
@@ -347,10 +346,9 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> SortBuffer<E, M> {
                                 .create_new_page_for_write(self.dest_c_key)
                                 .unwrap();
                             let mut frame = unsafe {
-                                std::mem::transmute::<
-                                    FrameWriteGuard<'_, E>,
-                                    FrameWriteGuard<'static, E>,
-                                >(frame)
+                                std::mem::transmute::<FrameWriteGuard, FrameWriteGuard<'static>>(
+                                    frame,
+                                )
                             };
                             frame.init();
                             self.data_buffer.push(frame);
@@ -381,7 +379,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> SortBuffer<E, M> {
     }
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> Drop for SortBuffer<E, M> {
+impl<M: MemPool> Drop for SortBuffer<M> {
     fn drop(&mut self) {
         // Make all the pages undirty because they don't need to be written back.
         for page in &mut self.data_buffer {
@@ -392,13 +390,13 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Drop for SortBuffer<E, M> {
 }
 
 /// Iterator for sort buffer. Output key, value by sorting order.
-pub struct SortBufferIter<'a, E: EvictionPolicy + 'static, M: MemPool<E>> {
-    sort_buffer: &'a SortBuffer<E, M>,
+pub struct SortBufferIter<'a, M: MemPool> {
+    sort_buffer: &'a SortBuffer<M>,
     idx: usize,
 }
 
-impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> SortBufferIter<'a, E, M> {
-    pub fn new(sort_buffer: &'a SortBuffer<E, M>) -> Self {
+impl<'a, M: MemPool> SortBufferIter<'a, M> {
+    pub fn new(sort_buffer: &'a SortBuffer<M>) -> Self {
         Self {
             sort_buffer,
             idx: 0,
@@ -406,7 +404,7 @@ impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> SortBufferIter<'a, E, M> {
     }
 }
 
-impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for SortBufferIter<'a, E, M> {
+impl<'a, M: MemPool> Iterator for SortBufferIter<'a, M> {
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -423,13 +421,13 @@ impl<'a, E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for SortBufferIter
     }
 }
 
-pub struct MergeIter<E: EvictionPolicy + 'static, M: MemPool<E>> {
-    run_iters: Vec<AppendOnlyStoreScanner<E, M>>,
+pub struct MergeIter<M: MemPool> {
+    run_iters: Vec<AppendOnlyStoreScanner<M>>,
     heap: BinaryHeap<Reverse<(Vec<u8>, usize, Vec<u8>)>>,
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> MergeIter<E, M> {
-    pub fn new(mut run_iters: Vec<AppendOnlyStoreScanner<E, M>>) -> Self {
+impl<M: MemPool> MergeIter<M> {
+    pub fn new(mut run_iters: Vec<AppendOnlyStoreScanner<M>>) -> Self {
         let mut heap = BinaryHeap::new();
         for (i, iter) in run_iters.iter_mut().enumerate() {
             if let Some((k, v)) = iter.next() {
@@ -440,7 +438,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> MergeIter<E, M> {
     }
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for MergeIter<E, M> {
+impl<M: MemPool> Iterator for MergeIter<M> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -456,16 +454,16 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for MergeIter<E, M> {
     }
 }
 
-pub struct OnDiskSort<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct OnDiskSort<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef,
-    exec_plan: NonBlockingOp<T, E, M>,
+    exec_plan: NonBlockingOp<T, M>,
     sort_cols: Vec<(ColumnId, bool, bool)>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     pub fn new(
         schema: SchemaRef,
-        exec_plan: NonBlockingOp<T, E, M>,
+        exec_plan: NonBlockingOp<T, M>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
     ) -> Self {
         Self {
@@ -504,10 +502,10 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     fn run_generation(
         &mut self,
         policy: &Arc<MemoryPolicy>,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
+    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
         let mut sort_buffer = SortBuffer::new(mem_pool, dest_c_key, policy, self.sort_cols.clone());
 
         let mut result_buffers = Vec::new();
@@ -553,10 +551,10 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     fn run_merge(
         &mut self,
         policy: &Arc<MemoryPolicy>,
-        mut runs: Vec<Arc<AppendOnlyStore<E, M>>>,
+        mut runs: Vec<Arc<AppendOnlyStore<M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<AppendOnlyStore<E, M>>, ExecError> {
+    ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let mut merge_fanins = Vec::new();
@@ -624,10 +622,10 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
 
     fn merge_step(
         &mut self,
-        runs: Vec<Arc<AppendOnlyStore<E, M>>>,
+        runs: Vec<Arc<AppendOnlyStore<M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Arc<AppendOnlyStore<E, M>> {
+    ) -> Arc<AppendOnlyStore<M>> {
         let merge_iter = MergeIter::new(runs.iter().map(|r| r.scan()).collect());
         Arc::new(AppendOnlyStore::bulk_insert_create(
             dest_c_key,
@@ -638,11 +636,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
 
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         policy: &Arc<MemoryPolicy>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
 
@@ -1009,11 +1007,7 @@ mod tests {
 
             // Scan the append only store with the scan operator
             let scan =
-                PScanIter::<InMemStorage, LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>::new(
-                    schema.clone(),
-                    0,
-                    (0..4).collect(),
-                );
+                PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
 
             let mut context = HashMap::new();
             context.insert(
@@ -1082,11 +1076,7 @@ mod tests {
 
             // Scan the append only store with the scan operator
             let scan =
-                PScanIter::<InMemStorage, LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>::new(
-                    schema.clone(),
-                    0,
-                    (0..4).collect(),
-                );
+                PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
 
             let mut context = HashMap::new();
             context.insert(

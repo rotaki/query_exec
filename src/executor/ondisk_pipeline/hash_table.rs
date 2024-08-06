@@ -27,13 +27,13 @@ use crate::{
 
 use super::{disk_buffer::OnDiskBuffer, MemoryPolicy, NonBlockingOp, PipelineID};
 
-pub struct HashTable<E: EvictionPolicy, M: MemPool<E>> {
-    hash_index: Arc<HashFosterBtreeAppendOnly<E, M>>,
+pub struct HashTable<M: MemPool> {
+    hash_index: Arc<HashFosterBtreeAppendOnly<M>>,
     exprs: Vec<ByteCodeExpr>,
     has_null: AtomicBool,
 }
 
-impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
+impl<M: MemPool> HashTable<M> {
     pub fn new(
         c_key: ContainerKey,
         mem_pool: Arc<M>,
@@ -75,24 +75,22 @@ impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
         Ok(())
     }
 
-    pub fn iter_key(&self, key: &[Field]) -> FosterBtreeAppendOnlyRangeScanner<E, M> {
+    pub fn iter_key(&self, key: &[Field]) -> FosterBtreeAppendOnlyRangeScanner<M> {
         let key_bytes = Tuple::from_fields(key.into()).to_bytes();
         self.hash_index.scan_key(&key_bytes)
     }
 }
 
-pub struct OnDiskHashTableCreation<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct OnDiskHashTableCreation<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef,
-    exec_plan: NonBlockingOp<T, E, M>,
+    exec_plan: NonBlockingOp<T, M>,
     exprs: Vec<ByteCodeExpr>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    OnDiskHashTableCreation<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> OnDiskHashTableCreation<T, M> {
     pub fn new(
         schema: SchemaRef,
-        exec_plan: NonBlockingOp<T, E, M>,
+        exec_plan: NonBlockingOp<T, M>,
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
@@ -125,11 +123,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         policy: &Arc<MemoryPolicy>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         let num_buckets = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(size) => *size,
             _ => {
@@ -149,14 +147,14 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
     }
 }
 
-pub struct HashAggregateTable<E: EvictionPolicy, M: MemPool<E>> {
-    hash_index: Arc<HashFosterBtree<E, M>>,
+pub struct HashAggregateTable<M: MemPool> {
+    hash_index: Arc<HashFosterBtree<M>>,
     group_by: Vec<ColumnId>,
     agg_op: Vec<(AggOp, ColumnId)>,
     has_null: AtomicBool,
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregateTable<E, M> {
+impl<M: MemPool> HashAggregateTable<M> {
     fn serialize_tuple(count: usize, t: &Tuple) -> Vec<u8> {
         let mut result = count.to_be_bytes().to_vec();
         let mut tuple_bytes = t.to_bytes();
@@ -171,8 +169,8 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregateTable<E, M> {
     }
 
     fn merge_tuples(acc: &[u8], incoming: &[u8], agg_op: Vec<(AggOp, ColumnId)>) -> Vec<u8> {
-        let (acc_count, mut acc) = HashAggregateTable::<E, M>::deserialize_tuple(acc);
-        let (incoming_count, incoming) = HashAggregateTable::<E, M>::deserialize_tuple(incoming);
+        let (acc_count, mut acc) = HashAggregateTable::<M>::deserialize_tuple(acc);
+        let (incoming_count, incoming) = HashAggregateTable::<M>::deserialize_tuple(incoming);
         assert!(incoming_count == 1);
         let count = acc_count + 1;
         for (idx, (op, _)) in agg_op.iter().enumerate() {
@@ -262,7 +260,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregateTable<E, M> {
         Ok(())
     }
 
-    pub fn iter(&self) -> HashAggregationTableIter<E, M> {
+    pub fn iter(&self) -> HashAggregationTableIter<M> {
         HashAggregationTableIter::new(
             self.hash_index.scan(),
             self.group_by.clone(),
@@ -271,16 +269,16 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregateTable<E, M> {
     }
 }
 
-pub struct HashAggregationTableIter<E: EvictionPolicy + 'static, M: MemPool<E>> {
-    iter: HashFosterBtreeIter<E, M>,
+pub struct HashAggregationTableIter<M: MemPool> {
+    iter: HashFosterBtreeIter<M>,
     group_by: Vec<ColumnId>,
     agg_op: Vec<(AggOp, ColumnId)>,
     has_output: bool,
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregationTableIter<E, M> {
+impl<M: MemPool> HashAggregationTableIter<M> {
     pub fn new(
-        iter: HashFosterBtreeIter<E, M>,
+        iter: HashFosterBtreeIter<M>,
         group_by: Vec<ColumnId>,
         agg_op: Vec<(AggOp, ColumnId)>,
     ) -> Self {
@@ -296,7 +294,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregationTableIter<E, M> 
         if let Some((key, value)) = self.iter.next() {
             self.has_output = true;
             let key_tuple = Tuple::from_bytes(&key);
-            let (count, value_tuple) = HashAggregateTable::<E, M>::deserialize_tuple(&value);
+            let (count, value_tuple) = HashAggregateTable::<M>::deserialize_tuple(&value);
             let mut result = key_tuple;
             for (idx, (op, _)) in self.agg_op.iter().enumerate() {
                 let val = value_tuple.get(idx);
@@ -329,19 +327,17 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> HashAggregationTableIter<E, M> 
     }
 }
 
-pub struct OnDiskHashAggregation<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct OnDiskHashAggregation<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef,
-    exec_plan: NonBlockingOp<T, E, M>,
+    exec_plan: NonBlockingOp<T, M>,
     group_by: Vec<ColumnId>,
     agg_op: Vec<(AggOp, ColumnId)>,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
-    OnDiskHashAggregation<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> OnDiskHashAggregation<T, M> {
     pub fn new(
         schema: SchemaRef,
-        exec_plan: NonBlockingOp<T, E, M>,
+        exec_plan: NonBlockingOp<T, M>,
         group_by: Vec<ColumnId>,
         agg_op: Vec<(AggOp, ColumnId)>,
     ) -> Self {
@@ -383,11 +379,11 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
 
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         policy: &Arc<MemoryPolicy>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         let output = Arc::new(HashAggregateTable::new(
             dest_c_key,
             mem_pool.clone(),
