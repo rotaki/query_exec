@@ -1,11 +1,12 @@
 /target
-# /tpch/data/sf-*
-/tpch/data/sf-2
-/tpch/data/sf-3
-/tpch/data/sf-4
+/tpch/data/sf-*
+/bp-*
+# /tpch/data/sf-2
+# /tpch/data/sf-3
+# /tpch/data/sf-4
 # /tpch/data/sf-5
-/tpch/data/sf-6
-/tpch/data/sf-7
-/tpch/data/sf-8
-/tpch/data/sf-9
-/tpch/data/sf-10
+# /tpch/data/sf-6
+# /tpch/data/sf-7
+# /tpch/data/sf-8
+# /tpch/data/sf-9
+# /tpch/data/sf-10

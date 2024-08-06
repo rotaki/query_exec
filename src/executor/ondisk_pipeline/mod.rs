@@ -8,7 +8,7 @@ use std::{
 };
 
 use fbtree::{
-    access_method::hash_fbt::HashFosterBtreeIter,
+    access_method::{fbt::FosterBtreeAppendOnlyRangeScanner, hash_fbt::HashFosterBtreeIter},
     bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
     prelude::{AppendOnlyStore, TxnStorageTrait},
 };
@@ -463,7 +463,7 @@ pub struct PHashJoinInnerIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M
     probe_side: Box<NonBlockingOp<T, E, M>>,
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, HashFosterBtreeIter<E, M>)>,
+    current: Option<(Tuple, FosterBtreeAppendOnlyRangeScanner<E, M>)>,
 }
 
 impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinInnerIter<T, E, M> {
@@ -542,19 +542,16 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> PHashJoinIn
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = build_side.iter_key(&key);
-                if let Some(mut iter) = build_iter {
-                    // There should be at least one tuple in the build side iterator.
-                    if let Some((_, build)) = iter.next() {
-                        let build = Tuple::from_bytes(&build);
-                        let result = build.merge_mut(&probe);
-                        self.current = Some((probe, iter));
-                        return Ok(Some(result));
-                    } else {
-                        unreachable!("The build side returned an empty iterator")
-                    }
+                let mut build_iter = build_side.iter_key(&key);
+                // There should be at least one tuple in the build side iterator.
+                if let Some((_, build)) = build_iter.next() {
+                    let build = Tuple::from_bytes(&build);
+                    let result = build.merge_mut(&probe);
+                    self.current = Some((probe, build_iter));
+                    return Ok(Some(result));
+                } else {
+                    // No match found. Continue to the next probe tuple.
                 }
-                // No match found. Continue to the next probe tuple.
             } else {
                 return Ok(None);
             }
@@ -567,7 +564,7 @@ pub struct PHashJoinRightOuterIter<T: TxnStorageTrait, E: EvictionPolicy + 'stat
     probe_side: Box<NonBlockingOp<T, E, M>>, // Probe side is the right. All tuples in the probe side will be preserved.
     build_side: PipelineID,
     exprs: Vec<ByteCodeExpr>,
-    current: Option<(Tuple, HashFosterBtreeIter<E, M>)>,
+    current: Option<(Tuple, FosterBtreeAppendOnlyRangeScanner<E, M>)>,
     nulls: Tuple,
 }
 
@@ -651,19 +648,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                 .map(|expr| expr.eval(&probe))
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let build_iter = build_side.iter_key(&key);
-            let result = if let Some(mut iter) = build_iter {
+            let mut build_iter = build_side.iter_key(&key);
+            let result = if let Some((_, build)) = build_iter.next() {
                 // Try to iterate the build side once to check if there is any match.
-
-                if let Some((_, build)) = iter.next() {
-                    let build = Tuple::from_bytes(&build);
-                    let result = build.merge_mut(&probe);
-                    self.current = Some((probe, iter));
-                    result
-                } else {
-                    // There should be at least one tuple in the build side iterator.
-                    unreachable!("The build side returned an empty iterator");
-                }
+                let build = Tuple::from_bytes(&build);
+                let result = build.merge_mut(&probe);
+                self.current = Some((probe, build_iter));
+                result
             } else {
                 self.current = None;
                 // No match found. Output the probe tuple with nulls for the build side.
@@ -751,15 +742,12 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = build_side.iter_key(&key);
-                if let Some(mut iter) = build_iter {
-                    if iter.next().is_some() {
-                        return Ok(Some(probe));
-                    } else {
-                        unreachable!("The build side returned an empty iterator")
-                    }
+                let mut build_iter = build_side.iter_key(&key);
+                if build_iter.next().is_some() {
+                    return Ok(Some(probe));
+                } else {
+                    // No match found. Continue to the next probe tuple.
                 }
-                // No match found. Continue to the next probe tuple.
             } else {
                 return Ok(None);
             }
@@ -842,8 +830,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = build_side.iter_key(&key);
-                if let Some(_iter) = build_iter {
+                let mut build_iter = build_side.iter_key(&key);
+                if let Some((_, _)) = build_iter.next() {
                     // Match found. Continue to the next probe tuple.
                 } else {
                     return Ok(Some(probe));
@@ -937,13 +925,9 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>>
                     .iter()
                     .map(|expr| expr.eval(&probe))
                     .collect::<Result<Vec<_>, _>>()?;
-                let build_iter = build_side.iter_key(&key);
-                let mark = if let Some(mut iter) = build_iter {
-                    if iter.next().is_some() {
-                        Field::from_bool(true)
-                    } else {
-                        unreachable!("The build side returned an empty iterator")
-                    }
+                let mut build_iter = build_side.iter_key(&key);
+                let mark = if build_iter.next().is_some() {
+                    Field::from_bool(true)
                 } else if build_side.has_null() {
                     Field::null(&DataType::Boolean)
                 } else {

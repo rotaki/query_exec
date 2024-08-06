@@ -8,7 +8,10 @@ use std::{
 };
 
 use fbtree::{
-    access_method::hash_fbt::HashFosterBtreeIter,
+    access_method::{
+        fbt::FosterBtreeAppendOnlyRangeScanner,
+        hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter},
+    },
     bp::{ContainerKey, EvictionPolicy, MemPool},
     prelude::{HashFosterBtree, TreeStatus, TxnStorageTrait},
 };
@@ -25,7 +28,7 @@ use crate::{
 use super::{disk_buffer::OnDiskBuffer, MemoryPolicy, NonBlockingOp, PipelineID};
 
 pub struct HashTable<E: EvictionPolicy, M: MemPool<E>> {
-    hash_index: Arc<HashFosterBtree<E, M>>,
+    hash_index: Arc<HashFosterBtreeAppendOnly<E, M>>,
     exprs: Vec<ByteCodeExpr>,
     has_null: AtomicBool,
 }
@@ -38,7 +41,7 @@ impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
         exprs: Vec<ByteCodeExpr>,
     ) -> Self {
         Self {
-            hash_index: Arc::new(HashFosterBtree::new(c_key, mem_pool, num_buckets)),
+            hash_index: Arc::new(HashFosterBtreeAppendOnly::new(c_key, mem_pool, num_buckets)),
             exprs,
             has_null: AtomicBool::new(false),
         }
@@ -72,14 +75,9 @@ impl<E: EvictionPolicy, M: MemPool<E>> HashTable<E, M> {
         Ok(())
     }
 
-    pub fn iter_key(&self, key: &[Field]) -> Option<HashFosterBtreeIter<E, M>> {
+    pub fn iter_key(&self, key: &[Field]) -> FosterBtreeAppendOnlyRangeScanner<E, M> {
         let key_bytes = Tuple::from_fields(key.into()).to_bytes();
-        // Search the index for the first key. If it does not exist, return None
-        if self.hash_index.check_key(&key_bytes) {
-            Some(self.hash_index.scan_with_prefix(&key_bytes))
-        } else {
-            None
-        }
+        self.hash_index.scan_key(&key_bytes)
     }
 }
 
@@ -437,7 +435,7 @@ mod tests {
         }
 
         let fields = vec![1.into()];
-        let mut iter = hash_table.iter_key(&fields).unwrap();
+        let mut iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
         while let Some((_, value)) = iter.next() {
             result.push(Tuple::from_bytes(&value));
@@ -448,7 +446,7 @@ mod tests {
         assert!(result.contains(&Tuple::from_fields(vec![1.into(), 11.into()])));
 
         let fields = vec![2.into()];
-        let mut iter = hash_table.iter_key(&fields).unwrap();
+        let mut iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
         while let Some((_, value)) = iter.next() {
             result.push(Tuple::from_bytes(&value));
@@ -459,7 +457,7 @@ mod tests {
         assert!(result.contains(&Tuple::from_fields(vec![2.into(), 13.into()])));
 
         let fields = vec![3.into()];
-        let mut iter = hash_table.iter_key(&fields).unwrap();
+        let mut iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
         while let Some((_, value)) = iter.next() {
             result.push(Tuple::from_bytes(&value));
