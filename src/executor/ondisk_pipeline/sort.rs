@@ -48,25 +48,31 @@ impl Quantiles {
         self.quantiles.push(quantile_values);
     }
 
-    pub fn normalize_and_average(&self) -> Vec<u8> {
+    pub fn normalize_and_average(&self) -> Vec<Vec<u8>> {
         let max_len = self.quantiles.iter().flatten().map(|v| v.len()).max().unwrap_or(0);
-        let mut averages = vec![0u32; max_len];
-        let mut counts = vec![0u32; max_len];
+        let mut averages = vec![vec![0u32; max_len]; self.num_quantiles];
+        let mut counts = vec![vec![0u32; max_len]; self.num_quantiles];
 
-        for quantile in &self.quantiles {
+        for (i, quantile) in self.quantiles.iter().enumerate() {
             for value in quantile {
                 for (j, &byte) in value.iter().enumerate() {
-                    averages[j] += byte as u32;
-                    counts[j] += 1;
+                    averages[i][j] += byte as u32;
+                    counts[i][j] += 1;
                 }
             }
         }
 
         println!("Length of the vec of the quantiles: {}", self.quantiles.len());
+
         averages
             .iter()
             .zip(counts.iter())
-            .map(|(&sum, &count)| if count > 0 { (sum / count) as u8 } else { 0 })
+            .map(|(sum, count)| {
+                sum.iter()
+                    .zip(count.iter())
+                    .map(|(&sum_val, &count_val)| if count_val > 0 { (sum_val / count_val) as u8 } else { 0 })
+                    .collect()
+            })
             .collect()
     }
 }
@@ -565,6 +571,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
     
         while let Some(tuple) = self.exec_plan.next(context)? {
             if sort_buffer.append(&tuple) {
+                // println!("tuple {:?}", tuple);
                 continue;
             } else {
                 sort_buffer.sort();
@@ -643,40 +650,40 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                     }
                 }
     
-                // Estimate global quantiles
-                let global_quantiles: Vec<Vec<u8>> = self.quantiles.normalize_and_average().chunks(1).map(|chunk| chunk.to_vec()).collect();
-                println!("Global quantiles: {:?}", global_quantiles);
-    
-                // Merge sorted runs in parallel based on global quantiles
-                let merged_buffers: Vec<_> = global_quantiles
-                    .par_iter()
-                    .enumerate()
-                    .map(|(i, quantile)| {
-                        let lower_bound = if i == 0 { vec![0u8] } else { global_quantiles[i - 1].clone() }; //xtx this is super janky for a defualt minimum value
-                        let upper_bound = quantile.clone();
-    
-                        println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
-    
-                        let merge_iters = runs.iter().map(|r| {
-                            let lower_bound = lower_bound.clone();
-                            let upper_bound = upper_bound.clone();
-                            r.scan().filter_map(move |(key, value)| {
-                                if key >= lower_bound && key < upper_bound {
-                                    Some((key.to_vec(), value.to_vec()))
-                                } else {
-                                    None
-                                }
-                            }).collect::<Vec<_>>().into_iter()
-                        });
-    
-                        let temp_container_key = ContainerKey { db_id: dest_c_key.db_id, c_id: dest_c_key.c_id + i as u16 };
-                        Arc::new(AppendOnlyStore::bulk_insert_create(
-                            temp_container_key,
-                            mem_pool.clone(),
-                            merge_iters.flatten(),
-                        ))
-                    })
-                    .collect();
+        // Estimate global quantiles
+        let global_quantiles: Vec<Vec<u8>> = self.quantiles.normalize_and_average();
+        println!("Global quantiles: {:?}", global_quantiles);
+
+        // Merge sorted runs in parallel based on global quantiles
+        let merged_buffers: Vec<_> = global_quantiles
+            .par_iter()
+            .enumerate()
+            .map(|(i, quantile)| {
+                let lower_bound = if i == 0 { vec![0u8; quantile.len()] } else { global_quantiles[i - 1].clone() };
+                let upper_bound = quantile.clone();
+
+                println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
+
+                let merge_iters = runs.iter().map(|r| {
+                    let lower_bound = lower_bound.clone();
+                    let upper_bound = upper_bound.clone();
+                    r.scan().filter_map(move |(key, value)| {
+                        if key >= lower_bound && key < upper_bound {
+                            Some((key.to_vec(), value.to_vec()))
+                        } else {
+                            None
+                        }
+                    }).collect::<Vec<_>>().into_iter()
+                });
+
+                let temp_container_key = ContainerKey { db_id: dest_c_key.db_id, c_id: dest_c_key.c_id + i as u16 };
+                Arc::new(AppendOnlyStore::bulk_insert_create(
+                    temp_container_key,
+                    mem_pool.clone(),
+                    merge_iters.flatten(),
+                ))
+            })
+            .collect();
     
                 println!("Length of the vec of the quantiles: {:?}", global_quantiles.len());
     
