@@ -25,7 +25,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct Quantiles {
     num_quantiles: usize,
-    quantiles: Vec<Vec<Vec<u8>>>,
+    quantiles: Vec<Vec<u8>>,
 }
 
 impl Quantiles {
@@ -36,44 +36,20 @@ impl Quantiles {
         }
     }
 
-    pub fn compute_quantiles(&mut self, run: &[Vec<u8>]) {
-        let run_len = run.len();
+    pub fn compute_quantiles(&mut self, sorted_run: &[Vec<u8>]) {
+        let run_len = sorted_run.len();
         let mut quantile_values = Vec::new();
 
         for i in 1..self.num_quantiles {
             let quantile_index = (i * run_len) / self.num_quantiles;
-            quantile_values.push(run[quantile_index].clone());
+            quantile_values.push(sorted_run[quantile_index].clone());
         }
 
-        self.quantiles.push(quantile_values);
+        self.quantiles = quantile_values;
     }
 
-    pub fn normalize_and_average(&self) -> Vec<Vec<u8>> {
-        let max_len = self.quantiles.iter().flatten().map(|v| v.len()).max().unwrap_or(0);
-        let mut averages = vec![vec![0u32; max_len]; self.num_quantiles];
-        let mut counts = vec![vec![0u32; max_len]; self.num_quantiles];
-
-        for (i, quantile) in self.quantiles.iter().enumerate() {
-            for value in quantile {
-                for (j, &byte) in value.iter().enumerate() {
-                    averages[i][j] += byte as u32;
-                    counts[i][j] += 1;
-                }
-            }
-        }
-
-        println!("Length of the vec of the quantiles: {}", self.quantiles.len());
-
-        averages
-            .iter()
-            .zip(counts.iter())
-            .map(|(sum, count)| {
-                sum.iter()
-                    .zip(count.iter())
-                    .map(|(&sum_val, &count_val)| if count_val > 0 { (sum_val / count_val) as u8 } else { 0 })
-                    .collect()
-            })
-            .collect()
+    pub fn get_global_quantiles(&self) -> Vec<Vec<u8>> {
+        self.quantiles.clone()
     }
 }
 
@@ -621,7 +597,6 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         Ok(result_buffers)
     }
 
-    // TODO xtx this is where it is messing up right now  - Im prety sure that it is do with the quantiles being stored incorrectly but idk how to fix like it is merging the ranges wrong
     fn run_merge(
         &mut self,
         policy: &Arc<MemoryPolicy>,
@@ -650,45 +625,59 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                     }
                 }
     
-        // Estimate global quantiles
-        let global_quantiles: Vec<Vec<u8>> = self.quantiles.normalize_and_average();
-        println!("Global quantiles: {:?}", global_quantiles);
-
-        // Merge sorted runs in parallel based on global quantiles
-        let merged_buffers: Vec<_> = global_quantiles
-            .par_iter()
-            .enumerate()
-            .map(|(i, quantile)| {
-                let lower_bound = if i == 0 { vec![0u8; quantile.len()] } else { global_quantiles[i - 1].clone() };
-                let upper_bound = quantile.clone();
-
-                println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
-
-                let merge_iters = runs.iter().map(|r| {
-                    let lower_bound = lower_bound.clone();
-                    let upper_bound = upper_bound.clone();
-                    r.scan().filter_map(move |(key, value)| {
-                        if key >= lower_bound && key < upper_bound {
-                            Some((key.to_vec(), value.to_vec()))
-                        } else {
-                            None
-                        }
-                    }).collect::<Vec<_>>().into_iter()
-                });
-
-                let temp_container_key = ContainerKey { db_id: dest_c_key.db_id, c_id: dest_c_key.c_id + i as u16 };
-                Arc::new(AppendOnlyStore::bulk_insert_create(
-                    temp_container_key,
-                    mem_pool.clone(),
-                    merge_iters.flatten(),
-                ))
-            })
-            .collect();
+                // Get global quantiles from previously computed quantiles
+                let global_quantiles = self.quantiles.get_global_quantiles();
+                println!("Global quantiles: {:?}", global_quantiles);
     
-                println!("Length of the vec of the quantiles: {:?}", global_quantiles.len());
+                // Merge sorted runs in parallel based on global quantiles
+                let merged_buffers: Vec<_> = global_quantiles
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, quantile)| {
+                        let lower_bound = if i == 0 {
+                            vec![0u8; quantile.len()]
+                        } else {
+                            global_quantiles[i - 1].clone()
+                        };
+                        let upper_bound = quantile.clone();
+    
+                        println!(
+                            "Merging range [{:?}, {:?})",
+                            lower_bound, upper_bound
+                        );
+    
+                        let merge_iters = runs.iter().map(|r| {
+                            let lower_bound = lower_bound.clone();
+                            let upper_bound = upper_bound.clone();
+                            r.scan().filter_map(move |(key, value)| {
+                                if key >= lower_bound && key < upper_bound {
+                                    Some((key.to_vec(), value.to_vec()))
+                                } else {
+                                    None
+                                }
+                            }).collect::<Vec<_>>().into_iter()
+                        });
+    
+                        let temp_container_key = ContainerKey {
+                            db_id: dest_c_key.db_id,
+                            c_id: dest_c_key.c_id + i as u16,
+                        };
+                        Arc::new(AppendOnlyStore::bulk_insert_create(
+                            temp_container_key,
+                            mem_pool.clone(),
+                            merge_iters.flatten(),
+                        ))
+                    })
+                    .collect();
+    
+                println!(
+                    "Length of the vec of the quantiles: {:?}",
+                    global_quantiles.len()
+                );
     
                 // Collect all merged buffers into the final output
-                let final_merge_iter = MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
+                let final_merge_iter =
+                    MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
                 Arc::new(AppendOnlyStore::bulk_insert_create(
                     dest_c_key,
                     mem_pool.clone(),
