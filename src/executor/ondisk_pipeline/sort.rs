@@ -8,7 +8,6 @@
 // 2 byte: free space offset
 
 use rayon::prelude::*;
-
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
@@ -18,15 +17,15 @@ use std::{
 use crate::{
     error::ExecError,
     executor::TupleBuffer,
-    log_warn,
     prelude::{Page, PageId, SchemaRef, AVAILABLE_PAGE_SIZE},
     tuple::Tuple,
     ColumnId,
 };
 
+#[derive(Clone, Debug)]
 pub struct Quantiles {
     num_quantiles: usize,
-    quantiles: Vec<Vec<u32>>,
+    quantiles: Vec<Vec<Vec<u8>>>,
 }
 
 impl Quantiles {
@@ -37,28 +36,38 @@ impl Quantiles {
         }
     }
 
-    pub fn compute_quantiles(&mut self, run: &[u32]) {
+    pub fn compute_quantiles(&mut self, run: &[Vec<u8>]) {
         let run_len = run.len();
         let mut quantile_values = Vec::new();
 
         for i in 1..self.num_quantiles {
             let quantile_index = (i * run_len) / self.num_quantiles;
-            quantile_values.push(run[quantile_index]);
+            quantile_values.push(run[quantile_index].clone());
         }
 
         self.quantiles.push(quantile_values);
     }
 
-    pub fn estimate_global_quantiles_mean(&self) -> Vec<u32> {
-        let mut all_quantiles: Vec<u32> = self.quantiles.iter().flatten().cloned().collect();
-        all_quantiles.sort_unstable();
-        let mut global_quantiles = Vec::new();
-        let len = all_quantiles.len();
-        for i in 1..self.num_quantiles {
-            let index = (i * len) / self.num_quantiles;
-            global_quantiles.push(all_quantiles[index]);
+    pub fn normalize_and_average(&self) -> Vec<u8> {
+        let max_len = self.quantiles.iter().flatten().map(|v| v.len()).max().unwrap_or(0);
+        let mut averages = vec![0u32; max_len];
+        let mut counts = vec![0u32; max_len];
+
+        for quantile in &self.quantiles {
+            for value in quantile {
+                for (j, &byte) in value.iter().enumerate() {
+                    averages[j] += byte as u32;
+                    counts[j] += 1;
+                }
+            }
         }
-        global_quantiles
+
+        println!("Length of the vec of the quantiles: {}", self.quantiles.len());
+        averages
+            .iter()
+            .zip(counts.iter())
+            .map(|(&sum, &count)| if count > 0 { (sum / count) as u8 } else { 0 })
+            .collect()
     }
 }
 
@@ -134,7 +143,7 @@ mod slot {
     }
 }
 use fbtree::{
-    bp::{ContainerKey, EvictionPolicy, FrameWriteGuard, MemPool},
+    bp::{ContainerKey, DatabaseId, EvictionPolicy, FrameWriteGuard, MemPool},
     prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
 };
@@ -272,6 +281,7 @@ impl AppendOnlyKVPage for Page {
 
     fn append(&mut self, key: &[u8], value: &[u8]) -> bool {
         // Check if the page has enough space for slot and the record
+        // println!("free_space {:?}", self.total_free_space());
         if self.total_free_space() < SLOT_SIZE as u16 + key.len() as u16 + value.len() as u16 {
             false
         } else {
@@ -371,6 +381,7 @@ impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
                 false
             } else {
                 page = &mut self.data_buffer[self.current_page_idx as usize];
+                // println!("key {:?}, val {:?}", key, val);
                 assert!(page.append(&key, &val), "Record too large to fit in a page");
                 self.ptrs
                     .push((self.current_page_idx, page.slot_count() - 1));
@@ -517,110 +528,93 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         out.push_str("])\n");
         self.exec_plan.print_inner(indent + 2, out);
     }
-
-fn run_generation(
-    &mut self,
-    policy: &Arc<MemoryPolicy>,
-    context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
-    mem_pool: &Arc<M>,
-    dest_c_key: ContainerKey,
-) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
-    let frames = match policy.as_ref() {
-        MemoryPolicy::FixedSize(working_mem) => {
-            let working_mem = *working_mem;
-            let mut frames = Vec::new();
-            for _ in 0..working_mem {
-                frames.push(mem_pool.create_new_page_for_write(dest_c_key).unwrap());
+    
+    fn run_generation(
+        &mut self,
+        policy: &Arc<MemoryPolicy>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+    ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
+        // const TEMP_DB_ID: DatabaseId = dest_c_key.db_id;
+        const TEMP_DB_ID: DatabaseId = 321; //xtx magic number
+        const TEMP_C_ID_BASE: u16 = 321; // xtx magic number
+        let mut temp_c_id_counter = TEMP_C_ID_BASE;
+    
+        let frames = match policy.as_ref() {
+            MemoryPolicy::FixedSize(working_mem) => {
+                let working_mem = *working_mem;
+                let mut frames = Vec::new();
+                for _ in 0..working_mem {
+                    frames.push(mem_pool.create_new_page_for_write(ContainerKey { db_id: TEMP_DB_ID, c_id: temp_c_id_counter }).unwrap());
+                }
+                frames
             }
-            frames
-        }
-        other => {
-            unimplemented!("Memory policy {:?} is not implemented yet", other);
-        }
-    };
-
-    println!("Stats after allocating frames: \n{}", mem_pool.stats());
-    // reset stats
-    println!("Resetting stats");
-    mem_pool.reset_stats();
-
-    let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
-
-    let mut result_buffers = Vec::new();
-
-    while let Some(tuple) = self.exec_plan.next(context)? {
-        if sort_buffer.append(&tuple) {
-            // println!("tuplee appended {:?}", tuple);
-            continue;
-        } else {
-            sort_buffer.sort();
-            let iter = SortBufferIter::new(&sort_buffer);
-
-            // Compute quantiles for the run
-            let run_values: Vec<u32> = iter.clone().map(|(_, v)| {
-                // Assuming the value can be parsed to u32
-                println!("value {:?}",v);
-                u32::from_be_bytes([0,0,0,0]) //xtx remove
-                // u32::from_be_bytes(v.try_into().unwrap())
-            }).collect();
-            self.quantiles.compute_quantiles(&run_values);
-
-            // Write quantiles to the first page
-            let first_page = sort_buffer.get_first_page();
-            let mut page = Page::new_empty();
-            page.append(&[], &self.quantiles.estimate_global_quantiles_mean().iter().flat_map(|&q| q.to_be_bytes().to_vec()).collect::<Vec<_>>());
-
-
-
-            let output = {
-                Arc::new(AppendOnlyStore::bulk_insert_create(
-                    dest_c_key,
+            other => {
+                unimplemented!("Memory policy {:?} is not implemented yet", other);
+            }
+        };
+    
+        println!("Stats after allocating frames: \n{}", mem_pool.stats());
+        // reset stats
+        println!("Resetting stats");
+        mem_pool.reset_stats();
+    
+        let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
+        let mut result_buffers = Vec::new();
+    
+        while let Some(tuple) = self.exec_plan.next(context)? {
+            if sort_buffer.append(&tuple) {
+                continue;
+            } else {
+                sort_buffer.sort();
+                let iter = SortBufferIter::new(&sort_buffer);
+    
+                // Compute quantiles for the run
+                let run_values: Vec<Vec<u8>> = iter.clone().map(|(_, v)| v.to_vec()).collect();
+                self.quantiles.compute_quantiles(&run_values);
+    
+                // Create temporary container key
+                let temp_container_key = ContainerKey { db_id: TEMP_DB_ID, c_id: temp_c_id_counter };
+                temp_c_id_counter += 1;
+    
+                let output = Arc::new(AppendOnlyStore::bulk_insert_create(
+                    temp_container_key,
                     mem_pool.clone(),
                     iter,
-                ))
-            };
-            result_buffers.push(output);
-
-            // Reset the sort buffer
-            sort_buffer.reset();
-            if !sort_buffer.append(&tuple) {
-                panic!("Record too large to fit in a page");
+                ));
+                result_buffers.push(output);
+    
+                sort_buffer.reset();
+                if !sort_buffer.append(&tuple) {
+                    panic!("Record too large to fit in a page");
+                }
             }
         }
-    }
-
-    // Finally sort and output the remaining records
-    sort_buffer.sort();
-    let iter = SortBufferIter::new(&sort_buffer);
-
-    // Compute quantiles for the last run
-    let run_values: Vec<u32> = iter.clone().map(|(_, v)| {
-        // Assuming the value can be parsed to u32
-        println!("value {:?}",v);
-        u32::from_be_bytes([0,0,0,0]) //xtx remove
-        // u32::from_be_bytes(v.try_into().unwrap())
-    }).collect();
-    self.quantiles.compute_quantiles(&run_values);
-
-    // Write quantiles to the first page
-    let first_page = sort_buffer.get_first_page();
-    let mut page = Page::new_empty();
-    page.append(&[], &self.quantiles.estimate_global_quantiles_mean().iter().flat_map(|&q| q.to_be_bytes().to_vec()).collect::<Vec<_>>());
-
-    let output = {
-        Arc::new(AppendOnlyStore::bulk_insert_create(
-            dest_c_key,
+    
+        // Finally sort and output the remaining records
+        sort_buffer.sort();
+        let iter = SortBufferIter::new(&sort_buffer);
+    
+        // Compute quantiles for the last run
+        let run_values: Vec<Vec<u8>> = iter.clone().map(|(_, v)| v.to_vec()).collect();
+        self.quantiles.compute_quantiles(&run_values);
+    
+        // Create temporary container key
+        let temp_container_key = ContainerKey { db_id: TEMP_DB_ID, c_id: temp_c_id_counter };
+        let output = Arc::new(AppendOnlyStore::bulk_insert_create(
+            temp_container_key,
             mem_pool.clone(),
             iter,
-        ))
-    };
-    result_buffers.push(output);
-
-    println!("Number of runs: {}", result_buffers.len());
-
-    Ok(result_buffers)
+        ));
+        result_buffers.push(output);
+    
+        println!("Number of runs: {}", result_buffers.len());
+    
+        Ok(result_buffers)
     }
 
+    // TODO xtx this is where it is messing up right now 
     fn run_merge(
         &mut self,
         policy: &Arc<MemoryPolicy>,
@@ -631,67 +625,75 @@ fn run_generation(
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSize(working_mem) => {
                 let mut merge_fanins = Vec::new();
-
+    
                 let working_mem = *working_mem;
-
+    
                 if runs.len() > working_mem {
-                    // Plan the sorting wisely
-                    // Reduce the number of runs to F + k(F-1) so that
-                    // maximal fan-in is achieved. To do this, we need to
-                    // first merge a small number of runs.
-                    //
-                    // X: number of runs.
-                    // F: fan-in. working_mem
-                    // k: number of merge steps except the last one.
-                    // a: number of runs to merge first.
-                    //
-                    // X - a + 1 = F + k(F-1) <=> X + 1 = F + k(F-1) + a
                     let k = (runs.len() + 1 - working_mem) / (working_mem - 1);
                     let a = runs.len() + 1 - (working_mem + k * (working_mem - 1));
-
-                    // If a == 0, then the last merge step will have F-1 runs. Others will have F runs.
-                    // If a == 1, then you keep merging F runs.
-                    // If a > 1, then you first merge a runs, then F runs.
-
-                    assert!(working_mem + k * (working_mem - 1) == runs.len() - a + 1);
-                    assert!(a <= working_mem - 1);
-
+    
                     if a > 1 {
-                        // Merge a runs first
                         runs.sort_by(|a, b| a.num_kvs().cmp(&b.num_kvs()));
                         let a_runs = runs.drain(0..a).collect::<Vec<_>>();
-
+    
                         merge_fanins.push(a_runs.len());
-
+    
                         let a_result = self.merge_step(a_runs, mem_pool, dest_c_key);
                         runs.push(a_result);
                     }
                 }
-
-                while runs.len() > 1 {
-                    // Sort the runs by the number of kvs
-                    runs.sort_by_key(|r| r.num_kvs());
-
-                    let runs_to_merge = runs
-                        .drain(0..working_mem.min(runs.len()))
-                        .collect::<Vec<_>>();
-
-                    merge_fanins.push(runs_to_merge.len());
-
-                    let merged_run = self.merge_step(runs_to_merge, mem_pool, dest_c_key);
-                    runs.push(merged_run);
-                }
-
-                println!("Total merge steps: {:?}", merge_fanins.len());
-                println!("Fan-ins: {:?}", merge_fanins);
-                runs.pop().unwrap()
+    
+                // Estimate global quantiles
+                let global_quantiles: Vec<Vec<u8>> = self.quantiles.normalize_and_average().chunks(1).map(|chunk| chunk.to_vec()).collect();
+                println!("Global quantiles: {:?}", global_quantiles);
+    
+                // Merge sorted runs in parallel based on global quantiles
+                let merged_buffers: Vec<_> = global_quantiles
+                    .par_iter()
+                    .enumerate()
+                    .map(|(i, quantile)| {
+                        let lower_bound = if i == 0 { vec![0u8] } else { global_quantiles[i - 1].clone() }; //xtx this is super janky for a defualt minimum value
+                        let upper_bound = quantile.clone();
+    
+                        println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
+    
+                        let merge_iters = runs.iter().map(|r| {
+                            let lower_bound = lower_bound.clone();
+                            let upper_bound = upper_bound.clone();
+                            r.scan().filter_map(move |(key, value)| {
+                                if key >= lower_bound && key < upper_bound {
+                                    Some((key.to_vec(), value.to_vec()))
+                                } else {
+                                    None
+                                }
+                            }).collect::<Vec<_>>().into_iter()
+                        });
+    
+                        let temp_container_key = ContainerKey { db_id: dest_c_key.db_id, c_id: dest_c_key.c_id + i as u16 };
+                        Arc::new(AppendOnlyStore::bulk_insert_create(
+                            temp_container_key,
+                            mem_pool.clone(),
+                            merge_iters.flatten(),
+                        ))
+                    })
+                    .collect();
+    
+                println!("Length of the vec of the quantiles: {:?}", global_quantiles.len());
+    
+                // Collect all merged buffers into the final output
+                let final_merge_iter = MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
+                Arc::new(AppendOnlyStore::bulk_insert_create(
+                    dest_c_key,
+                    mem_pool.clone(),
+                    final_merge_iter,
+                ))
             }
             MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
             MemoryPolicy::Proportional(rate) => {
                 unimplemented!("Proportional memory policy is not implemented yet");
             }
         };
-
+    
         Ok(result)
     }
 
