@@ -45,7 +45,7 @@ impl Quantiles {
             quantile_values.push(sorted_run[quantile_index].clone());
         }
 
-        self.quantiles = quantile_values;
+        self.quantiles = quantile_values; //xtx write them out 
     }
 
     pub fn get_global_quantiles(&self) -> Vec<Vec<u8>> {
@@ -553,7 +553,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 sort_buffer.sort();
                 let iter = SortBufferIter::new(&sort_buffer);
     
-                // Compute quantiles for the run
+                // Compute quantiles for the run - XTX just do this directly like am copying the data here on 302 through ptrs make a function that gets and returns 
                 let run_values: Vec<Vec<u8>> = iter.clone().map(|(_, v)| v.to_vec()).collect();
                 self.quantiles.compute_quantiles(&run_values);
     
@@ -665,7 +665,7 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                         Arc::new(AppendOnlyStore::bulk_insert_create(
                             temp_container_key,
                             mem_pool.clone(),
-                            merge_iters.flatten(),
+                            merge_iters.flatten(), //xtx replace with 703 
                         ))
                     })
                     .collect();

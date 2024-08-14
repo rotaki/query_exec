@@ -20,7 +20,7 @@ pub struct SortParam {
     #[clap(
         short = 'm',
         long = "memory size per operator",
-        default_value = "131072"
+        default_value = "131072" //xtx this is the sort buffer
     )]
     pub memory_size_per_operator: usize,
     /// Input query
@@ -38,7 +38,7 @@ fn main() {
     let opt = SortParam::parse();
 
     let bp = Arc::new(
-        BufferPool::<LRUEvictionPolicy>::new(&opt.path, opt.buffer_pool_size, false).unwrap(),
+        BufferPool::<LRUEvictionPolicy>::new(&opt.path, opt.buffer_pool_size, false).unwrap(), //xtx remove_dir_on_drop
     );
     let storage = Arc::new(OnDiskStorage::load(&bp));
     let (db_id, catalog) = load_db(&storage, "TPCH").unwrap();
