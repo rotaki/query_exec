@@ -25,34 +25,45 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct Quantiles {
     num_quantiles: usize,
-    quantiles: Vec<Vec<u8>>,
+    accumulated_quantiles: Vec<Vec<Vec<u8>>>, // Stores quantiles from each run
 }
 
 impl Quantiles {
     pub fn new(num_quantiles: usize) -> Self {
         Quantiles {
             num_quantiles,
-            quantiles: Vec::new(),
+            accumulated_quantiles: Vec::new(),
         }
     }
 
     pub fn compute_quantiles<M: MemPool>(&mut self, sort_buffer: &SortBuffer<M>) {
-        unimplemented!()
-        /* 
-        let run_len = sorted_run.len();
         let mut quantile_values = Vec::new();
+        let run_len = sort_buffer.ptrs.len();
 
         for i in 1..self.num_quantiles {
             let quantile_index = (i * run_len) / self.num_quantiles;
-            quantile_values.push(sorted_run[quantile_index].clone());
+            let (page_idx, slot_id) = sort_buffer.ptrs[quantile_index];
+            let page = &sort_buffer.data_buffer[page_idx];
+            let key = page.get_key(slot_id);
+            quantile_values.push(key.to_vec());
         }
 
-        self.quantiles = quantile_values; //xtx write them out
-        */
+        self.accumulated_quantiles.push(quantile_values);
     }
 
-    pub fn get_global_quantiles(&self) -> &Vec<Vec<u8>> {
-        &self.quantiles
+    pub fn get_global_quantiles(&self) -> Vec<Vec<u8>> {
+        let num_runs = self.accumulated_quantiles.len();
+        let mut global_quantiles = vec![vec![0u8; self.num_quantiles - 1]; self.num_quantiles - 1];
+
+        for quantiles in &self.accumulated_quantiles {
+            for (i, quantile) in quantiles.iter().enumerate() {
+                for (j, &byte) in quantile.iter().enumerate() {
+                    global_quantiles[i][j] += byte / num_runs as u8;
+                }
+            }
+        }
+
+        global_quantiles
     }
 }
 
@@ -549,9 +560,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        // const TEMP_DB_ID: DatabaseId = dest_c_key.db_id;
-        const TEMP_DB_ID: DatabaseId = 321; //xtx magic number
-        const TEMP_C_ID_BASE: u16 = 321; // xtx magic number
+        const TEMP_DB_ID: DatabaseId = 321;
+        const TEMP_C_ID_BASE: u16 = 321;
         let mut temp_c_id_counter = TEMP_C_ID_BASE;
 
         let mut sort_buffer = SortBuffer::new(mem_pool, dest_c_key, policy, self.sort_cols.clone());
@@ -559,13 +569,11 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
         while let Some(tuple) = self.exec_plan.next(context)? {
             if sort_buffer.append(&tuple) {
-                // println!("tuple {:?}", tuple);
                 continue;
             } else {
                 sort_buffer.sort();
-                let iter = SortBufferIter::new(&sort_buffer);
 
-                // Compute quantiles for the run - XTX just do this directly like am copying the data here on 302 through ptrs make a function that gets and returns
+                // Compute quantiles for the run
                 self.quantiles.compute_quantiles(&sort_buffer);
 
                 // Create temporary container key
@@ -578,7 +586,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                     temp_container_key,
                     mem_pool.clone(),
-                    iter,
+                    SortBufferIter::new(&sort_buffer),
                 ));
                 result_buffers.push(output);
 
@@ -589,14 +597,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             }
         }
 
-        // Finally sort and output the remaining records
+        // Sort and output the remaining records
         sort_buffer.sort();
-        let iter = SortBufferIter::new(&sort_buffer);
-
-        // Compute quantiles for the last run
         self.quantiles.compute_quantiles(&sort_buffer);
 
-        // Create temporary container key
         let temp_container_key = ContainerKey {
             db_id: TEMP_DB_ID,
             c_id: temp_c_id_counter,
@@ -604,12 +608,15 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let output = Arc::new(AppendOnlyStore::bulk_insert_create(
             temp_container_key,
             mem_pool.clone(),
-            iter,
+            SortBufferIter::new(&sort_buffer),
         ));
         result_buffers.push(output);
 
         println!("Number of runs: {}", result_buffers.len());
 
+        for (i, run) in result_buffers.iter().enumerate() {
+            println!("Run {} contains {} items", i, run.num_kvs());
+        }
         Ok(result_buffers)
     }
 
@@ -655,44 +662,61 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 // Merge sorted runs in parallel based on global quantiles
                 let merged_buffers: Vec<_> = global_quantiles
-                    .par_iter()
-                    .enumerate()
-                    .map(|(i, quantile)| {
-                        let lower_bound = if i == 0 {
-                            vec![0u8; quantile.len()]
-                        } else {
-                            global_quantiles[i - 1].clone()
-                        };
-                        let upper_bound = quantile.clone();
+                .par_iter()
+                .enumerate()
+                .map(|(i, quantile)| {
+                    let lower_bound = if i == 0 {
+                        vec![0u8; quantile.len()]
+                    } else {
+                        global_quantiles[i - 1].clone()
+                    };
+                    let upper_bound = quantile.clone();
+            
+                    println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
+            
+                    for (i, run) in runs.iter().enumerate() {
+                        let count = run.scan().count();
+                        println!("Run {} has {} items", i, count);
+                    }
 
-                        println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
+                    // for (i, run) in runs.iter().enumerate() {
+                    //     let keys: Vec<Vec<u8>> = run.scan().map(|(key, _)| key.to_vec()).collect();
+                    //     println!("Run {} keys: {:?}", i, keys);
+                    // }
 
-                        let merge_iters = runs.iter().map(|r| {
-                            let lower_bound = lower_bound.clone();
-                            let upper_bound = upper_bound.clone();
-                            r.scan()
-                                .filter_map(move |(key, value)| {
-                                    if key >= lower_bound && key < upper_bound {
-                                        Some((key.to_vec(), value.to_vec()))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                        });
-
-                        let temp_container_key = ContainerKey {
-                            db_id: dest_c_key.db_id,
-                            c_id: dest_c_key.c_id + i as u16,
-                        };
-                        Arc::new(AppendOnlyStore::bulk_insert_create(
-                            temp_container_key,
-                            mem_pool.clone(),
-                            merge_iters.flatten(), //xtx replace with 703
-                        ))
-                    })
-                    .collect();
+                    let merge_iters = runs.iter().map(|r| {
+                        let mut count = 0;
+                        let lower_bound = lower_bound.clone();
+                        let upper_bound = upper_bound.clone();
+                        r.scan().filter_map(move |(key, value)| {
+                            if key >= lower_bound && key < upper_bound {
+                                count += 1;
+                                println!("Merging key: {:?}", key);
+                                Some((key.to_vec(), value.to_vec()))
+                            } else if key >= upper_bound {
+                                None
+                            } else {
+                                None
+                            }
+                        })
+                    });
+            
+                    let temp_container_key = ContainerKey {
+                        db_id: dest_c_key.db_id,
+                        c_id: dest_c_key.c_id + i as u16,
+                    };
+            
+                    let result = Arc::new(AppendOnlyStore::bulk_insert_create(
+                        temp_container_key,
+                        mem_pool.clone(),
+                        merge_iters.flatten(),
+                    ));
+            
+                    println!("Merged buffer {} contains {} items", i, result.num_kvs());
+            
+                    result
+                })
+                .collect();
 
                 println!(
                     "Length of the vec of the quantiles: {:?}",
@@ -713,7 +737,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 unimplemented!("Proportional memory policy is not implemented yet");
             }
         };
-
         Ok(result)
     }
 
@@ -744,6 +767,18 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
 
+        // Print the length of the final merge result
+        println!("Final merge result contains {} items", final_run.num_kvs());
+
+        // Optionally, print a few sample keys/values from the final result
+        let mut iter = final_run.scan();
+        for _ in 0..10 {
+            if let Some((key, value)) = iter.next() {
+                println!("Key: {:?}, Value: {:?}", key, value);
+            } else {
+                break;
+            }
+        }
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 }
@@ -1208,6 +1243,7 @@ mod tests {
 
             expected.sort_by_key(|t| t.to_normalized_key_bytes(&sort_cols));
 
+            println!("result {:?}", result);
             println!("result len: {}", result.len());
             println!("expected len: {}", expected.len());
 
