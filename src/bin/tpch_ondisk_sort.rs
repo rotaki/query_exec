@@ -3,7 +3,7 @@ use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
     },
-    BufferPool, ContainerId, LRUEvictionPolicy, OnDiskStorage,
+    BufferPool, ContainerId, OnDiskStorage,
 };
 use std::sync::Arc;
 
@@ -34,12 +34,19 @@ pub struct SortParam {
     pub exclude_last_pipeline: bool,
 }
 
+fn clear_cache() {
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("echo 3 > /proc/sys/vm/drop_caches")
+        .output();
+}
+
 fn main() {
+    clear_cache();
+
     let opt = SortParam::parse();
 
-    let bp = Arc::new(
-        BufferPool::<LRUEvictionPolicy>::new(&opt.path, opt.buffer_pool_size, false).unwrap(), //xtx remove_dir_on_drop
-    );
+    let bp = Arc::new(BufferPool::new(&opt.path, opt.buffer_pool_size, false).unwrap());
     let storage = Arc::new(OnDiskStorage::load(&bp));
     let (db_id, catalog) = load_db(&storage, "TPCH").unwrap();
 
@@ -51,7 +58,7 @@ fn main() {
     let logical = to_logical(db_id, &catalog, &sql_string).unwrap();
     let physical = to_physical(logical);
 
-    let mem_policy = Arc::new(MemoryPolicy::FixedSize(opt.memory_size_per_operator));
+    let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(opt.memory_size_per_operator));
     let temp_c_id = opt.temp_c_id as ContainerId;
     let exe = OnDiskPipelineGraph::new(
         db_id,
@@ -64,8 +71,10 @@ fn main() {
         opt.exclude_last_pipeline,
     );
 
+    let time = std::time::Instant::now();
     let result = execute(db_id, &storage, exe, true);
+    println!("Time: {} ms", time.elapsed().as_millis());
 
-    println!("stats: \n{}", bp.stats());
+    println!("stats: \n{:?}", bp.stats());
     println!("Result num rows: {}", result.num_tuples());
 }

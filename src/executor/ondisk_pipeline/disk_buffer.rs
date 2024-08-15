@@ -4,23 +4,31 @@ use fbtree::{
     access_method::{
         append_only_store::AppendOnlyStore,
         fbt::{FosterBtree, FosterBtreeRangeScanner},
+        hash_fbt::HashFosterBtreeIter,
+        UniqueKeyIndex,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId, EvictionPolicy, MemPool},
-    prelude::AppendOnlyStoreScanner,
+    bp::{ContainerId, ContainerKey, DatabaseId, MemPool},
+    prelude::{AppendOnlyStoreScanner, HashFosterBtree},
     txn_storage::{ScanOptions, TxnOptions, TxnStorageTrait},
 };
 
 use crate::{error::ExecError, executor::TupleBuffer, prelude::SchemaRef, tuple::Tuple};
 
-use super::TupleBufferIter;
+use super::{
+    hash_table::{HashAggregateTable, HashAggregationTableIter, HashTable},
+    TupleBufferIter,
+};
 
-pub enum OnDiskBuffer<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> {
+pub enum OnDiskBuffer<T: TxnStorageTrait, M: MemPool> {
     TxnStorage(TxnStorage<T>),
-    AppendOnlyStore(Arc<AppendOnlyStore<E, M>>),
-    BTree(Arc<FosterBtree<E, M>>),
+    AppendOnlyStore(Arc<AppendOnlyStore<M>>),
+    BTree(Arc<FosterBtree<M>>),
+    HashIndex(Arc<HashFosterBtree<M>>),
+    HashTable(Arc<HashTable<M>>),
+    HashAggregateTable(Arc<HashAggregateTable<M>>),
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskBuffer<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> OnDiskBuffer<T, M> {
     pub fn txn_storage(
         schema: SchemaRef,
         db_id: DatabaseId,
@@ -53,10 +61,8 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskBuffe
     }
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> TupleBuffer
-    for OnDiskBuffer<T, E, M>
-{
-    type Iter = OnDiskBufferIter<T, E, M>;
+impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
+    type Iter = OnDiskBufferIter<T, M>;
 
     fn num_tuples(&self) -> usize {
         match self {
@@ -71,6 +77,9 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> TupleBuffer
             }
             OnDiskBuffer::AppendOnlyStore(store) => store.num_kvs(),
             OnDiskBuffer::BTree(tree) => tree.num_kvs(),
+            OnDiskBuffer::HashIndex(hash_fbt) => hash_fbt.num_kvs(),
+            OnDiskBuffer::HashTable(hash_table) => hash_table.num_kvs(),
+            OnDiskBuffer::HashAggregateTable(hash_agg_table) => hash_agg_table.num_kvs(),
         }
     }
 
@@ -95,17 +104,26 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> TupleBuffer
             OnDiskBuffer::AppendOnlyStore(store) => {
                 OnDiskBufferIter::AppendOnlyStore(Mutex::new(store.scan()))
             }
-            OnDiskBuffer::BTree(tree) => {
-                OnDiskBufferIter::FosterBTree(Mutex::new(tree.scan(&[], &[])))
+            OnDiskBuffer::BTree(tree) => OnDiskBufferIter::FosterBTree(Mutex::new(tree.scan())),
+            OnDiskBuffer::HashIndex(hash) => OnDiskBufferIter::HashIndex(Mutex::new(hash.scan())),
+            OnDiskBuffer::HashTable(hash_table) => {
+                unimplemented!()
+                // OnDiskBufferIter::HashTable(Mutex::new(hash_table.iter()))
+            }
+            OnDiskBuffer::HashAggregateTable(hash_agg_table) => {
+                OnDiskBufferIter::HashAggregateTable(Mutex::new(hash_agg_table.iter()))
             }
         }
     }
 }
 
-pub enum OnDiskBufferIter<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub enum OnDiskBufferIter<T: TxnStorageTrait, M: MemPool> {
     TxnStorage(TxnStorageIter<T>),
-    AppendOnlyStore(Mutex<AppendOnlyStoreScanner<E, M>>),
-    FosterBTree(Mutex<FosterBtreeRangeScanner<E, M>>),
+    AppendOnlyStore(Mutex<AppendOnlyStoreScanner<M>>),
+    FosterBTree(Mutex<FosterBtreeRangeScanner<M>>),
+    HashIndex(Mutex<HashFosterBtreeIter<FosterBtreeRangeScanner<M>>>),
+    // HashTable(Mutex<HashTableIter<M>>),
+    HashAggregateTable(Mutex<HashAggregationTableIter<M>>),
 }
 
 pub struct TxnStorage<T: TxnStorageTrait> {
@@ -153,9 +171,7 @@ impl<T: TxnStorageTrait> Drop for TxnStorageIter<T> {
     }
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> TupleBufferIter
-    for OnDiskBufferIter<T, E, M>
-{
+impl<T: TxnStorageTrait, M: MemPool> TupleBufferIter for OnDiskBufferIter<T, M> {
     fn next(&self) -> Result<Option<Tuple>, ExecError> {
         match self {
             OnDiskBufferIter::TxnStorage(iter) => {
@@ -171,6 +187,13 @@ impl<T: TxnStorageTrait, E: EvictionPolicy, M: MemPool<E>> TupleBufferIter
                 .unwrap()
                 .next()
                 .map(|(_k, v)| Tuple::from_bytes(&v))),
+            OnDiskBufferIter::HashIndex(iter) => Ok(iter
+                .lock()
+                .unwrap()
+                .next()
+                .map(|(_k, v)| Tuple::from_bytes(&v))),
+            // OnDiskBufferIter::HashTable(iter) => iter.lock().unwrap().next(),
+            OnDiskBufferIter::HashAggregateTable(iter) => iter.lock().unwrap().next(),
         }
     }
 }

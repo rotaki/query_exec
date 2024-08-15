@@ -36,7 +36,9 @@ impl Quantiles {
         }
     }
 
-    pub fn compute_quantiles(&mut self, sorted_run: &[Vec<u8>]) {
+    pub fn compute_quantiles<M: MemPool>(&mut self, sort_buffer: &SortBuffer<M>) {
+        unimplemented!()
+        /* 
         let run_len = sorted_run.len();
         let mut quantile_values = Vec::new();
 
@@ -45,11 +47,12 @@ impl Quantiles {
             quantile_values.push(sorted_run[quantile_index].clone());
         }
 
-        self.quantiles = quantile_values; //xtx write them out 
+        self.quantiles = quantile_values; //xtx write them out
+        */
     }
 
-    pub fn get_global_quantiles(&self) -> Vec<Vec<u8>> {
-        self.quantiles.clone()
+    pub fn get_global_quantiles(&self) -> &Vec<Vec<u8>> {
+        &self.quantiles
     }
 }
 
@@ -125,7 +128,7 @@ mod slot {
     }
 }
 use fbtree::{
-    bp::{ContainerKey, DatabaseId, EvictionPolicy, FrameWriteGuard, MemPool},
+    bp::{ContainerKey, DatabaseId, FrameWriteGuard, MemPool},
     prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
 };
@@ -298,43 +301,31 @@ impl AppendOnlyKVPage for Page {
         &self[offset..offset + slot.val_size() as usize]
     }
 }
-#[derive(Clone)]
-pub struct SortBuffer<'a, E: EvictionPolicy> {
+
+pub struct SortBuffer<M: MemPool> {
+    mem_pool: Arc<M>,
+    dest_c_key: ContainerKey,
+    policy: Arc<MemoryPolicy>,
     sort_cols: Vec<(ColumnId, bool, bool)>, // (column_id, asc, nulls_first)
     ptrs: Vec<(usize, u16)>,                // Slot pointers. (page index, slot_id)
-    data_buffer: Vec<FrameWriteGuard<'a, E>>,
+    data_buffer: Vec<FrameWriteGuard<'static>>,
     current_page_idx: usize,
 }
 
-// Implement the method to access the first page
-impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
-    pub fn get_first_page(&self) -> &Page {
-        &self.data_buffer[0]
-    }
-}
-
-// In sort.rs
-impl<'a, E: EvictionPolicy> Clone for SortBufferIter<'a, E> {
-    fn clone(&self) -> Self {
-        Self {
-            sort_buffer: self.sort_buffer,
-            idx: self.idx,
-        }
-    }
-}
-
-impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
+impl<M: MemPool> SortBuffer<M> {
     pub fn new(
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        policy: &Arc<MemoryPolicy>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
-        mut data_buffer: Vec<FrameWriteGuard<'a, E>>,
     ) -> Self {
-        for page in &mut data_buffer {
-            page.init();
-        }
         Self {
+            mem_pool: mem_pool.clone(),
+            dest_c_key,
+            policy: policy.clone(),
             sort_cols,
             ptrs: Vec::new(),
-            data_buffer,
+            data_buffer: Vec::new(),
             current_page_idx: 0,
         }
     }
@@ -350,37 +341,77 @@ impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
     pub fn append(&mut self, tuple: &Tuple) -> bool {
         let key = tuple.to_normalized_key_bytes(&self.sort_cols);
         let val = tuple.to_bytes();
-        let mut page = &mut self.data_buffer[self.current_page_idx as usize];
+
+        if self.data_buffer.is_empty() {
+            self.current_page_idx = 0;
+            let frame = self
+                .mem_pool
+                .create_new_page_for_write(self.dest_c_key)
+                .unwrap();
+            let mut frame =
+                unsafe { std::mem::transmute::<FrameWriteGuard, FrameWriteGuard<'static>>(frame) };
+            frame.init();
+            self.data_buffer.push(frame);
+        }
+
+        let page = self.data_buffer.get_mut(self.current_page_idx).unwrap();
         if page.append(&key, &val) {
             self.ptrs
                 .push((self.current_page_idx, page.slot_count() - 1));
             true
         } else {
-            // Push to the next page. If there is no next page, return false.
-            self.current_page_idx += 1;
-            if self.current_page_idx as usize >= self.data_buffer.len() {
-                self.current_page_idx -= 1;
-                false
-            } else {
-                page = &mut self.data_buffer[self.current_page_idx as usize];
-                // println!("key {:?}, val {:?}", key, val);
+            // If the current page is full, try to use the next page.
+            // If the next page is not available, allocate a new page based on the memory policy.
+            // If allocation is not possible, return false.
+            let next_page_idx = self.current_page_idx + 1;
+            if next_page_idx < self.data_buffer.len() {
+                self.current_page_idx = next_page_idx;
+                let page = self.data_buffer.get_mut(self.current_page_idx).unwrap();
                 assert!(page.append(&key, &val), "Record too large to fit in a page");
                 self.ptrs
                     .push((self.current_page_idx, page.slot_count() - 1));
                 true
+            } else {
+                assert!(next_page_idx == self.data_buffer.len());
+                match self.policy.as_ref() {
+                    MemoryPolicy::FixedSizeLimit(max_length) => {
+                        if self.data_buffer.len() < *max_length {
+                            self.current_page_idx += 1;
+                            let frame = self
+                                .mem_pool
+                                .create_new_page_for_write(self.dest_c_key)
+                                .unwrap();
+                            let mut frame = unsafe {
+                                std::mem::transmute::<FrameWriteGuard, FrameWriteGuard<'static>>(
+                                    frame,
+                                )
+                            };
+                            frame.init();
+                            self.data_buffer.push(frame);
+                            let page = self.data_buffer.get_mut(self.current_page_idx).unwrap();
+                            assert!(page.append(&key, &val), "Record too large to fit in a page");
+                            self.ptrs
+                                .push((self.current_page_idx, page.slot_count() - 1));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => unimplemented!("Memory policy is not implemented yet"),
+                }
             }
         }
     }
 
-    pub fn grow(&mut self, frame: FrameWriteGuard<'a, E>) {
+    pub fn grow(&mut self, frame: FrameWriteGuard<'static>) {
         self.data_buffer.push(frame);
     }
 
     pub fn sort(&mut self) {
         // Sort the ptrs
         self.ptrs.sort_by(|a, b| {
-            let page_a = &self.data_buffer[a.0 as usize];
-            let page_b = &self.data_buffer[b.0 as usize];
+            let page_a = &self.data_buffer[a.0];
+            let page_b = &self.data_buffer[b.0];
             let key_a = page_a.get_key(a.1);
             let key_b = page_b.get_key(b.1);
             key_a.cmp(key_b)
@@ -388,7 +419,7 @@ impl<'a, E: EvictionPolicy> SortBuffer<'a, E> {
     }
 }
 
-impl<'a, E: EvictionPolicy> Drop for SortBuffer<'a, E> {
+impl<M: MemPool> Drop for SortBuffer<M> {
     fn drop(&mut self) {
         // Make all the pages undirty because they don't need to be written back.
         for page in &mut self.data_buffer {
@@ -399,13 +430,13 @@ impl<'a, E: EvictionPolicy> Drop for SortBuffer<'a, E> {
 }
 
 /// Iterator for sort buffer. Output key, value by sorting order.
-pub struct SortBufferIter<'a, E: EvictionPolicy> {
-    sort_buffer: &'a SortBuffer<'a, E>,
+pub struct SortBufferIter<'a, M: MemPool> {
+    sort_buffer: &'a SortBuffer<M>,
     idx: usize,
 }
 
-impl<'a, E: EvictionPolicy> SortBufferIter<'a, E> {
-    pub fn new(sort_buffer: &'a SortBuffer<'a, E>) -> Self {
+impl<'a, M: MemPool> SortBufferIter<'a, M> {
+    pub fn new(sort_buffer: &'a SortBuffer<M>) -> Self {
         Self {
             sort_buffer,
             idx: 0,
@@ -413,13 +444,13 @@ impl<'a, E: EvictionPolicy> SortBufferIter<'a, E> {
     }
 }
 
-impl<'a, E: EvictionPolicy> Iterator for SortBufferIter<'a, E> {
+impl<'a, M: MemPool> Iterator for SortBufferIter<'a, M> {
     type Item = (&'a [u8], &'a [u8]);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.idx < self.sort_buffer.ptrs.len() {
             let (page_idx, slot_id) = self.sort_buffer.ptrs[self.idx];
-            let page = &self.sort_buffer.data_buffer[page_idx as usize];
+            let page = &self.sort_buffer.data_buffer[page_idx];
             let key = page.get_key(slot_id);
             let val = page.get_val(slot_id);
             self.idx += 1;
@@ -430,13 +461,13 @@ impl<'a, E: EvictionPolicy> Iterator for SortBufferIter<'a, E> {
     }
 }
 
-pub struct MergeIter<E: EvictionPolicy + 'static, M: MemPool<E>> {
-    run_iters: Vec<AppendOnlyStoreScanner<E, M>>,
+pub struct MergeIter<M: MemPool> {
+    run_iters: Vec<AppendOnlyStoreScanner<M>>,
     heap: BinaryHeap<Reverse<(Vec<u8>, usize, Vec<u8>)>>,
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> MergeIter<E, M> {
-    pub fn new(mut run_iters: Vec<AppendOnlyStoreScanner<E, M>>) -> Self {
+impl<M: MemPool> MergeIter<M> {
+    pub fn new(mut run_iters: Vec<AppendOnlyStoreScanner<M>>) -> Self {
         let mut heap = BinaryHeap::new();
         for (i, iter) in run_iters.iter_mut().enumerate() {
             if let Some((k, v)) = iter.next() {
@@ -447,7 +478,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> MergeIter<E, M> {
     }
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for MergeIter<E, M> {
+impl<M: MemPool> Iterator for MergeIter<M> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -463,19 +494,19 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Iterator for MergeIter<E, M> {
     }
 }
 
-pub struct OnDiskSort<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct OnDiskSort<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef,
-    exec_plan: NonBlockingOp<T, E, M>,
+    exec_plan: NonBlockingOp<T, M>,
     sort_cols: Vec<(ColumnId, bool, bool)>,
-    quantiles: Quantiles, 
+    quantiles: Quantiles,
 }
 
-impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<T, E, M> {
+impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     pub fn new(
         schema: SchemaRef,
-        exec_plan: NonBlockingOp<T, E, M>,
+        exec_plan: NonBlockingOp<T, M>,
         sort_cols: Vec<(ColumnId, bool, bool)>,
-        num_quantiles: usize, 
+        num_quantiles: usize,
     ) -> Self {
         Self {
             schema,
@@ -510,41 +541,22 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
         out.push_str("])\n");
         self.exec_plan.print_inner(indent + 2, out);
     }
-    
+
     fn run_generation(
         &mut self,
         policy: &Arc<MemoryPolicy>,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<E, M>>>, ExecError> {
+    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
         // const TEMP_DB_ID: DatabaseId = dest_c_key.db_id;
         const TEMP_DB_ID: DatabaseId = 321; //xtx magic number
         const TEMP_C_ID_BASE: u16 = 321; // xtx magic number
         let mut temp_c_id_counter = TEMP_C_ID_BASE;
-    
-        let frames = match policy.as_ref() {
-            MemoryPolicy::FixedSize(working_mem) => {
-                let working_mem = *working_mem;
-                let mut frames = Vec::new();
-                for _ in 0..working_mem {
-                    frames.push(mem_pool.create_new_page_for_write(ContainerKey { db_id: TEMP_DB_ID, c_id: temp_c_id_counter }).unwrap());
-                }
-                frames
-            }
-            other => {
-                unimplemented!("Memory policy {:?} is not implemented yet", other);
-            }
-        };
-    
-        println!("Stats after allocating frames: \n{}", mem_pool.stats());
-        // reset stats
-        println!("Resetting stats");
-        mem_pool.reset_stats();
-    
-        let mut sort_buffer = SortBuffer::new(self.sort_cols.clone(), frames);
+
+        let mut sort_buffer = SortBuffer::new(mem_pool, dest_c_key, policy, self.sort_cols.clone());
         let mut result_buffers = Vec::new();
-    
+
         while let Some(tuple) = self.exec_plan.next(context)? {
             if sort_buffer.append(&tuple) {
                 // println!("tuple {:?}", tuple);
@@ -552,83 +564,95 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
             } else {
                 sort_buffer.sort();
                 let iter = SortBufferIter::new(&sort_buffer);
-    
-                // Compute quantiles for the run - XTX just do this directly like am copying the data here on 302 through ptrs make a function that gets and returns 
-                let run_values: Vec<Vec<u8>> = iter.clone().map(|(_, v)| v.to_vec()).collect();
-                self.quantiles.compute_quantiles(&run_values);
-    
+
+                // Compute quantiles for the run - XTX just do this directly like am copying the data here on 302 through ptrs make a function that gets and returns
+                self.quantiles.compute_quantiles(&sort_buffer);
+
                 // Create temporary container key
-                let temp_container_key = ContainerKey { db_id: TEMP_DB_ID, c_id: temp_c_id_counter };
+                let temp_container_key = ContainerKey {
+                    db_id: TEMP_DB_ID,
+                    c_id: temp_c_id_counter,
+                };
                 temp_c_id_counter += 1;
-    
+
                 let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                     temp_container_key,
                     mem_pool.clone(),
                     iter,
                 ));
                 result_buffers.push(output);
-    
+
                 sort_buffer.reset();
                 if !sort_buffer.append(&tuple) {
                     panic!("Record too large to fit in a page");
                 }
             }
         }
-    
+
         // Finally sort and output the remaining records
         sort_buffer.sort();
         let iter = SortBufferIter::new(&sort_buffer);
-    
+
         // Compute quantiles for the last run
-        let run_values: Vec<Vec<u8>> = iter.clone().map(|(_, v)| v.to_vec()).collect();
-        self.quantiles.compute_quantiles(&run_values);
-    
+        self.quantiles.compute_quantiles(&sort_buffer);
+
         // Create temporary container key
-        let temp_container_key = ContainerKey { db_id: TEMP_DB_ID, c_id: temp_c_id_counter };
+        let temp_container_key = ContainerKey {
+            db_id: TEMP_DB_ID,
+            c_id: temp_c_id_counter,
+        };
         let output = Arc::new(AppendOnlyStore::bulk_insert_create(
             temp_container_key,
             mem_pool.clone(),
             iter,
         ));
         result_buffers.push(output);
-    
+
         println!("Number of runs: {}", result_buffers.len());
-    
+
         Ok(result_buffers)
     }
 
     fn run_merge(
         &mut self,
         policy: &Arc<MemoryPolicy>,
-        mut runs: Vec<Arc<AppendOnlyStore<E, M>>>,
+        mut runs: Vec<Arc<AppendOnlyStore<M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<AppendOnlyStore<E, M>>, ExecError> {
+    ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
         let result = match policy.as_ref() {
-            MemoryPolicy::FixedSize(working_mem) => {
+            MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let mut merge_fanins = Vec::new();
-    
+
                 let working_mem = *working_mem;
-    
+
                 if runs.len() > working_mem {
                     let k = (runs.len() + 1 - working_mem) / (working_mem - 1);
                     let a = runs.len() + 1 - (working_mem + k * (working_mem - 1));
-    
+
+                    // If a == 0, then the last merge step will have F-1 runs. Others will have F runs.
+                    // If a == 1, then you keep merging F runs.
+                    // If a > 1, then you first merge a runs, then F runs.
+
+                    assert!(working_mem + k * (working_mem - 1) == runs.len() - a + 1);
+                    assert!(a <= working_mem - 1);
+
                     if a > 1 {
-                        runs.sort_by(|a, b| a.num_kvs().cmp(&b.num_kvs()));
+                        // Merge a runs first
+                        runs.sort_by_key(|a| a.num_kvs());
                         let a_runs = runs.drain(0..a).collect::<Vec<_>>();
-    
+
                         merge_fanins.push(a_runs.len());
-    
+
                         let a_result = self.merge_step(a_runs, mem_pool, dest_c_key);
                         runs.push(a_result);
                     }
                 }
-    
+
                 // Get global quantiles from previously computed quantiles
                 let global_quantiles = self.quantiles.get_global_quantiles();
                 println!("Global quantiles: {:?}", global_quantiles);
-    
+
                 // Merge sorted runs in parallel based on global quantiles
                 let merged_buffers: Vec<_> = global_quantiles
                     .par_iter()
@@ -640,24 +664,24 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                             global_quantiles[i - 1].clone()
                         };
                         let upper_bound = quantile.clone();
-    
-                        println!(
-                            "Merging range [{:?}, {:?})",
-                            lower_bound, upper_bound
-                        );
-    
+
+                        println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
+
                         let merge_iters = runs.iter().map(|r| {
                             let lower_bound = lower_bound.clone();
                             let upper_bound = upper_bound.clone();
-                            r.scan().filter_map(move |(key, value)| {
-                                if key >= lower_bound && key < upper_bound {
-                                    Some((key.to_vec(), value.to_vec()))
-                                } else {
-                                    None
-                                }
-                            }).collect::<Vec<_>>().into_iter()
+                            r.scan()
+                                .filter_map(move |(key, value)| {
+                                    if key >= lower_bound && key < upper_bound {
+                                        Some((key.to_vec(), value.to_vec()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .into_iter()
                         });
-    
+
                         let temp_container_key = ContainerKey {
                             db_id: dest_c_key.db_id,
                             c_id: dest_c_key.c_id + i as u16,
@@ -665,16 +689,16 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                         Arc::new(AppendOnlyStore::bulk_insert_create(
                             temp_container_key,
                             mem_pool.clone(),
-                            merge_iters.flatten(), //xtx replace with 703 
+                            merge_iters.flatten(), //xtx replace with 703
                         ))
                     })
                     .collect();
-    
+
                 println!(
                     "Length of the vec of the quantiles: {:?}",
                     global_quantiles.len()
                 );
-    
+
                 // Collect all merged buffers into the final output
                 let final_merge_iter =
                     MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
@@ -689,17 +713,16 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
                 unimplemented!("Proportional memory policy is not implemented yet");
             }
         };
-    
+
         Ok(result)
     }
 
     fn merge_step(
         &mut self,
-        runs: Vec<Arc<AppendOnlyStore<E, M>>>,
+        runs: Vec<Arc<AppendOnlyStore<M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Arc<AppendOnlyStore<E, M>> {
-        println!("Merging {} runs", runs.len());
+    ) -> Arc<AppendOnlyStore<M>> {
         let merge_iter = MergeIter::new(runs.iter().map(|r| r.scan()).collect());
         Arc::new(AppendOnlyStore::bulk_insert_create(
             dest_c_key,
@@ -710,30 +733,16 @@ impl<T: TxnStorageTrait, E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskSort<
 
     pub fn execute(
         &mut self,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, E, M>>>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         policy: &Arc<MemoryPolicy>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Arc<OnDiskBuffer<T, E, M>>, ExecError> {
-        println!("Stats before run generation: \n{}", mem_pool.stats());
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
-        println!(
-            "Runs: {:?}",
-            runs.iter()
-                .map(|r| format!("(t: {}, p: {})", r.num_kvs(), r.num_pages()))
-                .collect::<Vec<_>>()
-        );
-        println!("Stats after run generation: \n{}", mem_pool.stats());
 
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
-        println!(
-            "Final run: (t: {}, p: {})",
-            final_run.num_kvs(),
-            final_run.num_pages()
-        );
-        println!("Stats after merge: \n{}", mem_pool.stats());
 
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
@@ -827,7 +836,7 @@ mod tests {
 
     mod sort_buffer {
         use fbtree::{
-            bp::{get_test_bp, ContainerKey, MemPool},
+            bp::{get_test_bp, ContainerKey},
             random::gen_random_permutation,
         };
 
@@ -842,12 +851,10 @@ mod tests {
             let bp = get_test_bp(10);
             let c_key = c_key();
 
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(16));
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
-            for _ in 0..2 {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             let tuple = Tuple::from_fields(vec![0.into(), 1.into(), 2.into(), 3.into()]);
             let success = sort_buffer.append(&tuple);
@@ -863,12 +870,9 @@ mod tests {
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
             let buffer_size = 10;
-            for _ in 0..buffer_size {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(buffer_size));
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             // Keep appending until the all the pages are full.
             let tuple = Tuple::from_fields(vec![0.into(), 1.into(), 2.into(), 3.into()]);
@@ -888,12 +892,9 @@ mod tests {
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
             let buffer_size = 10;
-            for _ in 0..buffer_size {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(buffer_size));
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             // Keep appending until the all the pages are full.
             let mut tuples = Vec::new();
@@ -934,12 +935,9 @@ mod tests {
             let c_key = c_key();
 
             let sort_cols = vec![(0, true, true)];
-            let mut data_buffer = Vec::new();
             let buffer_size = 10;
-            for _ in 0..buffer_size {
-                data_buffer.push(bp.create_new_page_for_write(c_key).unwrap());
-            }
-            let mut sort_buffer = SortBuffer::new(sort_cols, data_buffer);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(buffer_size));
+            let mut sort_buffer = SortBuffer::new(&bp, c_key, &policy, sort_cols);
 
             // Dataset 1. Insert tuples to the sort buffer and sort them.
             let mut tuples_1 = Vec::new();
@@ -1019,7 +1017,7 @@ mod tests {
 
     mod external_sort {
         use fbtree::{
-            bp::{get_test_bp, BufferPool, ContainerKey, LRUEvictionPolicy},
+            bp::{get_test_bp, BufferPool, ContainerKey},
             prelude::AppendOnlyStore,
             random::{gen_random_permutation, RandomKVs},
             txn_storage::InMemStorage,
@@ -1106,11 +1104,7 @@ mod tests {
 
             // Scan the append only store with the scan operator
             let scan =
-                PScanIter::<InMemStorage, LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>::new(
-                    schema.clone(),
-                    0,
-                    (0..4).collect(),
-                );
+                PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
 
             let mut context = HashMap::new();
             context.insert(
@@ -1121,9 +1115,13 @@ mod tests {
             // Sort iterator
             let dest_c_key = get_c_key(1);
             let sort_cols = vec![(0, true, true)];
-            let policy = Arc::new(MemoryPolicy::FixedSize(10)); // Use 10 pages for the sort buffer
-            let mut external_sort =
-                OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone(), 10);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(10)); // Use 10 pages for the sort buffer
+            let mut external_sort = OnDiskSort::new(
+                schema.clone(),
+                NonBlockingOp::Scan(scan),
+                sort_cols.clone(),
+                10,
+            );
 
             let runs = external_sort
                 .run_generation(&policy, &context, &bp, dest_c_key)
@@ -1179,11 +1177,7 @@ mod tests {
 
             // Scan the append only store with the scan operator
             let scan =
-                PScanIter::<InMemStorage, LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>::new(
-                    schema.clone(),
-                    0,
-                    (0..4).collect(),
-                );
+                PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
 
             let mut context = HashMap::new();
             context.insert(
@@ -1194,9 +1188,13 @@ mod tests {
             // Sort iterator
             let dest_c_key = get_c_key(1);
             let sort_cols = vec![(0, true, true)];
-            let policy = Arc::new(MemoryPolicy::FixedSize(10)); // Use 10 pages for the sort buffer
-            let mut external_sort =
-                OnDiskSort::new(schema.clone(), NonBlockingOp::Scan(scan), sort_cols.clone(), 10);
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(10)); // Use 10 pages for the sort buffer
+            let mut external_sort = OnDiskSort::new(
+                schema.clone(),
+                NonBlockingOp::Scan(scan),
+                sort_cols.clone(),
+                10,
+            );
 
             let final_run = external_sort
                 .execute(&context, &policy, &bp, dest_c_key)
@@ -1221,5 +1219,3 @@ mod tests {
         }
     }
 }
-
-

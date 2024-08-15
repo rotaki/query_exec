@@ -13,6 +13,7 @@ log_error = []
 datafusion_bench = ["datafusion", "tokio"]
 
 [dependencies]
+# fbtree = { git = "https://github.com/rotaki/FosterBtree.git", branch = "master"}
 fbtree = { git = "https://github.com/rotaki/FosterBtree.git", branch = "master"}
 csv = "1.3"
 tempfile = "3.2"
