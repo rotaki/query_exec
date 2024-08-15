@@ -8,8 +8,7 @@ use std::{
 
 use fbtree::{
     access_method::{
-        fbt::FosterBtreeAppendOnlyRangeScanner,
-        hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter},
+        fbt::{FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner}, hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter}, NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex
     },
     bp::{ContainerKey, MemPool},
     prelude::{HashFosterBtree, TxnStorageTrait},
@@ -269,7 +268,7 @@ impl<M: MemPool> HashAggregateTable<M> {
 }
 
 pub struct HashAggregationTableIter<M: MemPool> {
-    iter: HashFosterBtreeIter<M>,
+    iter: HashFosterBtreeIter<FosterBtreeRangeScanner<M>>,
     group_by: Vec<ColumnId>,
     agg_op: Vec<(AggOp, ColumnId)>,
     has_output: bool,
@@ -277,7 +276,7 @@ pub struct HashAggregationTableIter<M: MemPool> {
 
 impl<M: MemPool> HashAggregationTableIter<M> {
     pub fn new(
-        iter: HashFosterBtreeIter<M>,
+        iter: HashFosterBtreeIter<FosterBtreeRangeScanner<M>>,
         group_by: Vec<ColumnId>,
         agg_op: Vec<(AggOp, ColumnId)>,
     ) -> Self {

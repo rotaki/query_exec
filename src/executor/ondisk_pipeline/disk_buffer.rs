@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use fbtree::{
     access_method::{
+        UniqueKeyIndex,
         append_only_store::AppendOnlyStore,
         fbt::{FosterBtree, FosterBtreeRangeScanner},
         hash_fbt::HashFosterBtreeIter,
@@ -104,7 +105,7 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
                 OnDiskBufferIter::AppendOnlyStore(Mutex::new(store.scan()))
             }
             OnDiskBuffer::BTree(tree) => {
-                OnDiskBufferIter::FosterBTree(Mutex::new(tree.scan(&[], &[])))
+                OnDiskBufferIter::FosterBTree(Mutex::new(tree.scan()))
             }
             OnDiskBuffer::HashIndex(hash) => OnDiskBufferIter::HashIndex(Mutex::new(hash.scan())),
             OnDiskBuffer::HashTable(hash_table) => {
@@ -122,7 +123,7 @@ pub enum OnDiskBufferIter<T: TxnStorageTrait, M: MemPool> {
     TxnStorage(TxnStorageIter<T>),
     AppendOnlyStore(Mutex<AppendOnlyStoreScanner<M>>),
     FosterBTree(Mutex<FosterBtreeRangeScanner<M>>),
-    HashIndex(Mutex<HashFosterBtreeIter<M>>),
+    HashIndex(Mutex<HashFosterBtreeIter<FosterBtreeRangeScanner<M>>>),
     // HashTable(Mutex<HashTableIter<M>>),
     HashAggregateTable(Mutex<HashAggregationTableIter<M>>),
 }
