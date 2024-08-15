@@ -53,16 +53,27 @@ impl Quantiles {
 
     pub fn get_global_quantiles(&self) -> Vec<Vec<u8>> {
         let num_runs = self.accumulated_quantiles.len();
-        let mut global_quantiles = vec![vec![0u8; self.num_quantiles - 1]; self.num_quantiles - 1];
-
+        let mut global_quantiles = vec![vec![0u16; self.accumulated_quantiles[0][0].len()]; self.num_quantiles];
+        
+        // Accumulate sums as u16 to avoid overflow
         for quantiles in &self.accumulated_quantiles {
             for (i, quantile) in quantiles.iter().enumerate() {
                 for (j, &byte) in quantile.iter().enumerate() {
-                    global_quantiles[i][j] += byte / num_runs as u8;
+                    global_quantiles[i][j] += byte as u16;
                 }
             }
         }
-
+    
+        // Convert sums back to u8 after division by num_runs
+        let global_quantiles: Vec<Vec<u8>> = global_quantiles.into_iter()
+            .map(|quantile| {
+                quantile.into_iter()
+                    .map(|sum| (sum / num_runs as u16) as u8)
+                    .collect()
+            })
+            .collect();
+    
+        // println!("accumulated quantiles: {:?}", self.accumulated_quantiles);
         global_quantiles
     }
 }
@@ -614,9 +625,9 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
         println!("Number of runs: {}", result_buffers.len());
 
-        for (i, run) in result_buffers.iter().enumerate() {
-            println!("Run {} contains {} items", i, run.num_kvs());
-        }
+        // for (i, run) in result_buffers.iter().enumerate() {
+        //     println!("Run {} contains {} items", i, run.num_kvs());
+        // }
         Ok(result_buffers)
     }
 
@@ -630,102 +641,79 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let mut merge_fanins = Vec::new();
-
+    
                 let working_mem = *working_mem;
-
+    
                 if runs.len() > working_mem {
                     let k = (runs.len() + 1 - working_mem) / (working_mem - 1);
                     let a = runs.len() + 1 - (working_mem + k * (working_mem - 1));
-
-                    // If a == 0, then the last merge step will have F-1 runs. Others will have F runs.
-                    // If a == 1, then you keep merging F runs.
-                    // If a > 1, then you first merge a runs, then F runs.
-
+    
                     assert!(working_mem + k * (working_mem - 1) == runs.len() - a + 1);
                     assert!(a <= working_mem - 1);
-
+    
                     if a > 1 {
-                        // Merge a runs first
                         runs.sort_by_key(|a| a.num_kvs());
                         let a_runs = runs.drain(0..a).collect::<Vec<_>>();
-
                         merge_fanins.push(a_runs.len());
-
                         let a_result = self.merge_step(a_runs, mem_pool, dest_c_key);
                         runs.push(a_result);
                     }
                 }
-
-                // Get global quantiles from previously computed quantiles
+    
                 let global_quantiles = self.quantiles.get_global_quantiles();
                 println!("Global quantiles: {:?}", global_quantiles);
-
-                // Merge sorted runs in parallel based on global quantiles
+    
                 let merged_buffers: Vec<_> = global_quantiles
-                .par_iter()
-                .enumerate()
-                .map(|(i, quantile)| {
-                    let lower_bound = if i == 0 {
-                        vec![0u8; quantile.len()]
-                    } else {
-                        global_quantiles[i - 1].clone()
-                    };
-                    let upper_bound = quantile.clone();
-            
-                    println!("Merging range [{:?}, {:?})", lower_bound, upper_bound);
-            
-                    for (i, run) in runs.iter().enumerate() {
-                        let count = run.scan().count();
-                        println!("Run {} has {} items", i, count);
-                    }
-
-                    // for (i, run) in runs.iter().enumerate() {
-                    //     let keys: Vec<Vec<u8>> = run.scan().map(|(key, _)| key.to_vec()).collect();
-                    //     println!("Run {} keys: {:?}", i, keys);
-                    // }
-
-                    let merge_iters = runs.iter().map(|r| {
-                        let mut count = 0;
-                        let lower_bound = lower_bound.clone();
-                        let upper_bound = upper_bound.clone();
-                        r.scan().filter_map(move |(key, value)| {
-                            if key >= lower_bound && key < upper_bound {
-                                count += 1;
-                                println!("Merging key: {:?}", key);
-                                Some((key.to_vec(), value.to_vec()))
-                            } else if key >= upper_bound {
-                                None
-                            } else {
-                                None
-                            }
-                        })
-                    });
-            
-                    let temp_container_key = ContainerKey {
-                        db_id: dest_c_key.db_id,
-                        c_id: dest_c_key.c_id + i as u16,
-                    };
-            
-                    let result = Arc::new(AppendOnlyStore::bulk_insert_create(
-                        temp_container_key,
-                        mem_pool.clone(),
-                        merge_iters.flatten(),
-                    ));
-            
-                    println!("Merged buffer {} contains {} items", i, result.num_kvs());
-            
-                    result
-                })
-                .collect();
-
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _quantile)| {
+                        let lower_bound = if i == 0 {
+                            vec![0u8; global_quantiles[0].len()]
+                        } else {
+                            global_quantiles[i - 1].clone()
+                        };
+    
+                        let upper_bound = if i == global_quantiles.len() - 1 {
+                            vec![255u8; global_quantiles[0].len()]
+                        } else {
+                            global_quantiles[i].clone()
+                        };
+    
+                        let merge_iters = runs.iter().map(|r| {
+                            let lower_bound = lower_bound.clone();
+                            let upper_bound = upper_bound.clone();
+                            r.scan().filter_map(move |(key, value)| {
+                                if key >= lower_bound && key < upper_bound {
+                                    Some((key.to_vec(), value.to_vec()))
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+    
+                        let temp_container_key = ContainerKey {
+                            db_id: dest_c_key.db_id,
+                            c_id: dest_c_key.c_id + i as u16,
+                        };
+    
+                        self.merge_step(
+                            merge_iters.map(|iter| Arc::new(AppendOnlyStore::bulk_insert_create(
+                                temp_container_key,
+                                mem_pool.clone(),
+                                iter,
+                            ))).collect(),
+                            mem_pool,
+                            temp_container_key,
+                        )
+                    })
+                    .collect();
+    
                 println!(
                     "Length of the vec of the quantiles: {:?}",
                     global_quantiles.len()
                 );
-
-                // Collect all merged buffers into the final output
-                let final_merge_iter =
-                    MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
+    
+                let final_merge_iter = MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
                 Arc::new(AppendOnlyStore::bulk_insert_create(
                     dest_c_key,
                     mem_pool.clone(),
@@ -769,16 +757,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
         // Print the length of the final merge result
         println!("Final merge result contains {} items", final_run.num_kvs());
-
-        // Optionally, print a few sample keys/values from the final result
-        let mut iter = final_run.scan();
-        for _ in 0..10 {
-            if let Some((key, value)) = iter.next() {
-                println!("Key: {:?}, Value: {:?}", key, value);
-            } else {
-                break;
-            }
-        }
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 }
@@ -1243,7 +1221,7 @@ mod tests {
 
             expected.sort_by_key(|t| t.to_normalized_key_bytes(&sort_cols));
 
-            println!("result {:?}", result);
+            // println!("result {:?}", result);
             println!("result len: {}", result.len());
             println!("expected len: {}", expected.len());
 
