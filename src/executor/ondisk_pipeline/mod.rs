@@ -9,7 +9,7 @@ use std::{
 
 use fbtree::{
     access_method::fbt::FosterBtreeAppendOnlyRangeScanner,
-    bp::{ContainerId, ContainerKey, DatabaseId,  MemPool},
+    bp::{ContainerId, ContainerKey, DatabaseId, MemPool},
     prelude::{AppendOnlyStore, TxnStorageTrait},
 };
 use hash_table::{OnDiskHashAggregation, OnDiskHashTableCreation};

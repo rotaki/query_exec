@@ -8,7 +8,9 @@ use std::{
 
 use fbtree::{
     access_method::{
-        fbt::{FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner}, hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter}, NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex
+        fbt::{FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner},
+        hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter},
+        NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex,
     },
     bp::{ContainerKey, MemPool},
     prelude::{HashFosterBtree, TxnStorageTrait},

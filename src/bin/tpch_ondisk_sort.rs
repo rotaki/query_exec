@@ -3,7 +3,7 @@ use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
     },
-    BufferPool, ContainerId, OnDiskStorage,
+    BufferPool, ContainerId, MemPool, OnDiskStorage,
 };
 use std::sync::Arc;
 

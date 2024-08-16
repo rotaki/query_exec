@@ -3,7 +3,7 @@ use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
     },
-    BufferPool, ContainerId, OnDiskStorage,
+    BufferPool, ContainerId, MemPool, OnDiskStorage,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -67,8 +67,7 @@ fn main() {
             let query = std::fs::read_to_string(query_path).unwrap();
             let logical = to_logical(db_id, &catalog, &query).unwrap();
             let physical = to_physical(logical);
-            let _ = bp.clear_frames();
-            bp.reset_free_frames();
+            let _ = bp.flush_all_and_reset();
             // Run query 3 times to warm up the cache
             // println!("===== Warming up cache for query {} =====", query_id);
             // for _ in 0..2 {
@@ -121,7 +120,7 @@ fn main() {
                     read_count,
                     write_count,
                 ));
-                bp.reset().unwrap();
+                bp.clear_dirty_flags().unwrap();
                 // Remove the temporary container using remove file
                 let _ = std::fs::remove_file(format!("{}/0/{}", opt.path, opt.temp_c_id));
             }

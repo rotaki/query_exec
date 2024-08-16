@@ -346,7 +346,7 @@ pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
 #[cfg(test)]
 mod tests {
     use fbtree::{
-        bp::{get_test_bp, BufferPool, },
+        bp::{get_test_bp, BufferPool},
         prelude::{ContainerId, ContainerType, InMemStorage, TxnOptions},
         random::gen_random_pathname,
         txn_storage::OnDiskStorage,

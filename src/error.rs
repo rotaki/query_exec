@@ -1,7 +1,4 @@
-use fbtree::{
-    access_method::AccessMethodError,
-    prelude::TxnStorageStatus,
-};
+use fbtree::{access_method::AccessMethodError, prelude::TxnStorageStatus};
 
 #[derive(Debug)]
 pub enum ExecError {

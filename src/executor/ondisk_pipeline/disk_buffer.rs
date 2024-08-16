@@ -2,12 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use fbtree::{
     access_method::{
-        UniqueKeyIndex,
         append_only_store::AppendOnlyStore,
         fbt::{FosterBtree, FosterBtreeRangeScanner},
         hash_fbt::HashFosterBtreeIter,
+        UniqueKeyIndex,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId,  MemPool},
+    bp::{ContainerId, ContainerKey, DatabaseId, MemPool},
     prelude::{AppendOnlyStoreScanner, HashFosterBtree},
     txn_storage::{ScanOptions, TxnOptions, TxnStorageTrait},
 };
@@ -104,9 +104,7 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
             OnDiskBuffer::AppendOnlyStore(store) => {
                 OnDiskBufferIter::AppendOnlyStore(Mutex::new(store.scan()))
             }
-            OnDiskBuffer::BTree(tree) => {
-                OnDiskBufferIter::FosterBTree(Mutex::new(tree.scan()))
-            }
+            OnDiskBuffer::BTree(tree) => OnDiskBufferIter::FosterBTree(Mutex::new(tree.scan())),
             OnDiskBuffer::HashIndex(hash) => OnDiskBufferIter::HashIndex(Mutex::new(hash.scan())),
             OnDiskBuffer::HashTable(hash_table) => {
                 unimplemented!()
