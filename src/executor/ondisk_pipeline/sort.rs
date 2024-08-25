@@ -644,6 +644,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
                 let working_mem = *working_mem;
     
+                // XTX edge case if the working mem is size 1
                 if runs.len() > working_mem {
                     let k = (runs.len() + 1 - working_mem) / (working_mem - 1);
                     let a = runs.len() + 1 - (working_mem + k * (working_mem - 1));
@@ -661,7 +662,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 }
     
                 let global_quantiles = self.quantiles.get_global_quantiles();
-                println!("Global quantiles: {:?}", global_quantiles);
+                // println!("Global quantiles: {:?}", global_quantiles);
     
                 let merged_buffers: Vec<_> = global_quantiles
                     .iter()
@@ -751,8 +752,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
 
-        // Print the length of the final merge result
-        println!("Final merge result contains {} items", final_run.num_kvs());
+        // Print the length of the final merge result - xtx
+        // println!("Final merge result contains {} items", final_run.num_kvs());
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 }

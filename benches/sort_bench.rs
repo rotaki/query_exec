@@ -30,15 +30,19 @@ fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>) {
         exclude_last_pipeline,
     );
 
-    let _result = execute(db_id, &storage, exe, true);
+    let _result = execute(db_id, &storage, exe, false);
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
     let path = "bp-dir-tpch-sf-0.1";
-    let buffer_pool_size = 524288;
+    // let buffer_pool_size = 524288;
+    let buffer_pool_size = 10000;
     let bp = Arc::new(BufferPool::new(path, buffer_pool_size, false).unwrap());
 
-    let memory_sizes = vec![100, 500, 1000, 2000, 3000]; // Memory sizes to benchmark (num pages)
+    // let memory_sizes = vec![100, 500, 1000, 2000, 3000]; // Memory sizes to benchmark (num pages)
+    // let memory_sizes = vec![500, 1000, 2000, 3000]; // Memory sizes to benchmark (num pages)
+    let memory_sizes = vec![3000]; // Memory sizes to benchmark (num pages)
+    // let memory_sizes = vec![3000, 2000, 1000, 500, 100]; // Memory sizes to benchmark (num pages)
     for &size in &memory_sizes {
         c.bench_function(&format!("sort with memory size {}", size), |b| {
             b.iter(|| run_sort_benchmark(black_box(size), bp.clone()));
@@ -48,8 +52,10 @@ fn criterion_benchmark(c: &mut Criterion) {
 
 fn configure_criterion() -> Criterion {
     Criterion::default()
-        .sample_size(10) // Reduced sample size to limit the number of iterations
-        .measurement_time(std::time::Duration::new(5, 0)) // Adjusted measurement time to 5 seconds
+        .sample_size(10) // Set the number of samples
+        .warm_up_time(std::time::Duration::from_secs(3)) 
+        .measurement_time(std::time::Duration::from_secs(60)) 
+        .configure_from_args() 
 }
 
 criterion_group! {
