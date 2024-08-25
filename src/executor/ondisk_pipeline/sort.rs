@@ -707,11 +707,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         )
                     })
                     .collect();
-    
-                println!(
-                    "Length of the vec of the quantiles: {:?}",
-                    global_quantiles.len()
-                );
+
     
                 let final_merge_iter = MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
                 Arc::new(AppendOnlyStore::bulk_insert_create(
@@ -761,6 +757,45 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     }
 }
 
+
+fn verify_sorted_results(
+    result: &[Tuple],
+    sort_cols: &[(usize, bool, bool)],
+) -> Result<(), String> {
+    for i in 1..result.len() {
+        let prev = &result[i - 1];
+        let curr = &result[i];
+        
+        for &(col_idx, asc, _) in sort_cols {
+            let prev_value = prev.get(col_idx);
+            let curr_value = curr.get(col_idx);
+
+            let cmp_result = if asc {
+                prev_value.partial_cmp(curr_value).unwrap()
+            } else {
+                curr_value.partial_cmp(prev_value).unwrap()
+            };
+
+            if cmp_result == std::cmp::Ordering::Greater {
+                return Err(format!(
+                    "Sort verification failed at row {}:\n\
+                    Previous tuple: {:?}\n\
+                    Current tuple: {:?}\n\
+                    Column index {} - Expected: {:?} should be {:?}, but found {:?} is {:?}.",
+                    i,
+                    prev, curr,
+                    col_idx,
+                    prev_value, if asc { "<=" } else { ">=" }, prev_value, curr_value
+                ));
+            }
+            if cmp_result == std::cmp::Ordering::Less {
+                // If this field is in the correct order, no need to check further
+                break;
+            }
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1231,5 +1266,156 @@ mod tests {
                 assert_eq!(t, &expected[i]);
             }
         }
+
+        #[test]
+        fn test_sort_verifier_with_multiple_columns() {
+            // Create an append-only store with random key-value pairs
+            let bp = get_test_bp(100);
+            let c_key = get_c_key(0);
+            let num_kvs = 10000;
+            let append_only_store = Arc::new(AppendOnlyStore::new(c_key, bp.clone()));
+            let keys = gen_random_permutation((0..num_kvs).collect::<Vec<_>>());
+            let mut expected = Vec::new();
+            for k in keys {
+                let tuple = Tuple::from_fields(vec![k.into(), (k % 10).into(), (k % 100).into(), 3.into()]);
+                append_only_store.append(&[], &tuple.to_bytes()).unwrap();
+                expected.push(tuple);
+            }
+
+            let schema = Arc::new(Schema::new(
+                vec![
+                    ColumnDef::new("col1", DataType::Int, false),
+                    ColumnDef::new("col2", DataType::Int, false),
+                    ColumnDef::new("col3", DataType::Int, false),
+                    ColumnDef::new("col4", DataType::Int, false),
+                ],
+                vec![],
+            ));
+
+            // Scan the append-only store with the scan operator
+            let scan = PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
+
+            let mut context = HashMap::new();
+            context.insert(
+                0,
+                Arc::new(OnDiskBuffer::AppendOnlyStore(append_only_store)),
+            );
+
+            // Sort iterator
+            let dest_c_key = get_c_key(1);
+            let sort_cols = vec![
+                (1, true, true), // Sort by the second column
+                (0, true, true), // Then by the first column
+                (2, true, true), // Finally by the third column
+            ];
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(10)); // Use 10 pages for the sort buffer
+            let mut external_sort = OnDiskSort::new(
+                schema.clone(),
+                NonBlockingOp::Scan(scan),
+                sort_cols.clone(),
+                10,
+            );
+
+            let final_run = external_sort
+                .execute(&context, &policy, &bp, dest_c_key)
+                .unwrap();
+
+            let mut result = Vec::new();
+            let iter = final_run.iter();
+            while let Some(t) = iter.next().unwrap() {
+                result.push(t);
+            }
+
+            // Verify that the result is correctly sorted
+            if let Err(error) = verify_sorted_results(&result, &sort_cols) {
+                panic!("Sort verification failed: {}", error);
+            }
+
+            expected.sort_by_key(|t| t.to_normalized_key_bytes(&sort_cols));
+
+            assert_eq!(result.len(), expected.len());
+
+            for (i, t) in result.iter().enumerate() {
+                assert_eq!(t, &expected[i]);
+            }
+        }
+
+
+        // XTX this is failing even without parallel
+        #[test]
+        fn test_sort_verifier_with_strings_and_integers() {
+            // Create an append-only store with random key-value pairs
+            let bp = get_test_bp(100);
+            let c_key = get_c_key(0);
+            let num_kvs = 10000;
+            let append_only_store = Arc::new(AppendOnlyStore::new(c_key, bp.clone()));
+            let mut expected = Vec::new();
+            for i in 0..num_kvs {
+                let tuple = Tuple::from_fields(vec![
+                    (i % 100).into(),                    // First column: Int
+                    format!("str{}", num_kvs - i).into(), // Second column: String
+                    (i / 100).into(),                    // Third column: Int
+                ]);
+                append_only_store.append(&[], &tuple.to_bytes()).unwrap();
+                expected.push(tuple);
+            }
+        
+            let schema = Arc::new(Schema::new(
+                vec![
+                    ColumnDef::new("col1", DataType::Int, false),
+                    ColumnDef::new("col2", DataType::String, false),
+                    ColumnDef::new("col3", DataType::Int, false),
+                ],
+                vec![],
+            ));
+        
+            // Scan the append-only store with the scan operator
+            let scan = PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..3).collect());
+        
+            let mut context = HashMap::new();
+            context.insert(
+                0,
+                Arc::new(OnDiskBuffer::AppendOnlyStore(append_only_store)),
+            );
+        
+            // Sort iterator
+            let dest_c_key = get_c_key(1);
+            let sort_cols = vec![
+                (1, true, true), // Sort by the string column
+                (2, true, true), // Then by the third integer column
+                (0, true, true), // Finally by the first integer column
+            ];
+            let policy = Arc::new(MemoryPolicy::FixedSizeLimit(10)); // Use 10 pages for the sort buffer
+            let mut external_sort = OnDiskSort::new(
+                schema.clone(),
+                NonBlockingOp::Scan(scan),
+                sort_cols.clone(),
+                10,
+            );
+        
+            let final_run = external_sort
+                .execute(&context, &policy, &bp, dest_c_key)
+                .unwrap();
+        
+            let mut result = Vec::new();
+            let iter = final_run.iter();
+            while let Some(t) = iter.next().unwrap() {
+                result.push(t);
+            }
+        
+            // Verify that the result is correctly sorted
+            if let Err(error) = verify_sorted_results(&result, &sort_cols) {
+                panic!("Sort verification failed: {}", error);
+            }
+        
+            expected.sort_by_key(|t| t.to_normalized_key_bytes(&sort_cols));
+        
+            assert_eq!(result.len(), expected.len());
+        
+            for (i, t) in result.iter().enumerate() {
+                assert_eq!(t, &expected[i]);
+            }
+        }
     }
+
 }

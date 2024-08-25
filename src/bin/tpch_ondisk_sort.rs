@@ -1,7 +1,7 @@
 use clap::Parser;
 use query_exec::{
     prelude::{
-        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
+        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer, TupleBufferIter,
     },
     BufferPool, ContainerId, OnDiskStorage,
 };
@@ -20,7 +20,7 @@ pub struct SortParam {
     #[clap(
         short = 'm',
         long = "memory size per operator",
-        default_value = "131072" //xtx this is the sort buffer
+        default_value = "131072"
     )]
     pub memory_size_per_operator: usize,
     /// Input query
@@ -58,6 +58,7 @@ fn main() {
     let logical = to_logical(db_id, &catalog, &sql_string).unwrap();
     let physical = to_physical(logical);
 
+
     let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(opt.memory_size_per_operator));
     let temp_c_id = opt.temp_c_id as ContainerId;
     let exe = OnDiskPipelineGraph::new(
@@ -76,5 +77,40 @@ fn main() {
     println!("Time: {} ms", time.elapsed().as_millis());
 
     println!("stats: \n{:?}", bp.stats());
+
+
+
+    let mut iter = result.iter();
+    let mut index = 0;
+
+
+
+
+    match iter.next() {
+        Ok(Some(tuple)) => {
+            println!("{:?}", tuple);
+        }
+        Ok(None) => {
+            println!("No tuples found.");
+        }
+        Err(e) => {
+            eprintln!("Error occurred: {:?}", e);
+        }
+    }
+
+    // loop {
+    //     match iter.next() {
+    //         Ok(Some(tuple)) => {
+    //             println!("{:?}", tuple);
+    //         }
+    //         Ok(None) => break, // End of iterator
+    //         Err(e) => {
+    //             eprintln!("Error occurred: {:?}", e);
+    //             break;
+    //         }
+    //     }
+    // }
+    
+
     println!("Result num rows: {}", result.num_tuples());
 }
