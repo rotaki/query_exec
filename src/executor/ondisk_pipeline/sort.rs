@@ -1341,7 +1341,7 @@ mod tests {
         }
 
 
-        // XTX this is failing even without parallel
+        // XTX this is failing even without parallel 
         #[test]
         fn test_sort_verifier_with_strings_and_integers() {
             // Create an append-only store with random key-value pairs

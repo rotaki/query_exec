@@ -28,6 +28,7 @@ datafusion = { version = "39.0", optional = true }
 tokio = { version = "1.0", features = ["rt-multi-thread"], optional = true }
 rayon = "1.5.1" 
 crossbeam = "0.8"
+criterion = "0.5.1"
 
 # [patch."https://github.com/rotaki/FosterBtree.git"]
 # fbtree = { path = "../FosterBtree/" } 
