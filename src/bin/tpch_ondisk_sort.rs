@@ -80,8 +80,8 @@ fn main() {
 
 
 
-    let mut iter = result.iter();
-    let mut index = 0;
+    let iter = result.iter();
+    let index = 0;
 
 
 
