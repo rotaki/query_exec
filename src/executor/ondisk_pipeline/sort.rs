@@ -593,7 +593,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     c_id: temp_c_id_counter,
                 };
                 temp_c_id_counter += 1;
-
+                
                 let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                     temp_container_key,
                     mem_pool.clone(),
@@ -697,6 +697,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             c_id: dest_c_key.c_id + i as u16,
                         };
     
+                        // println!("this is the problem {}", temp_container_key);
                         self.merge_step(
                             merge_iters.map(|iter| Arc::new(AppendOnlyStore::bulk_insert_create(
                                 temp_container_key,

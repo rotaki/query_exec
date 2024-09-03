@@ -188,7 +188,7 @@ fn main() {
         );
 
         let time = std::time::Instant::now();
-        let result = execute(db_id, &storage, exe, true);
+        let result = execute(db_id, &storage, exe, false);
         println!("Time: {} ms", time.elapsed().as_millis());
 
         println!("stats: \n{:?}", bp.stats());

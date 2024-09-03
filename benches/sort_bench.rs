@@ -34,20 +34,21 @@ fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>) {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let path = "bp-dir-tpch-sf-0.1";
-    // let buffer_pool_size = 524288;
+    let path = "bp-dir-tpch-sf-1";
+    // let buffer_pool_size = 20000;
     let buffer_pool_size = 10000;
     let bp = Arc::new(BufferPool::new(path, buffer_pool_size, false).unwrap());
 
-    // let memory_sizes = vec![100, 500, 1000, 2000, 3000]; // Memory sizes to benchmark (num pages)
-    // let memory_sizes = vec![500, 1000, 2000, 3000]; // Memory sizes to benchmark (num pages)
-    let memory_sizes = vec![3000]; // Memory sizes to benchmark (num pages)
-    // let memory_sizes = vec![3000, 2000, 1000, 500, 100]; // Memory sizes to benchmark (num pages)
-    for &size in &memory_sizes {
-        c.bench_function(&format!("sort with memory size {}", size), |b| {
-            b.iter(|| run_sort_benchmark(black_box(size), bp.clone()));
-        });
-    }
+    // Get the memory size from the environment variable
+    let memory_size = std::env::var("BENCH_MEMORY_SIZE")
+        .unwrap_or_else(|_| "100".to_string()) // Default to 100 if not set
+        .parse::<usize>()
+        .expect("Invalid memory size");
+
+    c.bench_function(&format!("sort with memory size {}", memory_size), |b| {
+        b.iter(|| run_sort_benchmark(black_box(memory_size), bp.clone()));
+        // println!("stats: \n{:?}", bp.stats());
+    });
 }
 
 fn configure_criterion() -> Criterion {
