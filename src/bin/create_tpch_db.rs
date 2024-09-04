@@ -1,7 +1,7 @@
 use clap::Parser;
 use query_exec::{
     prelude::{create_db, create_table_from_sql, import_csv, Catalog},
-    BufferPool, ContainerType, LRUEvictionPolicy, OnDiskStorage,
+    BufferPool, ContainerType, OnDiskStorage,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -21,7 +21,7 @@ fn get_catalog() -> Arc<Catalog> {
     Arc::new(Catalog::new())
 }
 
-fn get_bp(dir: &str, num_frames: usize) -> Arc<BufferPool<LRUEvictionPolicy>> {
+fn get_bp(dir: &str, num_frames: usize) -> Arc<BufferPool> {
     Arc::new(BufferPool::new(dir, num_frames, false).unwrap())
 }
 
@@ -50,10 +50,10 @@ fn main() {
     let storage = Arc::new(OnDiskStorage::new(&bp));
     let db_id = create_db(&storage, "TPCH").unwrap();
 
-    // let table_names = vec![
-    //     "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
-    // ];
-    let table_names = vec!["lineitem"];
+    let table_names = vec![
+        "customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier",
+    ];
+    // let table_names = vec!["lineitem"];
 
     println!("Creating tables...");
 

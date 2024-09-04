@@ -89,6 +89,10 @@ impl Tuple {
         &self.fields[field_idx]
     }
 
+    pub fn get_mut(&mut self, field_idx: usize) -> &mut Field {
+        &mut self.fields[field_idx]
+    }
+
     pub fn get_cols(&self, col_ids: &Vec<usize>) -> Vec<Field> {
         col_ids
             .iter()
@@ -328,6 +332,7 @@ pub enum Field {
 
 impl Field {
     pub fn to_bytes(&self) -> Vec<u8> {
+        // bitcode::encode(self)
         bincode::serialize(&self).unwrap()
         /*
         let mut bytes = Vec::new();
@@ -392,6 +397,7 @@ impl Field {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
+        // bitcode::decode(bytes).unwrap()
         bincode::deserialize(bytes).unwrap()
         /*
         let data_type = bytes[0];
@@ -577,7 +583,7 @@ impl Field {
             DataType::Months => Field::Months(None),
             DataType::Days => Field::Days(None),
             DataType::Unknown => {
-                println!("Unknown data type, defaulting to int");
+                // println!("Unknown data type, defaulting to int");
                 Field::Int(None) // Default to int for unknown data type
             }
         }
