@@ -34,7 +34,7 @@ fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>) {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let path = "bp-dir-tpch-sf-1";
+    let path = "bp-dir-tpch-sf-0.1";
     // let buffer_pool_size = 20000;
     let buffer_pool_size = 10000;
     let bp = Arc::new(BufferPool::new(path, buffer_pool_size, false).unwrap());
