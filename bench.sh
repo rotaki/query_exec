@@ -7,8 +7,8 @@ mkdir -p benchmark_results
 bp_sizes=(10000 20000)
 
 # List of query IDs
-# query_ids=(100 101)
-query_ids=(101)
+query_ids=(100 101)
+# query_ids=(101)
 
 # List of memory sizes (example)
 memory_sizes=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000 3000 4000 5000 6000 7000 8000 9000 10000)
