@@ -7,9 +7,10 @@
 // 2 byte: slot count
 // 2 byte: free space offset
 
-use rayon::prelude::*;
+use chrono::format::Item;
+use rayon::{iter, prelude::*};
 use std::{
-    cmp::Reverse,
+    cmp::{max, min, Reverse},
     collections::{BinaryHeap, HashMap, HashSet},
     sync::Arc,
 };
@@ -23,58 +24,58 @@ use crate::{
 };
 
 #[derive(Clone, Debug)]
-pub struct Quantiles {
+pub struct SingleRunQuantiles {
     num_quantiles: usize,
-    accumulated_quantiles: Vec<Vec<Vec<u8>>>, // Stores quantiles from each run
+    quantiles: Vec<Vec<u8>>, // Stores quantiles from each run
 }
 
-impl Quantiles {
+impl SingleRunQuantiles {
     pub fn new(num_quantiles: usize) -> Self {
-        Quantiles {
+        SingleRunQuantiles {
             num_quantiles,
-            accumulated_quantiles: Vec::new(),
+            quantiles: Vec::new(),
         }
     }
 
-    pub fn compute_quantiles<M: MemPool>(&mut self, sort_buffer: &SortBuffer<M>) {
-        let mut quantile_values = Vec::new();
-        let run_len = sort_buffer.ptrs.len();
-
-        for i in 1..self.num_quantiles {
-            let quantile_index = (i * run_len) / self.num_quantiles;
-            let (page_idx, slot_id) = sort_buffer.ptrs[quantile_index];
-            let page = &sort_buffer.data_buffer[page_idx];
-            let key = page.get_key(slot_id);
-            quantile_values.push(key.to_vec());
+    pub fn merge(&mut self, other: &SingleRunQuantiles) {
+        assert_eq!(self.num_quantiles, other.num_quantiles);
+        if self.quantiles.is_empty() {
+            self.quantiles = other.quantiles.clone();
+            return;
         }
-
-        self.accumulated_quantiles.push(quantile_values);
-    }
-
-    pub fn get_global_quantiles(&self) -> Vec<Vec<u8>> {
-        let num_runs = self.accumulated_quantiles.len();
-        let mut global_quantiles = vec![vec![0u16; self.accumulated_quantiles[0][0].len()]; self.num_quantiles];
-        
-        // Accumulate sums as u16 to avoid overflow
-        for quantiles in &self.accumulated_quantiles {
-            for (i, quantile) in quantiles.iter().enumerate() {
-                for (j, &byte) in quantile.iter().enumerate() {
-                    global_quantiles[i][j] += byte as u16;
+        for i in 0..self.num_quantiles {
+            if i == 0 {
+                // For the first quantile, we take the min of all the runs
+                let smaller = min(&self.quantiles[i], &other.quantiles[i]);
+                self.quantiles[i] = smaller.clone();
+            } else if i == self.num_quantiles - 1 {
+                // For the last quantile, we take the max of all the runs
+                let larger = max(&self.quantiles[i], &other.quantiles[i]);
+                self.quantiles[i] = larger.clone();
+            } else {
+                // For other values, we choose the value randomly from one of the runs
+                let idx = i % 2;
+                if idx == 0 {
+                    self.quantiles[i] = self.quantiles[i].clone();
+                } else {
+                    self.quantiles[i] = other.quantiles[i].clone();
                 }
             }
         }
-    
-        // Convert sums back to u8 after division by num_runs
-        let global_quantiles: Vec<Vec<u8>> = global_quantiles.into_iter()
-            .map(|quantile| {
-                quantile.into_iter()
-                    .map(|sum| (sum / num_runs as u16) as u8)
-                    .collect()
-            })
-            .collect();
-    
-        // println!("accumulated quantiles: {:?}", self.accumulated_quantiles);
-        global_quantiles
+    }
+
+    pub fn get_quantiles(&self) -> &Vec<Vec<u8>> {
+        &self.quantiles
+    }
+}
+
+impl std::fmt::Display for SingleRunQuantiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Write one quantile per line
+        for q in &self.quantiles {
+            write!(f, "{:?}\n", q)?;
+        }
+        Ok(())
     }
 }
 
@@ -150,6 +151,7 @@ mod slot {
     }
 }
 use fbtree::{
+    access_method::chain,
     bp::{ContainerKey, DatabaseId, FrameWriteGuard, MemPool},
     prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
     txn_storage::TxnStorageTrait,
@@ -323,7 +325,6 @@ impl AppendOnlyKVPage for Page {
         &self[offset..offset + slot.val_size() as usize]
     }
 }
-
 pub struct SortBuffer<M: MemPool> {
     mem_pool: Arc<M>,
     dest_c_key: ContainerKey,
@@ -332,6 +333,13 @@ pub struct SortBuffer<M: MemPool> {
     ptrs: Vec<(usize, u16)>,                // Slot pointers. (page index, slot_id)
     data_buffer: Vec<FrameWriteGuard<'static>>,
     current_page_idx: usize,
+}
+
+// Implement the method to access the first page
+impl<M: MemPool> SortBuffer<M> {
+    pub fn get_first_page(&self) -> &Page {
+        &self.data_buffer[0]
+    }
 }
 
 impl<M: MemPool> SortBuffer<M> {
@@ -425,10 +433,6 @@ impl<M: MemPool> SortBuffer<M> {
         }
     }
 
-    pub fn grow(&mut self, frame: FrameWriteGuard<'static>) {
-        self.data_buffer.push(frame);
-    }
-
     pub fn sort(&mut self) {
         // Sort the ptrs
         self.ptrs.sort_by(|a, b| {
@@ -438,6 +442,37 @@ impl<M: MemPool> SortBuffer<M> {
             let key_b = page_b.get_key(b.1);
             key_a.cmp(key_b)
         });
+    }
+
+    // Compute quantiles for the run.
+    // The first and the last value is always included in the returned quantiles.
+    // num_quantiles should be at least 2.
+    //
+    // Example:
+    // [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], num_quantiles = 4
+    // The returned quantiles are [1, 4, 7, 10]
+    // [1, 3, 5, 7, 9], num_quantiles = 4
+    // The returned quantiles are [1, 3, 5, 9]
+    pub fn sample_quantiles(&self, num_quantiles: usize) -> SingleRunQuantiles {
+        assert!(num_quantiles >= 2);
+        let mut quantiles = Vec::new();
+        let num_tuples = self.ptrs.len();
+
+        for i in 0..num_quantiles {
+            let idx = if i == num_quantiles - 1 {
+                num_tuples - 1
+            } else {
+                i * num_tuples / num_quantiles
+            };
+            let (page_idx, slot_id) = self.ptrs[idx];
+            let page = &self.data_buffer[page_idx];
+            let key = page.get_key(slot_id);
+            quantiles.push(key.to_vec());
+        }
+        SingleRunQuantiles {
+            num_quantiles,
+            quantiles,
+        }
     }
 }
 
@@ -483,13 +518,13 @@ impl<'a, M: MemPool> Iterator for SortBufferIter<'a, M> {
     }
 }
 
-pub struct MergeIter<M: MemPool> {
-    run_iters: Vec<AppendOnlyStoreScanner<M>>,
+pub struct MergeIter<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
+    run_iters: Vec<I>,
     heap: BinaryHeap<Reverse<(Vec<u8>, usize, Vec<u8>)>>,
 }
 
-impl<M: MemPool> MergeIter<M> {
-    pub fn new(mut run_iters: Vec<AppendOnlyStoreScanner<M>>) -> Self {
+impl<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> MergeIter<I> {
+    pub fn new(mut run_iters: Vec<I>) -> Self {
         let mut heap = BinaryHeap::new();
         for (i, iter) in run_iters.iter_mut().enumerate() {
             if let Some((k, v)) = iter.next() {
@@ -500,7 +535,7 @@ impl<M: MemPool> MergeIter<M> {
     }
 }
 
-impl<M: MemPool> Iterator for MergeIter<M> {
+impl<I: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for MergeIter<I> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -520,7 +555,7 @@ pub struct OnDiskSort<T: TxnStorageTrait, M: MemPool> {
     schema: SchemaRef,
     exec_plan: NonBlockingOp<T, M>,
     sort_cols: Vec<(ColumnId, bool, bool)>,
-    quantiles: Quantiles,
+    quantiles: SingleRunQuantiles,
 }
 
 impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
@@ -534,7 +569,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             schema,
             exec_plan,
             sort_cols,
-            quantiles: Quantiles::new(num_quantiles),
+            quantiles: SingleRunQuantiles::new(num_quantiles),
         }
     }
 
@@ -571,11 +606,17 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        const TEMP_DB_ID: DatabaseId = 321;
-        const TEMP_C_ID_BASE: u16 = 321;
+        // const TEMP_DB_ID: DatabaseId = dest_c_key.db_id;
+        const TEMP_DB_ID: DatabaseId = 321; //xtx magic number
+        const TEMP_C_ID_BASE: u16 = 321; // xtx magic number
         let mut temp_c_id_counter = TEMP_C_ID_BASE;
 
-        let mut sort_buffer = SortBuffer::new(mem_pool, dest_c_key, policy, self.sort_cols.clone());
+        let mut sort_buffer = SortBuffer::new(
+            mem_pool,
+            ContainerKey::new(TEMP_DB_ID, temp_c_id_counter),
+            policy,
+            self.sort_cols.clone(),
+        );
         let mut result_buffers = Vec::new();
 
         while let Some(tuple) = self.exec_plan.next(context)? {
@@ -583,17 +624,18 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 continue;
             } else {
                 sort_buffer.sort();
+                let quantiles = sort_buffer.sample_quantiles(self.quantiles.num_quantiles);
+                self.quantiles.merge(&quantiles);
 
-                // Compute quantiles for the run
-                self.quantiles.compute_quantiles(&sort_buffer);
+                let iter = SortBufferIter::new(&sort_buffer);
 
                 // Create temporary container key
+                temp_c_id_counter += 1;
                 let temp_container_key = ContainerKey {
                     db_id: TEMP_DB_ID,
                     c_id: temp_c_id_counter,
                 };
-                temp_c_id_counter += 1;
-                
+
                 let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                     temp_container_key,
                     mem_pool.clone(),
@@ -608,10 +650,16 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             }
         }
 
-        // Sort and output the remaining records
+        // Finally sort and output the remaining records
         sort_buffer.sort();
-        self.quantiles.compute_quantiles(&sort_buffer);
+        // Compute quantiles for the last run
+        let quantiles = sort_buffer.sample_quantiles(self.quantiles.num_quantiles);
+        self.quantiles.merge(&quantiles);
 
+        let iter = SortBufferIter::new(&sort_buffer);
+
+        // Create temporary container key
+        temp_c_id_counter += 1;
         let temp_container_key = ContainerKey {
             db_id: TEMP_DB_ID,
             c_id: temp_c_id_counter,
@@ -623,11 +671,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         ));
         result_buffers.push(output);
 
-        println!("Number of runs: {}", result_buffers.len());
-
-        // for (i, run) in result_buffers.iter().enumerate() {
-        //     println!("Run {} contains {} items", i, run.num_kvs());
-        // }
         Ok(result_buffers)
     }
 
@@ -640,82 +683,96 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
-                let mut merge_fanins = Vec::new();
-    
-                let working_mem = *working_mem;
-    
-                // XTX edge case if the working mem is size 1
-                if runs.len() > working_mem {
-                    let k = (runs.len() + 1 - working_mem) / (working_mem - 1);
-                    let a = runs.len() + 1 - (working_mem + k * (working_mem - 1));
-    
-                    assert!(working_mem + k * (working_mem - 1) == runs.len() - a + 1);
-                    assert!(a <= working_mem - 1);
-    
-                    if a > 1 {
-                        runs.sort_by_key(|a| a.num_kvs());
-                        let a_runs = runs.drain(0..a).collect::<Vec<_>>();
-                        merge_fanins.push(a_runs.len());
-                        let a_result = self.merge_step(a_runs, mem_pool, dest_c_key);
-                        runs.push(a_result);
-                    }
-                }
-    
-                let global_quantiles = self.quantiles.get_global_quantiles();
-                // println!("Global quantiles: {:?}", global_quantiles);
-    
-                let merged_buffers: Vec<_> = global_quantiles
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _quantile)| {
-                        let lower_bound = if i == 0 {
-                            vec![0u8; global_quantiles[0].len()]
-                        } else {
-                            global_quantiles[i - 1].clone()
-                        };
-    
-                        let upper_bound = if i == global_quantiles.len() - 1 {
-                            vec![255u8; global_quantiles[0].len()]
-                        } else {
-                            global_quantiles[i].clone()
-                        };
-    
-                        let merge_iters = runs.iter().map(|r| {
-                            let lower_bound = lower_bound.clone();
-                            let upper_bound = upper_bound.clone();
-                            r.scan().filter_map(move |(key, value)| {
-                                if key >= lower_bound && key < upper_bound {
-                                    Some((key.to_vec(), value.to_vec()))
-                                } else {
-                                    None
+                // Get global quantiles from previously computed quantiles
+                println!("Global quantiles:");
+                println!("{}", self.quantiles);
+                let global_quantiles = self.quantiles.get_quantiles();
+
+                // If quantile is [a, b, c, d], there are 3 threads each responsible for [a, b), [b, c), [c, d].
+                // Note that last thread is responsible for [c, d] inclusive.
+                let num_threads = global_quantiles.len() - 1;
+                let mut merged_buffers = (0..num_threads)
+                    .into_par_iter()
+                    .map(|i| {
+                        // Define the regions for each thread
+                        let lower = global_quantiles[i].clone(); // Inclusive
+                        let upper = global_quantiles[i + 1].clone(); // Exclusive except for the last one
+                        let upper = if i == num_threads - 1 {
+                            // For the last thread, the upper bound is inclusive.
+                            // A hack to make the last thread inclusive is to add 1 to the last byte.
+                            // We need to be careful about overflow. If the last byte is 255, then it will increment
+                            // the second last byte and set the last byte to 0. This continues until it finds a byte that
+                            // does not overflow.
+                            let mut upper = upper.clone();
+                            let mut carry = 1;
+                            for byte in upper.iter_mut().rev() {
+                                let (new_byte, new_carry) = byte.overflowing_add(carry);
+                                *byte = new_byte;
+                                if !new_carry {
+                                    carry = 0;
+                                    break;
                                 }
+                                carry = 1;
+                            }
+                            if carry != 0 {
+                                // Push a new byte to the front of the vec
+                                upper.insert(0, 1);
+                            }
+                            upper
+                        } else {
+                            upper
+                        };
+                        println!("Merging range [{:?}, {:?})", lower, upper);
+
+                        let run_segments = runs
+                            .iter()
+                            .map(|r| {
+                                let lower = lower.clone();
+                                let upper = upper.clone();
+                                r.scan().filter_map(move |(key, value)| {
+                                    if key >= lower && key < upper {
+                                        Some((key.to_vec(), value.to_vec()))
+                                    } else {
+                                        None
+                                    }
+                                })
                             })
-                        });
-    
+                            .collect::<Vec<_>>();
+
+                        let merge_iter = MergeIter::new(run_segments);
+
                         let temp_container_key = ContainerKey {
                             db_id: dest_c_key.db_id,
                             c_id: dest_c_key.c_id + i as u16,
                         };
-    
-                        // println!("this is the problem {}", temp_container_key);
-                        self.merge_step(
-                            merge_iters.map(|iter| Arc::new(AppendOnlyStore::bulk_insert_create(
+
+                        (
+                            i,
+                            Arc::new(AppendOnlyStore::bulk_insert_create(
                                 temp_container_key,
                                 mem_pool.clone(),
-                                iter,
-                            ))).collect(),
-                            mem_pool,
-                            temp_container_key,
+                                merge_iter,
+                            )),
                         )
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
 
-    
-                let final_merge_iter = MergeIter::new(merged_buffers.iter().map(|r| r.scan()).collect());
+                // Sort the merged buffers by the thread id
+                merged_buffers.sort_by_key(|(i, _)| *i);
+
+                // Chain all the merged buffers into one iterator
+                let empty_iter =
+                    Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>;
+                let chained_iter = merged_buffers
+                    .into_iter()
+                    .fold(empty_iter, |acc, (_, iter)| {
+                        Box::new(acc.chain(iter.scan()))
+                    });
+
                 Arc::new(AppendOnlyStore::bulk_insert_create(
                     dest_c_key,
                     mem_pool.clone(),
-                    final_merge_iter,
+                    chained_iter,
                 ))
             }
             MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
@@ -759,7 +816,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     }
 }
 
-
 fn verify_sorted_results(
     result: &[Tuple],
     sort_cols: &[(usize, bool, bool)],
@@ -767,7 +823,7 @@ fn verify_sorted_results(
     for i in 1..result.len() {
         let prev = &result[i - 1];
         let curr = &result[i];
-        
+
         for &(col_idx, asc, _) in sort_cols {
             let prev_value = prev.get(col_idx);
             let curr_value = curr.get(col_idx);
@@ -785,9 +841,13 @@ fn verify_sorted_results(
                     Current tuple: {:?}\n\
                     Column index {} - Expected: {:?} should be {:?}, but found {:?} is {:?}.",
                     i,
-                    prev, curr,
+                    prev,
+                    curr,
                     col_idx,
-                    prev_value, if asc { "<=" } else { ">=" }, prev_value, curr_value
+                    prev_value,
+                    if asc { "<=" } else { ">=" },
+                    prev_value,
+                    curr_value
                 ));
             }
             if cmp_result == std::cmp::Ordering::Less {
@@ -1262,7 +1322,26 @@ mod tests {
             println!("result len: {}", result.len());
             println!("expected len: {}", expected.len());
 
-            assert_eq!(result.len(), expected.len());
+            // If the length are different, identify the missing value
+            if result.len() != expected.len() {
+                for i in 0..min(result.len(), expected.len()) {
+                    if result[i] != expected[i] {
+                        println!("Mismatch at index {}", i);
+                        println!("Expected: {:?}", expected[i]);
+                        println!("Result: {:?}", result[i]);
+                    }
+                }
+                // Print the remaining values
+                if result.len() > expected.len() {
+                    for i in expected.len()..result.len() {
+                        println!("Extra result: {:?}", result[i]);
+                    }
+                } else {
+                    for i in result.len()..expected.len() {
+                        println!("Missing expected: {:?}", expected[i]);
+                    }
+                }
+            }
 
             for (i, t) in result.iter().enumerate() {
                 assert_eq!(t, &expected[i]);
@@ -1279,7 +1358,8 @@ mod tests {
             let keys = gen_random_permutation((0..num_kvs).collect::<Vec<_>>());
             let mut expected = Vec::new();
             for k in keys {
-                let tuple = Tuple::from_fields(vec![k.into(), (k % 10).into(), (k % 100).into(), 3.into()]);
+                let tuple =
+                    Tuple::from_fields(vec![k.into(), (k % 10).into(), (k % 100).into(), 3.into()]);
                 append_only_store.append(&[], &tuple.to_bytes()).unwrap();
                 expected.push(tuple);
             }
@@ -1295,7 +1375,8 @@ mod tests {
             ));
 
             // Scan the append-only store with the scan operator
-            let scan = PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
+            let scan =
+                PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..4).collect());
 
             let mut context = HashMap::new();
             context.insert(
@@ -1342,8 +1423,7 @@ mod tests {
             }
         }
 
-
-        // XTX this is failing even without parallel 
+        // XTX this is failing even without parallel
         #[test]
         fn test_sort_verifier_with_strings_and_integers() {
             // Create an append-only store with random key-value pairs
@@ -1354,14 +1434,14 @@ mod tests {
             let mut expected = Vec::new();
             for i in 0..num_kvs {
                 let tuple = Tuple::from_fields(vec![
-                    (i % 100).into(),                    // First column: Int
+                    (i % 100).into(),                     // First column: Int
                     format!("str{}", num_kvs - i).into(), // Second column: String
-                    (i / 100).into(),                    // Third column: Int
+                    (i / 100).into(),                     // Third column: Int
                 ]);
                 append_only_store.append(&[], &tuple.to_bytes()).unwrap();
                 expected.push(tuple);
             }
-        
+
             let schema = Arc::new(Schema::new(
                 vec![
                     ColumnDef::new("col1", DataType::Int, false),
@@ -1370,16 +1450,17 @@ mod tests {
                 ],
                 vec![],
             ));
-        
+
             // Scan the append-only store with the scan operator
-            let scan = PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..3).collect());
-        
+            let scan =
+                PScanIter::<InMemStorage, BufferPool>::new(schema.clone(), 0, (0..3).collect());
+
             let mut context = HashMap::new();
             context.insert(
                 0,
                 Arc::new(OnDiskBuffer::AppendOnlyStore(append_only_store)),
             );
-        
+
             // Sort iterator
             let dest_c_key = get_c_key(1);
             let sort_cols = vec![
@@ -1394,30 +1475,29 @@ mod tests {
                 sort_cols.clone(),
                 10,
             );
-        
+
             let final_run = external_sort
                 .execute(&context, &policy, &bp, dest_c_key)
                 .unwrap();
-        
+
             let mut result = Vec::new();
             let iter = final_run.iter();
             while let Some(t) = iter.next().unwrap() {
                 result.push(t);
             }
-        
+
             // Verify that the result is correctly sorted
             if let Err(error) = verify_sorted_results(&result, &sort_cols) {
                 panic!("Sort verification failed: {}", error);
             }
-        
+
             expected.sort_by_key(|t| t.to_normalized_key_bytes(&sort_cols));
-        
+
             assert_eq!(result.len(), expected.len());
-        
+
             for (i, t) in result.iter().enumerate() {
                 assert_eq!(t, &expected[i]);
             }
         }
     }
-
 }

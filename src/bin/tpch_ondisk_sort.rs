@@ -1,9 +1,10 @@
 use clap::Parser;
 use query_exec::{
     prelude::{
-        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer, TupleBufferIter,
+        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
+        TupleBufferIter,
     },
-    BufferPool, ContainerId, OnDiskStorage,
+    BufferPool, ContainerId, MemPool, OnDiskStorage,
 };
 use std::sync::Arc;
 
@@ -58,7 +59,6 @@ fn main() {
     let logical = to_logical(db_id, &catalog, &sql_string).unwrap();
     let physical = to_physical(logical);
 
-
     let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(opt.memory_size_per_operator));
     let temp_c_id = opt.temp_c_id as ContainerId;
     let exe = OnDiskPipelineGraph::new(
@@ -78,13 +78,8 @@ fn main() {
 
     println!("stats: \n{:?}", bp.stats());
 
-
-
     let iter = result.iter();
     let index = 0;
-
-
-
 
     match iter.next() {
         Ok(Some(tuple)) => {
@@ -110,7 +105,7 @@ fn main() {
     //         }
     //     }
     // }
-    
 
+    println!("stats: \n{:?}", bp.stats());
     println!("Result num rows: {}", result.num_tuples());
 }

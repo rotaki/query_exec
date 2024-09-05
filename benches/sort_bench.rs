@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use query_exec::{
     prelude::{execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph},
-    BufferPool, OnDiskStorage, ContainerId,
+    BufferPool, ContainerId, OnDiskStorage,
 };
 use std::sync::Arc;
 
@@ -54,9 +54,9 @@ fn criterion_benchmark(c: &mut Criterion) {
 fn configure_criterion() -> Criterion {
     Criterion::default()
         .sample_size(10) // Set the number of samples
-        .warm_up_time(std::time::Duration::from_secs(3)) 
-        .measurement_time(std::time::Duration::from_secs(60)) 
-        .configure_from_args() 
+        .warm_up_time(std::time::Duration::from_secs(3))
+        .measurement_time(std::time::Duration::from_secs(60))
+        .configure_from_args()
 }
 
 criterion_group! {

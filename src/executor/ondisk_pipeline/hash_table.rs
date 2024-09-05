@@ -10,7 +10,7 @@ use fbtree::{
     access_method::{
         fbt::{FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner},
         hash_fbt::{HashFosterBtreeAppendOnly, HashFosterBtreeIter},
-        NonUniqueKeyIndex, UniqueKeyIndex,
+        NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex,
     },
     bp::{ContainerKey, MemPool},
     prelude::{HashFosterBtree, TxnStorageTrait},
