@@ -1,0 +1,176 @@
+Benchmark results for BP size 10000 and Query ID 101:
+sort with memory size 100
+                        time:   [29.571 s 30.223 s 30.966 s]
+                        change: [-2.9391% +0.4134% +4.3453%] (p = 0.82 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 100
+sort with memory size 200
+                        time:   [29.798 s 30.421 s 31.064 s]
+                        change: [+38.628% +46.918% +55.802%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 200
+sort with memory size 300
+                        time:   [29.582 s 30.925 s 32.653 s]
+                        change: [+33.394% +42.237% +51.749%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 300
+sort with memory size 400
+                        time:   [29.937 s 30.404 s 30.894 s]
+                        change: [+36.972% +42.773% +48.795%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 400
+sort with memory size 500
+                        time:   [28.417 s 29.271 s 30.226 s]
+                        change: [+28.143% +36.018% +44.350%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 500
+sort with memory size 600
+                        time:   [29.028 s 30.020 s 31.133 s]
+                        change: [+21.146% +28.879% +37.613%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 600
+sort with memory size 700
+                        time:   [30.019 s 31.204 s 32.786 s]
+                        change: [+26.731% +34.125% +42.279%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 700
+sort with memory size 800
+                        time:   [30.166 s 32.503 s 35.556 s]
+                        change: [+27.119% +36.971% +51.440%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
+
+Completed benchmark with memory size: 800
+sort with memory size 900
+                        time:   [31.657 s 32.962 s 34.503 s]
+                        change: [+30.391% +37.135% +44.099%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 900
+sort with memory size 1000
+                        time:   [32.140 s 33.073 s 34.194 s]
+                        change: [+35.226% +41.186% +47.289%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+
+Completed benchmark with memory size: 1000
+sort with memory size 1100
+                        time:   [31.777 s 32.972 s 34.437 s]
+                        change: [+32.652% +41.601% +51.574%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 1100
+sort with memory size 1200
+                        time:   [31.888 s 32.963 s 34.186 s]
+                        change: [+10.570% +21.670% +31.777%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 1200
+sort with memory size 1300
+                        time:   [31.501 s 31.781 s 32.082 s]
+                        change: [+25.960% +30.924% +35.704%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 1300
+sort with memory size 1400
+                        time:   [31.014 s 31.424 s 31.875 s]
+                        change: [+25.784% +29.551% +33.350%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 1400
+sort with memory size 1500
+                        time:   [32.329 s 33.687 s 35.060 s]
+                        change: [+32.238% +39.022% +46.738%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 1500
+sort with memory size 1600
+                        time:   [31.582 s 32.119 s 32.673 s]
+                        change: [+23.865% +28.353% +32.768%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 1600
+sort with memory size 1700
+                        time:   [31.159 s 31.928 s 32.668 s]
+                        change: [+29.805% +34.797% +39.370%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 1700
+sort with memory size 1800
+                        time:   [32.763 s 37.299 s 45.388 s]
+                        change: [+35.620% +57.803% +95.242%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
+Completed benchmark with memory size: 1800
+sort with memory size 1900
+                        time:   [30.488 s 32.081 s 33.753 s]
+                        change: [+18.317% +26.780% +35.481%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 1900
+sort with memory size 2000
+                        time:   [32.759 s 33.191 s 33.710 s]
+                        change: [+19.673% +26.872% +32.784%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Completed benchmark with memory size: 2000
+sort with memory size 3000
+                        time:   [33.544 s 34.929 s 36.433 s]
+                        change: [+30.821% +38.202% +46.377%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 3000
+sort with memory size 4000
+                        time:   [32.146 s 32.719 s 33.353 s]
+                        change: [+16.976% +21.120% +25.455%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 4000
+sort with memory size 5000
+                        time:   [31.114 s 32.085 s 33.204 s]
+                        change: [+15.483% +20.397% +25.686%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 5000
+sort with memory size 6000
+                        time:   [31.746 s 32.622 s 33.516 s]
+                        change: [+17.692% +23.405% +29.657%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 6000
+sort with memory size 7000
+                        time:   [34.333 s 35.125 s 36.040 s]
+                        change: [+12.355% +20.954% +29.495%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+
+Completed benchmark with memory size: 7000
+
+Completed benchmark with memory size: 8000

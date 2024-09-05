@@ -5,8 +5,7 @@ use query_exec::{
 };
 use std::sync::Arc;
 
-fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>) {
-    let query_id = 100;
+fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) {
     let temp_c_id = 1000;
     let exclude_last_pipeline = true;
 
@@ -34,20 +33,28 @@ fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>) {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let path = "bp-dir-tpch-sf-0.1";
-    // let buffer_pool_size = 20000;
-    let buffer_pool_size = 10000;
+    // Get the buffer pool size and query ID from environment variables
+    let path = "bp-dir-tpch-sf-1";
+    let buffer_pool_size = std::env::var("BENCH_BP_SIZE")
+        .unwrap_or_else(|_| "10000".to_string())
+        .parse::<usize>()
+        .expect("Invalid buffer pool size");
+    let query_id = std::env::var("BENCH_QUERY_ID")
+        .unwrap_or_else(|_| "100".to_string())
+        .parse::<u32>()
+        .expect("Invalid query ID");
+
     let bp = Arc::new(BufferPool::new(path, buffer_pool_size, false).unwrap());
 
     // Get the memory size from the environment variable
     let memory_size = std::env::var("BENCH_MEMORY_SIZE")
-        .unwrap_or_else(|_| "100".to_string()) // Default to 100 if not set
+        .unwrap_or_else(|_| "100".to_string())
         .parse::<usize>()
         .expect("Invalid memory size");
 
     c.bench_function(&format!("sort with memory size {}", memory_size), |b| {
-        b.iter(|| run_sort_benchmark(black_box(memory_size), bp.clone()));
-        // println!("stats: \n{:?}", bp.stats());
+        b.iter(|| run_sort_benchmark(black_box(memory_size), bp.clone(), query_id));
+        // Optionally print stats here: println!("stats: \n{:?}", bp.stats());
     });
 }
 

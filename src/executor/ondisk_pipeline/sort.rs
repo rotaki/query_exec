@@ -290,7 +290,6 @@ impl AppendOnlyKVPage for Page {
 
     fn append(&mut self, key: &[u8], value: &[u8]) -> bool {
         // Check if the page has enough space for slot and the record
-        // println!("free_space {:?}", self.total_free_space());
         if self.total_free_space() < SLOT_SIZE as u16 + key.len() as u16 + value.len() as u16 {
             false
         } else {
@@ -684,8 +683,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 // Get global quantiles from previously computed quantiles
-                println!("Global quantiles:");
-                println!("{}", self.quantiles);
+                // println!("Global quantiles:"); xtx
+                // println!("{}", self.quantiles);
                 let global_quantiles = self.quantiles.get_quantiles();
 
                 // If quantile is [a, b, c, d], there are 3 threads each responsible for [a, b), [b, c), [c, d].
@@ -722,7 +721,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         } else {
                             upper
                         };
-                        println!("Merging range [{:?}, {:?})", lower, upper);
+                        // println!("Thread {} Merging range [{:?}, {:?})", i, lower, upper); xtx
 
                         let run_segments = runs
                             .iter()

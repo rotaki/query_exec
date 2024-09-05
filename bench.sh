@@ -1,33 +1,48 @@
 #!/bin/bash
 
-# Define an array of memory sizes
-# memory_sizes=(100 200 300 400 500 1000 2000 3000 5000 10000)
-memory_sizes=(10000 5000 4000 3000 2000 1000 900 800 700 600 500 400 300 200 100)
-# memory_sizes=(10000 500)
+# Create the output directory if it doesn't exist
+mkdir -p benchmark_results
 
-# Output file for the benchmark results
-output_file="benchmark_results.txt"
+# List of buffer pool sizes
+bp_sizes=(10000 20000)
 
-# Clear the output file before starting
-echo "Benchmark results:" > $output_file
+# List of query IDs
+# query_ids=(100 101)
+query_ids=(101)
 
-# Loop through each memory size
-for memory_size in "${memory_sizes[@]}"
-do
-  echo "Running benchmark with memory size: $memory_size"
+# List of memory sizes (example)
+memory_sizes=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000 3000 4000 5000 6000 7000 8000 9000 10000)
+# memory_sizes=(400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000 3000 4000 5000 6000 7000 8000 9000 10000)
 
-  # Clear directories before each benchmark run
-  rm -rf bp-dir-tpch-sf-0.1/0/100*
-  rm -rf bp-dir-tpch-sf-0.1/321
+# Iterate over each combination of buffer pool size and query ID
+for bp_size in "${bp_sizes[@]}"; do
+  for query_id in "${query_ids[@]}"; do
 
-  rm -rf bp-dir-tpch-sf-1/0/100*
-  rm -rf bp-dir-tpch-sf-1/321
 
-  export BENCH_MEMORY_SIZE=$memory_size
 
-  # Run the cargo bench command, filter the relevant output, and append to the results file
-  cargo bench --bench sort_bench 2>&1 | grep -E "Benchmarking sort with memory size|time:|change:|No change in performance detected" >> $output_file
-#   cargo bench --bench sort_bench
 
-  echo "Completed benchmark with memory size: $memory_size"
+    # Filename for the output, based on buffer pool size and query ID
+    output_file="benchmark_results/bp_${bp_size}-qid_${query_id}.txt"
+    
+    # Clear or create the file
+    echo "Benchmark results for BP size $bp_size and Query ID $query_id:" > "$output_file"
+
+    # Iterate over each memory size
+    for mem_size in "${memory_sizes[@]}"; do
+
+      # Clear the relevant directories before each benchmark run
+      rm -rf bp-dir-tpch-sf-1/0/100*
+      rm -rf bp-dir-tpch-sf-1/321
+      echo "Running benchmark with memory size: $mem_size"
+
+
+
+      # Run the benchmark, passing the memory size, buffer pool size, and query ID as environment variables
+      BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id cargo bench --bench sort_bench >> "$output_file"
+
+      echo "Completed benchmark with memory size: $mem_size" >> "$output_file"
+    done
+
+    echo "-----------------------------------" >> "$output_file"
+  done
 done
