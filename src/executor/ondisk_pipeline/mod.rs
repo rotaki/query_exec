@@ -2,6 +2,7 @@ mod disk_buffer;
 mod hash_table;
 mod sort;
 
+use core::num;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -1725,11 +1726,15 @@ impl<T: TxnStorageTrait, M: MemPool> PhysicalRelExprToPipelineQueue<T, M> {
                     .map(|(col_id, asc, nulls_first)| (col_id_to_idx[col_id], *asc, *nulls_first))
                     .collect();
                 let schema = input_op.schema().clone();
+                let num_quantiles = std::env::var("BENCH_NUM_QUANTILES") //xtx janky way of updating the number of quantiles/threads
+                .unwrap_or_else(|_| "10".to_string())
+                .parse::<usize>()
+                .expect("Invalid num quantiles");
                 let sort = BlockingOp::OnDiskSort(OnDiskSort::new(
                     schema.clone(),
                     input_op,
                     sort_cols,
-                    10,
+                    num_quantiles,
                 ));
                 // BlockingOp::OnDiskSort(OnDiskSort::new(schema.clone(), input_op, sort_cols));
                 let sort_id = self.fetch_add_id();

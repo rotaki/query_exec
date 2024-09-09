@@ -9,6 +9,7 @@
 
 use chrono::format::Item;
 use rayon::{iter, prelude::*};
+use core::num;
 use std::{
     cmp::{max, min, Reverse},
     collections::{BinaryHeap, HashMap, HashSet},
@@ -690,6 +691,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 // If quantile is [a, b, c, d], there are 3 threads each responsible for [a, b), [b, c), [c, d].
                 // Note that last thread is responsible for [c, d] inclusive.
                 let num_threads = global_quantiles.len() - 1;
+                println!("num_threads = {}", num_threads);
+                println!("global quantiles {:?}", global_quantiles);
                 let mut merged_buffers = (0..num_threads)
                     .into_par_iter()
                     .map(|i| {
