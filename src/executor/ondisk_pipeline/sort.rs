@@ -692,7 +692,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 // Note that last thread is responsible for [c, d] inclusive.
                 let num_threads = global_quantiles.len() - 1;
                 println!("num_threads = {}", num_threads);
-                println!("global quantiles {:?}", global_quantiles);
+                // println!("global quantiles {:?}", global_quantiles);
                 let mut merged_buffers = (0..num_threads)
                     .into_par_iter()
                     .map(|i| {
@@ -808,6 +808,9 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
+
+
+        println!("num runs {}", runs.len());
 
         // -------------- Run Merge Phase --------------
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
