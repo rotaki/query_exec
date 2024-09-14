@@ -20,6 +20,7 @@ memory_sizes=(100)
 num_quantiles_list=(5 6 7 8)
 
 echo "running updated bench.sh"
+echo "test"
 
 # Iterate over query IDs first
 for query_id in "${query_ids[@]}"; do

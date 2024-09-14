@@ -16,3 +16,4 @@
 /venv
 /bp-*
 /benchmark_results
+.bench./
