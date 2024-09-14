@@ -16,4 +16,5 @@
 /venv
 /bp-*
 /benchmark_results
-.bench./
+.bench./*
+tempfile.*

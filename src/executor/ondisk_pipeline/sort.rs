@@ -8,6 +8,7 @@
 // 2 byte: free space offset
 
 use chrono::format::Item;
+use std::time::Instant;
 use rayon::{iter, prelude::*};
 use core::num;
 use std::{
@@ -807,13 +808,21 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
+        let start_generation = Instant::now();
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
+        let duration_generation = start_generation.elapsed();
 
+
+        println!("Run generation took: {:.2?} seconds", duration_generation);
 
         println!("num runs {}", runs.len());
 
         // -------------- Run Merge Phase --------------
+        let start_merge = Instant::now();
         let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
+        let duration_merge = start_merge.elapsed();
+
+        println!("Run merge took: {:.2?} seconds", duration_merge);
 
         // Print the length of the final merge result - xtx
         // println!("Final merge result contains {} items", final_run.num_kvs());
