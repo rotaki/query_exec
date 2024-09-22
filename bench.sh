@@ -8,16 +8,18 @@ mkdir -p tempfiles
 rm -rf tempfiles/*
 
 # List of buffer pool sizes
-bp_sizes=(100000)
+bp_sizes=(20000)
 
 # List of query IDs
-query_ids=(100)
+query_ids=(5)
 
 # List of memory sizes
-memory_sizes=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000)
+#memory_sizes=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000)
+
+memory_sizes=(100)
 
 # List of quantiles to use
-num_quantiles_list=(2 6 11)
+num_quantiles_list=(2)
 
 echo "running updated bench.sh"
 
@@ -32,9 +34,11 @@ for query_id in "${query_ids[@]}"; do
     echo "Benchmark results for BP size $bp_size and Query ID $query_id:" > "$output_file"
 
     # Iterate over each memory size
-    for mem_size in "${memory_sizes[@]}"; do
+    #for mem_size in "${memory_sizes[@]}"; do
+    for num_quantiles in "${num_quantiles_list[@]}"; do
       # Then iterate over num_quantiles
-      for num_quantiles in "${num_quantiles_list[@]}"; do
+      #for num_quantiles in "${num_quantiles_list[@]}"; do
+      for mem_size in "${memory_sizes[@]}"; do
 
         # Clear the relevant directories before each benchmark run
         rm -rf bp-dir-tpch-sf-1/0/100*

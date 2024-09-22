@@ -34,7 +34,7 @@ fn run_sort_benchmark(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) {
 
 fn criterion_benchmark(c: &mut Criterion) {
     // Get the buffer pool size and query ID from environment variables
-    let path = "bp-dir-tpch-sf-1";
+    let path = "bp-dir-tpch-sf-0.1";
     let buffer_pool_size = std::env::var("BENCH_BP_SIZE")
         .unwrap_or_else(|_| "10000".to_string())
         .parse::<usize>()
