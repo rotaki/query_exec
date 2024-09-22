@@ -809,7 +809,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let start_generation = Instant::now();
-        println!("got into run generation");
         let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
         let duration_generation = start_generation.elapsed();
 
