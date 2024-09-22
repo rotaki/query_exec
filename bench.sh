@@ -69,9 +69,23 @@ for query_id in "${query_ids[@]}"; do
           fi
           # Capture "Run merge took"
           if [[ $line == *"Run merge took"* ]]; then
-            run_merge_time=$(echo "$line" | awk '{print $4}' | sed 's/s//g') # Remove 's'
-            run_merge_times+=("$run_merge_time")
+              # Extract the time value and unit (ms or s)
+              run_merge_time=$(echo "$line" | awk '{print $4}')
+              
+              # Check if the unit is milliseconds or seconds
+              if [[ $run_merge_time == *"ms" ]]; then
+                  # If the time is in milliseconds, remove 'ms' and convert to seconds
+                  run_merge_time=$(echo "$run_merge_time" | sed 's/ms//g')
+                  run_merge_time=$(echo "scale=3; $run_merge_time / 1000" | bc) # Convert to seconds
+              elif [[ $run_merge_time == *"s" ]]; then
+                  # If the time is in seconds, just remove 's'
+                  run_merge_time=$(echo "$run_merge_time" | sed 's/s//g')
+              fi
+
+              # Add the time in seconds to the array
+              run_merge_times+=("$run_merge_time")
           fi
+
           # Capture "num runs"
           if [[ $line == *"num runs"* ]]; then
             num_run=$(echo "$line" | awk '{print $3}')
