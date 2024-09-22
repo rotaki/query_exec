@@ -25,6 +25,11 @@ use crate::{
     ColumnId,
 };
 
+
+use std::sync::atomic::{AtomicU16, Ordering};
+use rayon::prelude::*;
+
+
 #[derive(Clone, Debug)]
 pub struct SingleRunQuantiles {
     num_quantiles: usize,
@@ -434,6 +439,10 @@ impl<M: MemPool> SortBuffer<M> {
         }
     }
 
+    pub fn set_dest_c_key(&mut self, dest_c_key: ContainerKey) {
+        self.dest_c_key = dest_c_key;
+    }
+    
     pub fn sort(&mut self) {
         // Sort the ptrs
         self.ptrs.sort_by(|a, b| {
@@ -607,71 +616,126 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        // const TEMP_DB_ID: DatabaseId = dest_c_key.db_id;
-        const TEMP_DB_ID: DatabaseId = 321; //xtx magic number
-        const TEMP_C_ID_BASE: u16 = 321; // xtx magic number
-        let mut temp_c_id_counter = TEMP_C_ID_BASE;
-
-        let mut sort_buffer = SortBuffer::new(
-            mem_pool,
-            ContainerKey::new(TEMP_DB_ID, temp_c_id_counter),
-            policy,
-            self.sort_cols.clone(),
-        );
-        let mut result_buffers = Vec::new();
-
+        const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
+        const TEMP_C_ID_BASE: u16 = 321;    // Magic number for starting container ID
+    
+        // Step 1: Collect the tuples into chunks
+        let mut chunks = Vec::new();
+        let chunk_size = 10000;
+        let mut current_chunk = Vec::with_capacity(chunk_size);
+    
         while let Some(tuple) = self.exec_plan.next(context)? {
-            if sort_buffer.append(&tuple) {
-                continue;
-            } else {
-                sort_buffer.sort();
-                let quantiles = sort_buffer.sample_quantiles(self.quantiles.num_quantiles);
-                self.quantiles.merge(&quantiles);
-
-                let iter = SortBufferIter::new(&sort_buffer);
-
-                // Create temporary container key
-                temp_c_id_counter += 1;
-                let temp_container_key = ContainerKey {
-                    db_id: TEMP_DB_ID,
-                    c_id: temp_c_id_counter,
-                };
-
-                let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-                    temp_container_key,
-                    mem_pool.clone(),
-                    SortBufferIter::new(&sort_buffer),
-                ));
-                result_buffers.push(output);
-
-                sort_buffer.reset();
-                if !sort_buffer.append(&tuple) {
-                    panic!("Record too large to fit in a page");
-                }
+            current_chunk.push(tuple);
+            if current_chunk.len() >= chunk_size {
+                chunks.push(std::mem::replace(&mut current_chunk, Vec::with_capacity(chunk_size)));
             }
         }
-
-        // Finally sort and output the remaining records
-        sort_buffer.sort();
-        // Compute quantiles for the last run
-        let quantiles = sort_buffer.sample_quantiles(self.quantiles.num_quantiles);
-        self.quantiles.merge(&quantiles);
-
-        let iter = SortBufferIter::new(&sort_buffer);
-
-        // Create temporary container key
-        temp_c_id_counter += 1;
-        let temp_container_key = ContainerKey {
-            db_id: TEMP_DB_ID,
-            c_id: temp_c_id_counter,
-        };
-        let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-            temp_container_key,
-            mem_pool.clone(),
-            SortBufferIter::new(&sort_buffer),
-        ));
-        result_buffers.push(output);
-
+        // Add the last chunk if it's not empty
+        if !current_chunk.is_empty() {
+            chunks.push(current_chunk);
+        }
+    
+        // Create an atomic counter for container IDs to ensure uniqueness across threads
+        let c_id_counter = Arc::new(AtomicU16::new(TEMP_C_ID_BASE));
+    
+        let num_quantiles = self.quantiles.num_quantiles; // Capture for closure
+        let sort_cols = self.sort_cols.clone();
+        let policy = policy.clone();
+        let mem_pool = mem_pool.clone();
+    
+        // Step 2: Process each chunk in parallel
+        let runs_and_quantiles: Vec<_> = chunks
+            .into_par_iter()
+            .map(|chunk| {
+                let c_id_counter = c_id_counter.clone();
+    
+                let mut runs = Vec::new();
+                let mut run_quantiles = Vec::new();
+    
+                let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
+                let mut temp_container_key = ContainerKey {
+                    db_id: TEMP_DB_ID,
+                    c_id,
+                };
+    
+                let mut sort_buffer = SortBuffer::new(
+                    &mem_pool,
+                    temp_container_key,
+                    &policy,
+                    sort_cols.clone(),
+                );
+    
+                for tuple in chunk {
+                    if sort_buffer.append(&tuple) {
+                        continue;
+                    } else {
+                        // Process the current buffer
+                        sort_buffer.sort();
+                        let quantiles = sort_buffer.sample_quantiles(num_quantiles);
+                        run_quantiles.push(quantiles);
+    
+                        // Generate the run (sorted chunk) and write it back to disk
+                        let output = Arc::new(AppendOnlyStore::bulk_insert_create(
+                            temp_container_key,
+                            mem_pool.clone(),
+                            SortBufferIter::new(&sort_buffer),
+                        ));
+    
+                        runs.push(output);
+    
+                        // Prepare for next run
+                        sort_buffer.reset();
+    
+                        // Generate a new container key for the next run
+                        c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
+                        temp_container_key = ContainerKey {
+                            db_id: TEMP_DB_ID,
+                            c_id,
+                        };
+                        sort_buffer.set_dest_c_key(temp_container_key);
+    
+                        // Try appending the tuple again
+                        if !sort_buffer.append(&tuple) {
+                            panic!("Record too large to fit in a page");
+                        }
+                    }
+                }
+    
+                // After the loop, process any remaining tuples in the sort_buffer
+                if !sort_buffer.ptrs.is_empty() {
+                    sort_buffer.sort();
+                    let quantiles = sort_buffer.sample_quantiles(num_quantiles);
+                    run_quantiles.push(quantiles);
+    
+                    let output = Arc::new(AppendOnlyStore::bulk_insert_create(
+                        temp_container_key,
+                        mem_pool.clone(),
+                        SortBufferIter::new(&sort_buffer),
+                    ));
+    
+                    runs.push(output);
+                }
+    
+                // Merge the quantiles from runs within this chunk
+                let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
+                for q in run_quantiles {
+                    chunk_quantiles.merge(&q);
+                }
+    
+                (runs, chunk_quantiles)
+            })
+            .collect();
+    
+        // Step 3: Collect the runs and merge quantiles
+        let mut result_buffers = Vec::new();
+        let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
+    
+        for (chunk_runs, quantiles) in runs_and_quantiles {
+            result_buffers.extend(chunk_runs);
+            total_quantiles.merge(&quantiles);
+        }
+        self.quantiles = total_quantiles; // Update the global quantiles
+    
         Ok(result_buffers)
     }
 

@@ -19,7 +19,7 @@ query_ids=(100)
 memory_sizes=(100)
 
 # List of quantiles to use
-num_quantiles_list=(2 6)
+num_quantiles_list=(6)
 
 echo "running updated bench.sh"
 
@@ -29,6 +29,7 @@ for query_id in "${query_ids[@]}"; do
   for bp_size in "${bp_sizes[@]}"; do
     # Filename for the output, based on num_quantiles, buffer pool size, and query ID
     output_file="benchmark_results/bp_${bp_size}-qid_${query_id}.txt"
+    # output_file="temp.txt"
 
     # Clear or create the file
     echo "Benchmark results for BP size $bp_size and Query ID $query_id:" > "$output_file"
@@ -46,7 +47,7 @@ for query_id in "${query_ids[@]}"; do
         rm -rf bp-dir-tpch-sf-1/0/100*
         rm -rf bp-dir-tpch-sf-1/321
         rm -rf bp-dir-tpch-sf-10/100*
-        rm -rf bp-dir-tpch-sf-1/321
+        rm -rf bp-dir-tpch-sf-10/321
 
         echo "Running benchmark with memory size: $mem_size, BP size $bp_size, Q_ID $query_id, and num quantiles $num_quantiles"
 
