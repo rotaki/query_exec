@@ -28,8 +28,8 @@ for query_id in "${query_ids[@]}"; do
   # Then iterate over buffer pool sizes
   for bp_size in "${bp_sizes[@]}"; do
     # Filename for the output, based on num_quantiles, buffer pool size, and query ID
-    output_file="benchmark_results/bp_${bp_size}-qid_${query_id}.txt"
-    # output_file="temp.txt"
+    # output_file="benchmark_results/bp_${bp_size}-qid_${query_id}.txt"
+    output_file="temp.txt"
 
     # Clear or create the file
     echo "Benchmark results for BP size $bp_size and Query ID $query_id:" > "$output_file"
@@ -58,8 +58,10 @@ for query_id in "${query_ids[@]}"; do
         num_threads=()
 
         # Capture the output of the benchmark command directly
-        output=$(BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles \
-        cargo bench --bench sort_bench)
+        # output=$(BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles \
+        # cargo bench --bench sort_bench)
+        
+        cargo bench --bench sort_bench
 
         # Parse the output line by line
         while IFS= read -r line; do
