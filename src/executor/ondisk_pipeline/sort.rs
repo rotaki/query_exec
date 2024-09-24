@@ -828,7 +828,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        let num_threads = 8;
+        let num_threads = 1;
         const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
         const TEMP_C_ID_BASE: u16 = 321;    // Magic number for starting container ID
     
