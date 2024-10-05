@@ -1745,7 +1745,7 @@ mod tests {
             );
 
             let runs = external_sort
-                .run_generation(&policy, &context, &bp, dest_c_key)
+                .run_generation_old(&policy, &context, &bp, dest_c_key)
                 .unwrap();
 
             println!("Num runs: {}", runs.len());
