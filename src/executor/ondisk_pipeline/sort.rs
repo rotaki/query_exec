@@ -1007,15 +1007,21 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
-        // let runs = self.run_generation_sorted_store(policy, context, mem_pool, dest_c_key)?;
-        let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
+        let start_generation = Instant::now();
+        let runs = self.run_generation_sorted_store(policy, context, mem_pool, dest_c_key)?;
+        let duration_generation = start_generation.elapsed();
+
+
+        println!("Run generation took: {:.2?} seconds", duration_generation);
+
+        println!("num runs {}", runs.len());
 
         // -------------- Run Merge Phase --------------
-        // let final_run = self.run_merge_sorted_store(policy, runs, mem_pool, dest_c_key)?;
-        let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
+        let start_merge = Instant::now();
+        let final_run = self.run_merge_sorted_store(policy, runs, mem_pool, dest_c_key)?;
+        let duration_merge = start_merge.elapsed();
 
-        // Print the length of the final merge result - xtx
-        // println!("Final merge result contains {} items", final_run.num_kvs());
+        println!("Run merge took: {:.2?} seconds", duration_merge);
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 }
