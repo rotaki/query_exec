@@ -1007,12 +1007,12 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
-        let runs = self.run_generation_sorted_store(policy, context, mem_pool, dest_c_key)?;
-        // let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
+        // let runs = self.run_generation_sorted_store(policy, context, mem_pool, dest_c_key)?;
+        let runs = self.run_generation(policy, context, mem_pool, dest_c_key)?;
 
         // -------------- Run Merge Phase --------------
-        let final_run = self.run_merge_sorted_store(policy, runs, mem_pool, dest_c_key)?;
-        // let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
+        // let final_run = self.run_merge_sorted_store(policy, runs, mem_pool, dest_c_key)?;
+        let final_run = self.run_merge(policy, runs, mem_pool, dest_c_key)?;
 
         // Print the length of the final merge result - xtx
         // println!("Final merge result contains {} items", final_run.num_kvs());
@@ -1527,33 +1527,33 @@ mod tests {
             println!("result len: {}", result.len());
             println!("expected len: {}", expected.len());
 
-            // let mut temp = 0;
-            // // If the length are different, identify the missing value
-            // if result.len() != expected.len() {
-            //     for i in 0..min(result.len(), expected.len()) {
-            //         if result[i] != expected[i] {
+            let mut temp = 0;
+            // If the length are different, identify the missing value
+            if result.len() != expected.len() {
+                for i in 0..min(result.len(), expected.len()) {
+                    if result[i] != expected[i] {
                         
-            //             if temp == 0{
-            //                 println!("prev was {:?}", result[i - 1]);
-            //                 temp = 1;
-            //             }
-            //             println!("Mismatch at index {}", i);
-            //             println!("Expected: {:?}", expected[i]);
-            //             println!("Result: {:?}", result[i]);
-            //         }
-            //     }
-            //     // Print the remaining values
-            //     if result.len() > expected.len() {
-            //         for i in expected.len()..result.len() {
-            //             println!("Extra result: {:?}", result[i]);
-            //         }
-            //     } 
-            //     // else {
-            //     //     for i in result.len()..expected.len() {
-            //     //         println!("Missing expected: {:?}", expected[i]);
-            //     //     }
-            //     // }
-            // }
+                        if temp == 0{
+                            println!("prev was {:?}", result[i - 1]);
+                            temp = 1;
+                        }
+                        println!("Mismatch at index {}", i);
+                        println!("Expected: {:?}", expected[i]);
+                        println!("Result: {:?}", result[i]);
+                    }
+                }
+                // Print the remaining values
+                if result.len() > expected.len() {
+                    for i in expected.len()..result.len() {
+                        println!("Extra result: {:?}", result[i]);
+                    }
+                } 
+                // else {
+                //     for i in result.len()..expected.len() {
+                //         println!("Missing expected: {:?}", expected[i]);
+                //     }
+                // }
+            }
 
             for (i, t) in result.iter().enumerate() {
                 assert_eq!(t, &expected[i]);
