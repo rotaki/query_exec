@@ -42,11 +42,11 @@ for query_id in "${query_ids[@]}"; do
       for mem_size in "${memory_sizes[@]}"; do
 
         # Clear the relevant directories before each benchmark run
-        rm -rf bp-dir-tpch-sf-0.1/100*
+        rm -rf bp-dir-tpch-sf-0.1/0/100*
         rm -rf bp-dir-tpch-sf-0.1/321
         rm -rf bp-dir-tpch-sf-1/0/100*
         rm -rf bp-dir-tpch-sf-1/321
-        rm -rf bp-dir-tpch-sf-10/100*
+        rm -rf bp-dir-tpch-sf-10/0/100*
         rm -rf bp-dir-tpch-sf-10/321
 
         echo "Running benchmark with memory size: $mem_size, BP size $bp_size, Q_ID $query_id, and num quantiles $num_quantiles"
@@ -58,10 +58,10 @@ for query_id in "${query_ids[@]}"; do
         num_threads=()
 
         # Capture the output of the benchmark command directly
-        output=$(BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles \
-         cargo bench --bench sort_bench)
+        # output=$(BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles \
+        #  cargo bench --bench sort_bench)
         
-       # cargo bench --bench sort_bench
+       cargo bench --bench sort_bench
 
         # Parse the output line by line
         while IFS= read -r line; do

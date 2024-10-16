@@ -1197,35 +1197,27 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
         // Specify the ranges you want to process
         let ranges = vec![(0, 100), (500, 600), (1000, 1100), (1700, 1800)];
+        let mut plans = Vec::new();
+        for (start, end) in ranges {
+            let exec_plan = self.exec_plan.clone_with_range(start, end);
+            plans.push(exec_plan);
+        }
     
         let total_tuples = self.exec_plan.estimate_num_tuples(context);
     
-        // Wrap `exec_plan` in an `UnsafeCell` to allow unsafe mutable access across threads
-        let exec_plan_cell = UnsafeCell::new(self.exec_plan.clone_with_range(0, total_tuples));
-    
         // Use `rayon::scope` to process each range in parallel
         rayon::scope(|s| {
-            for (i, &(start, end)) in ranges.iter().enumerate() {
+            for (i, mut exec_plan) in plans.into_iter().enumerate() {
                 let context = context.clone(); // Clone the context for thread safety
-    
+
                 s.spawn(move |_| {
-                    // Print the current thread and range being processed
-                    println!("Thread {} processing range {}-{}", i + 1, start, end);
-    
-                    // Unsafe block to access `UnsafeCell`
-                    unsafe {
-                        let exec_plan = (*exec_plan_cell.get()).clone_with_range(start, end);
-                        let mut exec_plan_iter = exec_plan;
-    
-                        while let Some(tuple) = exec_plan_iter.next(&context).unwrap() {
-                            // Print each tuple as it's processed by this thread
-                            println!("Thread {} processing tuple: {:?}", i + 1, tuple);
-    
-                            // Process each tuple (you may want to insert logic for how tuples are handled)
-                        }
+                    while let Some(tuple) = exec_plan.next(&context).unwrap() {
+                        // Print each tuple as it's processed by this thread
+                        println!("Thread {} processing tuple: {:?}", i + 1, tuple);
+                        // Process each tuple (you may want to insert logic for how tuples are handled)
                     }
                 });
-            }
+            }   
         });
     
         // Return the result buffers (for now it's empty as we haven't processed any buffers)
