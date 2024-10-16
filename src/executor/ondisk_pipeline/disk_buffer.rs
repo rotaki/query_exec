@@ -126,6 +126,9 @@ pub enum OnDiskBufferIter<T: TxnStorageTrait, M: MemPool> {
     HashAggregateTable(Mutex<HashAggregationTableIter<M>>),
 }
 
+unsafe impl<T: TxnStorageTrait, M: MemPool> Send for OnDiskBufferIter<T, M> {}
+unsafe impl<T: TxnStorageTrait, M: MemPool> Sync for OnDiskBufferIter<T, M> {}
+
 pub struct TxnStorage<T: TxnStorageTrait> {
     schema: SchemaRef,
     db_id: DatabaseId,
