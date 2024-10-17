@@ -1178,51 +1178,146 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError>
-    where
-        <T as fbtree::txn_storage::TxnStorageTrait>::IteratorHandle: Send + Sync,
-        <T as fbtree::txn_storage::TxnStorageTrait>::TxnHandle: Send + Sync,
-    {
-        const TEMP_DB_ID: DatabaseId = 321; // xtx magic number
-        const TEMP_C_ID_BASE: u16 = 321;    // xtx magic number
-        let mut temp_c_id_counter = TEMP_C_ID_BASE;
+    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
+        // Estimate the total number of tuples
+        // let total_tuples = self.exec_plan.estimate_num_tuples(context);
+        let total_tuples = 6005720;
+        println!("Total tuples estimated: {}", total_tuples);
     
-        let mut sort_buffer = SortBuffer::new(
-            mem_pool,
-            ContainerKey::new(TEMP_DB_ID, temp_c_id_counter),
-            policy,
-            self.sort_cols.clone(),
-        );
-        let mut result_buffers = Vec::new();
+        // Decide on the number of threads
+        let num_threads = 4; // Adjust based on your system's capabilities
     
-        // Specify the ranges you want to process
-        let ranges = vec![(0, 100), (500, 600), (1000, 1100), (1700, 1800)];
-        let mut plans = Vec::new();
-        for (start, end) in ranges {
-            let exec_plan = self.exec_plan.clone_with_range(start, end);
-            plans.push(exec_plan);
-        }
+        // Calculate chunk size
+        let chunk_size = (total_tuples + num_threads - 1) / num_threads;
     
-        let total_tuples = self.exec_plan.estimate_num_tuples(context);
+        // Generate ranges
+        let ranges: Vec<(usize, usize)> = (0..num_threads)
+            .map(|i| {
+                let start = i * chunk_size;
+                let end = if i == num_threads - 1 {
+                    total_tuples
+                } else {
+                    (i + 1) * chunk_size
+                };
+                (start, end)
+            })
+            .collect();
     
-        // Use `rayon::scope` to process each range in parallel
-        rayon::scope(|s| {
-            for (i, mut exec_plan) in plans.into_iter().enumerate() {
-                let context = context.clone(); // Clone the context for thread safety
-
-                s.spawn(move |_| {
-                    while let Some(tuple) = exec_plan.next(&context).unwrap() {
-                        // Print each tuple as it's processed by this thread
-                        println!("Thread {} processing tuple: {:?}", i + 1, tuple);
-                        // Process each tuple (you may want to insert logic for how tuples are handled)
+        // Create execution plans for each range
+        let plans: Vec<_> = ranges
+            .iter()
+            .map(|&(start, end)| {
+                println!("Creating plan for range {} - {}", start, end);
+                self.exec_plan.clone_with_range(start, end)
+            })
+            .collect::<Vec<_>>();
+    
+        // Prepare for parallel execution
+        let c_id_counter = Arc::new(AtomicU16::new(321)); // Starting container ID
+        let num_quantiles = self.quantiles.num_quantiles;
+        let sort_cols = self.sort_cols.clone();
+        let policy = policy.clone();
+        let mem_pool = mem_pool.clone();
+    
+        // Process each plan in parallel
+        let runs_and_quantiles: Vec<_> = plans
+            .into_par_iter()
+            .map(|mut exec_plan| -> Result<_, ExecError> {
+                let c_id_counter = c_id_counter.clone();
+                let mut runs = Vec::new();
+                let mut run_quantiles = Vec::new();
+    
+                let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
+                let mut temp_container_key = ContainerKey {
+                    db_id: dest_c_key.db_id,
+                    c_id,
+                };
+    
+                let mut sort_buffer = SortBuffer::new(
+                    &mem_pool,
+                    temp_container_key,
+                    &policy,
+                    sort_cols.clone(),
+                );
+    
+                let mut tuples_processed = 0;
+    
+                while let Some(tuple) = exec_plan.next(context)? {
+                    tuples_processed += 1;
+                    if sort_buffer.append(&tuple) {
+                        continue;
+                    } else {
+                        // Sort and process the current buffer
+                        sort_buffer.sort();
+                        let quantiles = sort_buffer.sample_quantiles(num_quantiles);
+                        run_quantiles.push(quantiles);
+    
+                        // Create the run and write it back to disk
+                        let output = Arc::new(AppendOnlyStore::bulk_insert_create(
+                            temp_container_key,
+                            mem_pool.clone(),
+                            SortBufferIter::new(&sort_buffer),
+                        ));
+                        runs.push(output);
+    
+                        // Reset for the next run
+                        sort_buffer.reset();
+                        c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
+                        temp_container_key = ContainerKey {
+                            db_id: dest_c_key.db_id,
+                            c_id,
+                        };
+                        sort_buffer.set_dest_c_key(temp_container_key);
+    
+                        // Try appending the tuple again
+                        if !sort_buffer.append(&tuple) {
+                            panic!("Record too large to fit in a page");
+                        }
                     }
-                });
-            }   
-        });
+                }
     
-        // Return the result buffers (for now it's empty as we haven't processed any buffers)
+                // Process any remaining tuples in the sort_buffer
+                if !sort_buffer.ptrs.is_empty() {
+                    sort_buffer.sort();
+                    let quantiles = sort_buffer.sample_quantiles(num_quantiles);
+                    run_quantiles.push(quantiles);
+    
+                    let output = Arc::new(AppendOnlyStore::bulk_insert_create(
+                        temp_container_key,
+                        mem_pool.clone(),
+                        SortBufferIter::new(&sort_buffer),
+                    ));
+                    runs.push(output);
+                }
+    
+                println!("Thread processed {} tuples, generated {} runs", tuples_processed, runs.len());
+    
+                // Merge quantiles within this thread
+                let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
+                for q in run_quantiles {
+                    chunk_quantiles.merge(&q);
+                }
+    
+                Ok((runs, chunk_quantiles))
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?;
+    
+        // Collect runs and merge quantiles
+        let mut result_buffers = Vec::new();
+        let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
+    
+        for (chunk_runs, quantiles) in runs_and_quantiles {
+            result_buffers.extend(chunk_runs);
+            total_quantiles.merge(&quantiles);
+        }
+        self.quantiles = total_quantiles; // Update global quantiles
+    
         Ok(result_buffers)
     }
+    
+    
+    
+    
 
     fn run_merge(
         &mut self,
@@ -1359,7 +1454,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let start_generation = Instant::now();
-        let runs = self.run_generation_2(policy, context, mem_pool, dest_c_key)?;
+        let runs = self.run_generation_4(policy, context, mem_pool, dest_c_key)?;
         let duration_generation = start_generation.elapsed();
 
 
