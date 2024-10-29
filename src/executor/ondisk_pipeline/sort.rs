@@ -8,10 +8,10 @@
 // 2 byte: free space offset
 
 use chrono::format::Item;
+use core::num;
+use rayon::{iter, prelude::*};
 use std::cell::UnsafeCell;
 use std::time::Instant;
-use rayon::{iter, prelude::*};
-use core::num;
 use std::{
     cmp::{max, min, Reverse},
     collections::{BinaryHeap, HashMap, HashSet},
@@ -27,12 +27,9 @@ use crate::{
     ColumnId,
 };
 
-
-use std::sync::atomic::{AtomicU16, Ordering};
 use crossbeam::channel::{bounded, unbounded};
 use crossbeam::thread;
-
-
+use std::sync::atomic::{AtomicU16, Ordering};
 
 #[derive(Clone, Debug)]
 pub struct SingleRunQuantiles {
@@ -446,7 +443,7 @@ impl<M: MemPool> SortBuffer<M> {
     pub fn set_dest_c_key(&mut self, dest_c_key: ContainerKey) {
         self.dest_c_key = dest_c_key;
     }
-    
+
     pub fn sort(&mut self) {
         // Sort the ptrs
         self.ptrs.sort_by(|a, b| {
@@ -689,8 +686,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         Ok(result_buffers)
     }
 
-
-    // Reads then splits then sorts 
+    // Reads then splits then sorts
     fn run_generation_1(
         &mut self,
         policy: &Arc<MemoryPolicy>,
@@ -699,54 +695,53 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
         const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
-        const TEMP_C_ID_BASE: u16 = 321;    // Magic number for starting container ID
-    
+        const TEMP_C_ID_BASE: u16 = 321; // Magic number for starting container ID
+
         // Step 1: Collect the tuples into chunks
         let mut chunks = Vec::new();
         let chunk_size = 10000;
         let mut current_chunk = Vec::with_capacity(chunk_size);
-    
+
         while let Some(tuple) = self.exec_plan.next(context)? {
             current_chunk.push(tuple);
             if current_chunk.len() >= chunk_size {
-                chunks.push(std::mem::replace(&mut current_chunk, Vec::with_capacity(chunk_size)));
+                chunks.push(std::mem::replace(
+                    &mut current_chunk,
+                    Vec::with_capacity(chunk_size),
+                ));
             }
         }
         // Add the last chunk if it's not empty
         if !current_chunk.is_empty() {
             chunks.push(current_chunk);
         }
-    
+
         // Create an atomic counter for container IDs to ensure uniqueness across threads
         let c_id_counter = Arc::new(AtomicU16::new(TEMP_C_ID_BASE));
-    
+
         let num_quantiles = self.quantiles.num_quantiles; // Capture for closure
         let sort_cols = self.sort_cols.clone();
         let policy = policy.clone();
         let mem_pool = mem_pool.clone();
-    
+
         // Step 2: Process each chunk in parallel
         let runs_and_quantiles: Vec<_> = chunks
             .into_par_iter()
             .map(|chunk| {
                 let c_id_counter = c_id_counter.clone();
-    
+
                 let mut runs = Vec::new();
                 let mut run_quantiles = Vec::new();
-    
+
                 let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
                 let mut temp_container_key = ContainerKey {
                     db_id: TEMP_DB_ID,
                     c_id,
                 };
-    
-                let mut sort_buffer = SortBuffer::new(
-                    &mem_pool,
-                    temp_container_key,
-                    &policy,
-                    sort_cols.clone(),
-                );
-    
+
+                let mut sort_buffer =
+                    SortBuffer::new(&mem_pool, temp_container_key, &policy, sort_cols.clone());
+
                 for tuple in chunk {
                     if sort_buffer.append(&tuple) {
                         continue;
@@ -755,19 +750,19 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         sort_buffer.sort();
                         let quantiles = sort_buffer.sample_quantiles(num_quantiles);
                         run_quantiles.push(quantiles);
-    
+
                         // Generate the run (sorted chunk) and write it back to disk
                         let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                             temp_container_key,
                             mem_pool.clone(),
                             SortBufferIter::new(&sort_buffer),
                         ));
-    
+
                         runs.push(output);
-    
+
                         // Prepare for next run
                         sort_buffer.reset();
-    
+
                         // Generate a new container key for the next run
                         c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
                         temp_container_key = ContainerKey {
@@ -775,49 +770,49 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             c_id,
                         };
                         sort_buffer.set_dest_c_key(temp_container_key);
-    
+
                         // Try appending the tuple again
                         if !sort_buffer.append(&tuple) {
                             panic!("Record too large to fit in a page");
                         }
                     }
                 }
-    
+
                 // After the loop, process any remaining tuples in the sort_buffer
                 if !sort_buffer.ptrs.is_empty() {
                     sort_buffer.sort();
                     let quantiles = sort_buffer.sample_quantiles(num_quantiles);
                     run_quantiles.push(quantiles);
-    
+
                     let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                         temp_container_key,
                         mem_pool.clone(),
                         SortBufferIter::new(&sort_buffer),
                     ));
-    
+
                     runs.push(output);
                 }
-    
+
                 // Merge the quantiles from runs within this chunk
                 let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
                 for q in run_quantiles {
                     chunk_quantiles.merge(&q);
                 }
-    
+
                 (runs, chunk_quantiles)
             })
             .collect();
-    
+
         // Step 3: Collect the runs and merge quantiles
         let mut result_buffers = Vec::new();
         let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
-    
+
         for (chunk_runs, quantiles) in runs_and_quantiles {
             result_buffers.extend(chunk_runs);
             total_quantiles.merge(&quantiles);
         }
         self.quantiles = total_quantiles; // Update the global quantiles
-    
+
         Ok(result_buffers)
     }
 
@@ -831,20 +826,21 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
         let num_threads = 1;
         const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
-        const TEMP_C_ID_BASE: u16 = 321;    // Magic number for starting container ID
-    
+        const TEMP_C_ID_BASE: u16 = 321; // Magic number for starting container ID
+
         // Step 1: Set up channels
         let (chunk_sender, chunk_receiver) = bounded::<Vec<Tuple>>(num_threads * 2);
-        let (result_sender, result_receiver) = unbounded::<(Vec<Arc<AppendOnlyStore<M>>>, SingleRunQuantiles)>();
-    
+        let (result_sender, result_receiver) =
+            unbounded::<(Vec<Arc<AppendOnlyStore<M>>>, SingleRunQuantiles)>();
+
         // Step 2: Create an atomic counter for container IDs
         let c_id_counter = Arc::new(AtomicU16::new(TEMP_C_ID_BASE));
-    
+
         let num_quantiles = self.quantiles.num_quantiles; // Capture for closure
         let sort_cols = self.sort_cols.clone();
         let policy = policy.clone();
         let mem_pool = mem_pool.clone();
-    
+
         thread::scope(|s| -> Result<(), ExecError> {
             // Spawn worker threads
             for _ in 0..num_threads {
@@ -854,27 +850,27 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let sort_cols = sort_cols.clone();
                 let policy = policy.clone();
                 let mem_pool = mem_pool.clone();
-    
+
                 s.spawn(move |_| {
                     // Worker thread code
                     while let Ok(chunk) = chunk_receiver.recv() {
                         // Process the chunk
                         let mut runs = Vec::new();
                         let mut run_quantiles = Vec::new();
-    
+
                         let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
                         let mut temp_container_key = ContainerKey {
                             db_id: TEMP_DB_ID,
                             c_id,
                         };
-    
+
                         let mut sort_buffer = SortBuffer::new(
                             &mem_pool,
                             temp_container_key,
                             &policy,
                             sort_cols.clone(),
                         );
-    
+
                         for tuple in chunk {
                             if sort_buffer.append(&tuple) {
                                 continue;
@@ -883,19 +879,19 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                                 sort_buffer.sort();
                                 let quantiles = sort_buffer.sample_quantiles(num_quantiles);
                                 run_quantiles.push(quantiles);
-    
+
                                 // Generate the run (sorted chunk) and write it back to disk
                                 let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                                     temp_container_key,
                                     mem_pool.clone(),
                                     SortBufferIter::new(&sort_buffer),
                                 ));
-    
+
                                 runs.push(output);
-    
+
                                 // Prepare for next run
                                 sort_buffer.reset();
-    
+
                                 // Generate a new container key for the next run
                                 c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
                                 temp_container_key = ContainerKey {
@@ -903,35 +899,35 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                                     c_id,
                                 };
                                 sort_buffer.set_dest_c_key(temp_container_key);
-    
+
                                 // Try appending the tuple again
                                 if !sort_buffer.append(&tuple) {
                                     panic!("Record too large to fit in a page");
                                 }
                             }
                         }
-    
+
                         // After the loop, process any remaining tuples in the sort_buffer
                         if !sort_buffer.ptrs.is_empty() {
                             sort_buffer.sort();
                             let quantiles = sort_buffer.sample_quantiles(num_quantiles);
                             run_quantiles.push(quantiles);
-    
+
                             let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                                 temp_container_key,
                                 mem_pool.clone(),
                                 SortBufferIter::new(&sort_buffer),
                             ));
-    
+
                             runs.push(output);
                         }
-    
+
                         // Merge the quantiles from runs within this chunk
                         let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
                         for q in run_quantiles {
                             chunk_quantiles.merge(&q);
                         }
-    
+
                         // Send the results back
                         if let Err(e) = result_sender.send((runs, chunk_quantiles)) {
                             eprintln!("Failed to send results: {:?}", e);
@@ -941,14 +937,14 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     // `result_sender` will be dropped here
                 });
             }
-    
+
             // Drop the main thread's `result_sender` to allow receiver to terminate
             drop(result_sender);
-    
+
             // Step 4: Producer reads data and sends chunks
             let chunk_size = 10_000; //xtx need to figure out the size
             let mut current_chunk = Vec::with_capacity(chunk_size);
-    
+
             while let Some(tuple) = self.exec_plan.next(context)? {
                 current_chunk.push(tuple);
                 if current_chunk.len() >= chunk_size {
@@ -960,13 +956,14 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             if !current_chunk.is_empty() {
                 chunk_sender.send(current_chunk).unwrap();
             }
-    
+
             // Close the sender to signal workers that no more chunks are coming
             drop(chunk_sender);
-    
+
             // Wait for workers to finish
             Ok(())
-        }).map_err(|e| {
+        })
+        .map_err(|e| {
             // Handle any panics that occurred in the threads
             let err_msg = if let Some(s) = e.downcast_ref::<&str>() {
                 s.to_string()
@@ -977,17 +974,17 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             };
             ExecError::Pipeline(err_msg)
         })??;
-    
+
         // Step 5: Collect the results
         let mut result_buffers = Vec::new();
         let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
-    
+
         for (chunk_runs, quantiles) in result_receiver.iter() {
             result_buffers.extend(chunk_runs);
             total_quantiles.merge(&quantiles);
         }
         self.quantiles = total_quantiles; // Update the global quantiles
-    
+
         Ok(result_buffers)
     }
 
@@ -1003,25 +1000,26 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         use crossbeam::scope;
         use crossbeam::select;
         use std::sync::{Arc, Mutex};
-    
+
         println!("Starting run_generation_3");
-    
+
         const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
         let c_id_counter = AtomicU16::new(321);
-    
+
         let num_quantiles = self.quantiles.num_quantiles;
         let sort_cols = self.sort_cols.clone();
         let policy = Arc::clone(policy);
         let mem_pool = Arc::clone(mem_pool);
-    
+
         // Channels for communication
         let max_threads = 8;
         let (buffer_sender, buffer_receiver) = bounded::<SortBuffer<M>>(max_threads * 2);
-        let (result_sender, result_receiver) = unbounded::<(Arc<AppendOnlyStore<M>>, SingleRunQuantiles)>();
-    
+        let (result_sender, result_receiver) =
+            unbounded::<(Arc<AppendOnlyStore<M>>, SingleRunQuantiles)>();
+
         // Shared quantiles
         let total_quantiles = Mutex::new(SingleRunQuantiles::new(num_quantiles));
-    
+
         // Use a scoped thread to avoid lifetime issues
         let result_buffers = scope(|s| -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
             println!("Inside crossbeam scope");
@@ -1166,11 +1164,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 ExecError::Pipeline("Thread panicked with unknown error".to_string())
             }
         })??; // Use double `?` to unwrap both Results
-    
+
         println!("I make it here ");
         Ok(result_buffers)
     }
-
 
     fn run_generation_4(
         &mut self,
@@ -1179,22 +1176,29 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        // Estimate the total number of tuples
-        // let total_tuples = self.exec_plan.estimate_num_tuples(context);
+        // Start total timing
+        let total_start_time = Instant::now();
+
+        // Estimate total tuples
         let total_tuples = 6005720;
         println!("Total tuples estimated: {}", total_tuples);
-    
+
         // Decide on the number of threads
-        let num_threads = 40; // Adjust based on your system's capabilities
-    
-        // Calculate chunk size
-        let chunk_size = (total_tuples + num_threads - 1) / num_threads;
-    
-        // Generate ranges
-        let ranges: Vec<(usize, usize)> = (0..num_threads)
+        let num_threads = 8;
+        println!("Using {} threads", num_threads);
+
+        // Set num_chunks to num_threads
+        let num_chunks = num_threads;
+
+        // Start timing for preparation
+        let prep_start_time = Instant::now();
+
+        // Generate ranges based on chunk_size
+        let chunk_size = (total_tuples + num_chunks - 1) / num_chunks;
+        let ranges: Vec<(usize, usize)> = (0..num_chunks)
             .map(|i| {
                 let start = i * chunk_size;
-                let end = if i == num_threads - 1 {
+                let end = if i == num_chunks - 1 {
                     total_tuples
                 } else {
                     (i + 1) * chunk_size
@@ -1202,7 +1206,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 (start, end)
             })
             .collect();
-    
+
         // Create execution plans for each range
         let plans: Vec<_> = ranges
             .iter()
@@ -1210,48 +1214,52 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 println!("Creating plan for range {} - {}", start, end);
                 self.exec_plan.clone_with_range(start, end)
             })
-            .collect::<Vec<_>>();
-    
+            .collect();
+
+        let prep_duration = prep_start_time.elapsed();
+        println!("Preparation took {:?}", prep_duration);
+
         // Prepare for parallel execution
-        let c_id_counter = Arc::new(AtomicU16::new(321)); // Starting container ID
+        let c_id_counter = Arc::new(AtomicU16::new(321));
         let num_quantiles = self.quantiles.num_quantiles;
         let sort_cols = self.sort_cols.clone();
         let policy = policy.clone();
         let mem_pool = mem_pool.clone();
-    
-        // Process each plan in parallel
-        let runs_and_quantiles: Vec<_> = plans
-            .into_par_iter()
-            .map(|mut exec_plan| -> Result<_, ExecError> {
+
+        // Start timing for parallel execution
+        let parallel_start_time = Instant::now();
+
+        // Process each plan in parallel using Rayon
+        let runs_and_quantiles: Vec<_> = plans.into_par_iter().enumerate().map(|(thread_index, mut exec_plan)| -> Result<_, ExecError> {
+                // Start timing for this thread
+                let thread_start_time = Instant::now();
+
                 let c_id_counter = c_id_counter.clone();
                 let mut runs = Vec::new();
                 let mut run_quantiles = Vec::new();
-    
-                let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
+
+                let mut c_id = c_id_counter.fetch_add(1, Ordering::Relaxed);
                 let mut temp_container_key = ContainerKey {
                     db_id: dest_c_key.db_id,
                     c_id,
                 };
-    
-                let mut sort_buffer = SortBuffer::new(
-                    &mem_pool,
-                    temp_container_key,
-                    &policy,
-                    sort_cols.clone(),
-                );
-    
+
+                let mut sort_buffer =
+                    SortBuffer::new(&mem_pool, temp_container_key, &policy, sort_cols.clone());
+
                 let mut tuples_processed = 0;
-    
+                println!("handling thread {} before while\n", thread_index);
+                // Loop over tuples
                 while let Some(tuple) = exec_plan.next(context)? {
                     tuples_processed += 1;
                     if sort_buffer.append(&tuple) {
                         continue;
                     } else {
-                        // Sort and process the current buffer
+                        // Buffer is full, process it
                         sort_buffer.sort();
                         let quantiles = sort_buffer.sample_quantiles(num_quantiles);
                         run_quantiles.push(quantiles);
-    
+
                         // Create the run and write it back to disk
                         let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                             temp_container_key,
@@ -1259,29 +1267,30 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             SortBufferIter::new(&sort_buffer),
                         ));
                         runs.push(output);
-    
+
                         // Reset for the next run
                         sort_buffer.reset();
-                        c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
+                        c_id = c_id_counter.fetch_add(1, Ordering::Relaxed);
                         temp_container_key = ContainerKey {
                             db_id: dest_c_key.db_id,
                             c_id,
                         };
                         sort_buffer.set_dest_c_key(temp_container_key);
-    
+
                         // Try appending the tuple again
                         if !sort_buffer.append(&tuple) {
-                            panic!("Record too large to fit in a page");
+                     panic!("Record too large to fit in a page");
                         }
                     }
                 }
-    
+
+                //println!("handling thread {} after  while\n", thread_index);
                 // Process any remaining tuples in the sort_buffer
                 if !sort_buffer.ptrs.is_empty() {
                     sort_buffer.sort();
                     let quantiles = sort_buffer.sample_quantiles(num_quantiles);
                     run_quantiles.push(quantiles);
-    
+
                     let output = Arc::new(AppendOnlyStore::bulk_insert_create(
                         temp_container_key,
                         mem_pool.clone(),
@@ -1289,35 +1298,54 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     ));
                     runs.push(output);
                 }
-    
-                println!("Thread processed {} tuples, generated {} runs", tuples_processed, runs.len());
-    
+
+                // End timing for this thread
+                let thread_duration = thread_start_time.elapsed();
+                println!(
+                    "Thread {} processed {} tuples, generated {} runs in {:?}",
+                    thread_index,
+                    tuples_processed,
+                    runs.len(),
+                    thread_duration
+                );
                 // Merge quantiles within this thread
                 let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
                 for q in run_quantiles {
                     chunk_quantiles.merge(&q);
                 }
-    
+
                 Ok((runs, chunk_quantiles))
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
-    
+
+        let parallel_duration = parallel_start_time.elapsed();
+        println!("Parallel execution took {:?}", parallel_duration);
+
+        // Start timing for collection
+        let collect_start_time = Instant::now();
+
         // Collect runs and merge quantiles
         let mut result_buffers = Vec::new();
         let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
-    
+
         for (chunk_runs, quantiles) in runs_and_quantiles {
             result_buffers.extend(chunk_runs);
             total_quantiles.merge(&quantiles);
         }
         self.quantiles = total_quantiles; // Update global quantiles
-    
+
+        let collect_duration = collect_start_time.elapsed();
+        println!(
+            "Collecting runs and merging quantiles took {:?}",
+            collect_duration
+        );
+
+        // Total duration
+        let total_duration = total_start_time.elapsed();
+        println!("Total run_generation_4 execution took {:?}", total_duration);
+
         Ok(result_buffers)
     }
-    
-    
-    
-    
 
     fn run_merge(
         &mut self,
@@ -1456,7 +1484,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let start_generation = Instant::now();
         let runs = self.run_generation_4(policy, context, mem_pool, dest_c_key)?;
         let duration_generation = start_generation.elapsed();
-
 
         println!("Run generation took: {:.2?} seconds", duration_generation);
 
@@ -2159,4 +2186,3 @@ mod tests {
             }
         }
     }
-}

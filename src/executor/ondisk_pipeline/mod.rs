@@ -128,38 +128,30 @@ impl<T: TxnStorageTrait, M: MemPool> NonBlockingOp<T, M> {
 
     pub fn clone_with_range(&self, start_index: usize, end_index: usize) -> Self {
         match self {
-            NonBlockingOp::Scan(iter) => {
-                NonBlockingOp::RangeScan(PRangeScanIter::new(
-                    iter.schema().clone(),
-                    iter.id,
-                    iter.column_indices.clone(),
-                    start_index,
-                    end_index,
-                ))
-            }
-            NonBlockingOp::Filter(iter) => {
-                NonBlockingOp::Filter(PFilterIter {
-                    schema: iter.schema.clone(),
-                    input: Box::new(iter.input.clone_with_range(start_index, end_index)),
-                    expr: iter.expr.clone(),
-                    num_tuples_scanned: 0,
-                    num_tuples_filtered: 0,
-                })
-            }
-            NonBlockingOp::Project(iter) => {
-                NonBlockingOp::Project(PProjectIter {
-                    schema: iter.schema.clone(),
-                    input: Box::new(iter.input.clone_with_range(start_index, end_index)),
-                    column_indices: iter.column_indices.clone(),
-                })
-            }
-            NonBlockingOp::Map(iter) => {
-                NonBlockingOp::Map(PMapIter {
-                    schema: iter.schema.clone(),
-                    input: Box::new(iter.input.clone_with_range(start_index, end_index)),
-                    exprs: iter.exprs.clone(),
-                })
-            }
+            NonBlockingOp::Scan(iter) => NonBlockingOp::RangeScan(PRangeScanIter::new(
+                iter.schema().clone(),
+                iter.id,
+                iter.column_indices.clone(),
+                start_index,
+                end_index,
+            )),
+            NonBlockingOp::Filter(iter) => NonBlockingOp::Filter(PFilterIter {
+                schema: iter.schema.clone(),
+                input: Box::new(iter.input.clone_with_range(start_index, end_index)),
+                expr: iter.expr.clone(),
+                num_tuples_scanned: 0,
+                num_tuples_filtered: 0,
+            }),
+            NonBlockingOp::Project(iter) => NonBlockingOp::Project(PProjectIter {
+                schema: iter.schema.clone(),
+                input: Box::new(iter.input.clone_with_range(start_index, end_index)),
+                column_indices: iter.column_indices.clone(),
+            }),
+            NonBlockingOp::Map(iter) => NonBlockingOp::Map(PMapIter {
+                schema: iter.schema.clone(),
+                input: Box::new(iter.input.clone_with_range(start_index, end_index)),
+                exprs: iter.exprs.clone(),
+            }),
             other => {
                 panic!("clone_with_range not implemented for other methods");
             }
@@ -314,12 +306,12 @@ impl<T: TxnStorageTrait, M: MemPool> PRangeScanIter<T, M> {
         if self.iter.is_none() {
             self.iter = context.get(&self.id).map(|buf| buf.iter());
         }
-    
+
         while let Some(iter) = &mut self.iter {
             if self.current_index >= self.end_index {
                 return Ok(None);
             }
-    
+
             match iter.next() {
                 Ok(Some(next_tuple)) => {
                     if self.current_index >= self.start_index {
@@ -1889,9 +1881,9 @@ impl<T: TxnStorageTrait, M: MemPool> PhysicalRelExprToPipelineQueue<T, M> {
                     .collect();
                 let schema = input_op.schema().clone();
                 let num_quantiles = std::env::var("BENCH_NUM_QUANTILES") //xtx janky way of updating the number of quantiles/threads
-                .unwrap_or_else(|_| "10".to_string())
-                .parse::<usize>()
-                .expect("Invalid num quantiles");
+                    .unwrap_or_else(|_| "10".to_string())
+                    .parse::<usize>()
+                    .expect("Invalid num quantiles");
                 let sort = BlockingOp::OnDiskSort(OnDiskSort::new(
                     schema.clone(),
                     input_op,

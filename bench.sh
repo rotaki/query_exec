@@ -21,6 +21,9 @@ memory_sizes=(100 500 1000 1500 2000 3000 4000 5000 6000)
 # List of quantiles to use
 num_quantiles_list=(6)
 
+# List of chunk sizes
+chunk_sizes=(1)
+
 echo "running updated bench.sh"
 
 # Iterate over query IDs first
@@ -30,7 +33,7 @@ for query_id in "${query_ids[@]}"; do
     # Filename for the output, based on num_quantiles, buffer pool size, and query ID
     # output_file="benchmark_results/bp_${bp_size}-qid_${query_id}.txt"
     #output_file="benchmark_results/para_1.txt"
-    output_file="benchmark_results/para_runs_40.txt"
+    output_file="benchmark_results/sixteenth_thing.txt"
 
     # Clear or create the file
     echo "Benchmark results for BP size $bp_size and Query ID $query_id:" > "$output_file"
@@ -41,6 +44,7 @@ for query_id in "${query_ids[@]}"; do
       # Then iterate over num_quantiles
       #for num_quantiles in "${num_quantiles_list[@]}"; do
       for mem_size in "${memory_sizes[@]}"; do
+	 for chunk_size in "${chunk_sizes[@]}"; do
 
         # Clear the relevant directories before each benchmark run
         rm -rf bp-dir-tpch-sf-0.1/0/100*
@@ -50,7 +54,7 @@ for query_id in "${query_ids[@]}"; do
         rm -rf bp-dir-tpch-sf-10/0/100*
         rm -rf bp-dir-tpch-sf-10/321
 
-        echo "Running benchmark with memory size: $mem_size, BP size $bp_size, Q_ID $query_id, and num quantiles $num_quantiles"
+        echo "Running benchmark with memory size: $mem_size, BP size $bp_size, Q_ID $query_id, and num quantiles $num_quantiles, num_chunks $chunk_size"
 
         # Initialize variables to track metrics
         run_generation_times=()
@@ -59,10 +63,11 @@ for query_id in "${query_ids[@]}"; do
         num_threads=()
 
         # Capture the output of the benchmark command directly
-         output=$(BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles \
-          cargo bench --bench sort_bench)
+        # output=$(BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles BENCH_CHUNK_SIZE=$chunk_size \
+         # cargo bench --bench sort_bench)
         
-       #cargo bench --bench sort_bench
+         BENCH_MEMORY_SIZE=$mem_size BENCH_BP_SIZE=$bp_size BENCH_QUERY_ID=$query_id BENCH_NUM_QUANTILES=$num_quantiles BENCH_CHUNK_SIZE=$chunk_size \
+       cargo bench --bench sort_bench
 
         # Parse the output line by line
         while IFS= read -r line; do
@@ -136,4 +141,5 @@ for query_id in "${query_ids[@]}"; do
       done
     done
   done
+done
 done
