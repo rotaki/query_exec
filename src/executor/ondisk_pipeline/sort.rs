@@ -1203,14 +1203,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             })
             .collect();
 
-        for (pipeline_id, buffer) in context {
-            match buffer.as_ref() {
-                OnDiskBuffer::AppendOnlyStore(_) => println!("Pipeline {} uses AppendOnlyStore", pipeline_id),
-                OnDiskBuffer::TxnStorage(_) => println!("Pipeline {} uses TxnStorage", pipeline_id),
-                _ => println!("Pipeline {} uses an unexpected storage type", pipeline_id),
-            }
-        }
-
         // Create execution plans for each range
         let plans: Vec<_> = ranges
             .iter()
@@ -1255,8 +1247,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 );
     
                 let mut tuples_processed = 0;
-
-                println!("handling thread {} before while", thread_index);
 
                 while let Some(tuple) = exec_plan.next(context)? {
                     tuples_processed += 1;

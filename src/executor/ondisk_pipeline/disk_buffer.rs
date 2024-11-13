@@ -64,12 +64,12 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskBuffer<T, M> {
     pub fn iter_range(self: &Arc<Self>, start: usize, end: usize) -> OnDiskBufferIter<T, M> {
         match self.as_ref() {
             OnDiskBuffer::AppendOnlyStore(store) => {
-                println!("yoyooyyo");
+                // println!("yoyooyyo");
                 let range_iter = store.range_scan(start, end);
                 OnDiskBufferIter::AppendOnlyStoreRange(Mutex::new(range_iter))
             }
             OnDiskBuffer::TxnStorage(storage) => {
-                println!("hihihi"); //xtx
+                // println!("hihihi"); //xtx
                 let range_iter = storage.range_scan(start, end);
                 OnDiskBufferIter::TxnStorageRange(Mutex::new(range_iter))
             }
@@ -261,7 +261,7 @@ impl<T: TxnStorageTrait> TxnStorageRangeIter<T> {
             // storage.iter_next(&iter).unwrap(); //xtx this is the slow part
         // }
         
-        storage.seek(&txn, &c_id, &iter, start_index);
+        let _ = storage.seek(&txn, &c_id, &iter, start_index);
 
         Self {
             storage,
