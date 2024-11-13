@@ -1185,7 +1185,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         println!("Total tuples estimated: {}", total_tuples);
     
         // Decide on the number of threads
-        let num_threads = 8;
+        let num_threads = 4;
     
         // Calculate chunk size
         let chunk_size = (total_tuples + num_threads - 1) / num_threads;
