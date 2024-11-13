@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use fbtree::{
     access_method::{
         append_only_store::AppendOnlyStore,
+        append_only_store::AppendOnlyStoreRangeIter,
         fbt::{FosterBtree, FosterBtreeRangeScanner},
         hash_fbt::HashFosterBtreeIter,
         UniqueKeyIndex,
@@ -58,6 +59,25 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskBuffer<T, M> {
         OnDiskBuffer::BTree(Arc::new(FosterBtree::bulk_insert_create(
             c_key, mem_pool, iter,
         )))
+    }
+
+    pub fn iter_range(self: &Arc<Self>, start: usize, end: usize) -> OnDiskBufferIter<T, M> {
+        match self.as_ref() {
+            OnDiskBuffer::AppendOnlyStore(store) => {
+                let range_iter = store.range_scan(start, end);
+                OnDiskBufferIter::AppendOnlyStoreRange(Mutex::new(range_iter))
+            }
+            OnDiskBuffer::TxnStorage(storage) => {
+                println!("hihihi");
+                let range_iter = storage.range_scan(start, end);
+                OnDiskBufferIter::TxnStorageRange(Mutex::new(range_iter))
+            }
+            // Handle other storage types
+            _ => {
+                println!("iter_range called on unsupported storage type");
+                unimplemented!("iter_range not implemented for this storage type");
+            }
+        }
     }
 }
 
@@ -119,7 +139,9 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
 
 pub enum OnDiskBufferIter<T: TxnStorageTrait, M: MemPool> {
     TxnStorage(TxnStorageIter<T>),
+    TxnStorageRange(Mutex<TxnStorageRangeIter<T>>),
     AppendOnlyStore(Mutex<AppendOnlyStoreScanner<M>>),
+    AppendOnlyStoreRange(Mutex<AppendOnlyStoreRangeIter<M>>),
     FosterBTree(Mutex<FosterBtreeRangeScanner<M>>),
     HashIndex(Mutex<HashFosterBtreeIter<FosterBtreeRangeScanner<M>>>),
     // HashTable(Mutex<HashTableIter<M>>),
@@ -149,6 +171,11 @@ impl<T: TxnStorageTrait> TxnStorage<T> {
             container_id,
             storage,
         }
+    }
+
+    pub fn range_scan(&self, start: usize, end: usize) -> TxnStorageRangeIter<T> {
+        //xtx rushed
+        TxnStorageRangeIter::new(self.storage.clone(), self.db_id, self.container_id, start, end)
     }
 }
 
@@ -180,11 +207,15 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBufferIter for OnDiskBufferIter<T, M> 
             OnDiskBufferIter::TxnStorage(iter) => {
                 Ok(iter.next()?.map(|(_, v)| Tuple::from_bytes(&v)))
             }
+            OnDiskBufferIter::TxnStorageRange(iter) => {
+                iter.lock().unwrap().next().map(|opt| opt.map(|(_, v)| Tuple::from_bytes(&v)))
+            }
             OnDiskBufferIter::AppendOnlyStore(iter) => Ok(iter
                 .lock()
                 .unwrap()
                 .next()
                 .map(|(_, v)| Tuple::from_bytes(&v))),
+            OnDiskBufferIter::AppendOnlyStoreRange(iter) => Ok(iter.lock().unwrap().next().map(|(_k, v)| Tuple::from_bytes(&v))),
             OnDiskBufferIter::FosterBTree(iter) => Ok(iter
                 .lock()
                 .unwrap()
@@ -198,5 +229,64 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBufferIter for OnDiskBufferIter<T, M> 
             // OnDiskBufferIter::HashTable(iter) => iter.lock().unwrap().next(),
             OnDiskBufferIter::HashAggregateTable(iter) => iter.lock().unwrap().next(),
         }
+    }
+}
+
+
+pub struct TxnStorageRangeIter<T: TxnStorageTrait> {
+    storage: Arc<T>,
+    iter: T::IteratorHandle,
+    txn: T::TxnHandle,
+    start_index: usize,
+    end_index: usize,
+    current_index: usize,
+}
+
+impl<T: TxnStorageTrait> TxnStorageRangeIter<T> {
+    pub fn new(
+        storage: Arc<T>,
+        db_id: DatabaseId,
+        c_id: ContainerId,
+        start_index: usize,
+        end_index: usize,
+    ) -> Self {
+        let txn_options = TxnOptions::default();
+        let txn = storage.begin_txn(&db_id, txn_options).unwrap();
+        let scan_options = ScanOptions::default();
+        let iter = storage.scan_range(&txn, &c_id, scan_options).unwrap();
+
+        // Skip to start_index
+        for _ in 0..start_index {
+            storage.iter_next(&iter).unwrap();
+        }
+
+        Self {
+            storage,
+            iter,
+            txn,
+            start_index,
+            end_index,
+            current_index: start_index,
+        }
+    }
+
+    pub fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, ExecError> {
+        if self.current_index >= self.end_index {
+            Ok(None)
+        } else {
+            match self.storage.iter_next(&self.iter)? {
+                Some(kv) => {
+                    self.current_index += 1;
+                    Ok(Some(kv))
+                }
+                None => Ok(None),
+            }
+        }
+    }
+}
+
+impl<T: TxnStorageTrait> Drop for TxnStorageRangeIter<T> {
+    fn drop(&mut self) {
+        self.storage.commit_txn(&self.txn, false).unwrap();
     }
 }

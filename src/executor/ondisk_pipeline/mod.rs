@@ -304,37 +304,30 @@ impl<T: TxnStorageTrait, M: MemPool> PRangeScanIter<T, M> {
     ) -> Result<Option<Tuple>, ExecError> {
         log_debug!("RangeScanIter::next");
         if self.iter.is_none() {
-            self.iter = context.get(&self.id).map(|buf| buf.iter());
-        }
-
-        while let Some(iter) = &mut self.iter {
-            if self.current_index >= self.end_index {
+            if let Some(buf) = context.get(&self.id) {
+                self.iter = Some(buf.iter_range(self.start_index, self.end_index));
+            } else {
                 return Ok(None);
             }
-
+        }
+    
+        if self.current_index >= self.end_index {
+            return Ok(None);
+        }
+    
+        if let Some(iter) = &self.iter {
             match iter.next() {
                 Ok(Some(next_tuple)) => {
-                    if self.current_index >= self.start_index {
-                        self.current_index += 1;
-                        let projected_tuple = next_tuple.project(&self.column_indices);
-                        return Ok(Some(projected_tuple));
-                    } else {
-                        // Skip tuples until we reach start_index
-                        self.current_index += 1;
-                        continue;
-                    }
+                    self.current_index += 1;
+                    let projected_tuple = next_tuple.project(&self.column_indices);
+                    Ok(Some(projected_tuple))
                 }
-                Ok(None) => {
-                    // No more tuples from the iterator
-                    return Ok(None);
-                }
-                Err(e) => {
-                    // Propagate the error
-                    return Err(e);
-                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
             }
+        } else {
+            Ok(None)
         }
-        Ok(None)
     }
 }
 
