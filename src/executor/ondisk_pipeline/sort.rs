@@ -893,86 +893,132 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 // Parallel merging using Rayon
                 let merged_buffers = (0..num_threads)
-                    .into_par_iter()
-                    .map(|i| {
-                        // Start timer for this thread
-                        let thread_start = Instant::now();
-
-                        // Define the regions for each thread
-                        let lower = global_quantiles[i].clone(); // Inclusive
-                        let upper = global_quantiles[i + 1].clone(); // Exclusive except for the last one
-                        let upper = if i == num_threads - 1 {
-                            // Adjust upper bound for the last thread to be inclusive
-                            let mut upper = upper.clone();
-                            let mut carry = 1;
-                            for byte in upper.iter_mut().rev() {
-                                let (new_byte, new_carry) = byte.overflowing_add(carry);
-                                *byte = new_byte;
-                                if !new_carry {
-                                    carry = 0;
-                                    break;
+                .into_par_iter()
+                .map(|i| {
+                    // Start timer for this thread
+                    let thread_start = Instant::now();
+            
+                    // Start timer for key range definition
+                    // let key_range_start = Instant::now();
+            
+                    // Define the regions for each thread
+                    let lower = global_quantiles[i].clone(); // Inclusive
+                    let upper = global_quantiles[i + 1].clone(); // Exclusive except for the last one
+                    let upper = if i == num_threads - 1 {
+                        // Adjust upper bound for the last thread to be inclusive
+                        let mut upper = upper.clone();
+                        let mut carry = 1;
+                        for byte in upper.iter_mut().rev() {
+                            let (new_byte, new_carry) = byte.overflowing_add(carry);
+                            *byte = new_byte;
+                            if !new_carry {
+                                carry = 0;
+                                break;
+                            }
+                            carry = 1;
+                        }
+                        if carry != 0 {
+                            // Push a new byte to the front of the vec
+                            upper.insert(0, 1);
+                        }
+                        upper
+                    } else {
+                        upper
+                    };
+            
+                    // let key_range_duration = key_range_start.elapsed();
+                    // println!(
+                    //     "Thread {} key range definition took {:.4} seconds",
+                    //     i,
+                    //     key_range_duration.as_secs_f64()
+                    // );
+            
+                    // Start timer for filtering runs
+                    // let filtering_start = Instant::now();
+            
+                    // Filter relevant segments from each run based on the key range
+                    let run_segments = runs
+                        .iter()
+                        .map(|r| {
+                            let lower = lower.clone();
+                            let upper = upper.clone();
+                            r.scan().filter_map(move |(key, value)| {
+                                if key >= lower && key < upper {
+                                    Some((key.to_vec(), value.to_vec()))
+                                } else {
+                                    None
                                 }
-                                carry = 1;
-                            }
-                            if carry != 0 {
-                                // Push a new byte to the front of the vec
-                                upper.insert(0, 1);
-                            }
-                            upper
-                        } else {
-                            upper
-                        };
-
-                        // Filter relevant segments from each run based on the key range
-                        let run_segments = runs
-                            .iter()
-                            .map(|r| {
-                                let lower = lower.clone();
-                                let upper = upper.clone();
-                                r.scan().filter_map(move |(key, value)| {
-                                    if key >= lower && key < upper {
-                                        Some((key.to_vec(), value.to_vec()))
-                                    } else {
-                                        None
-                                    }
-                                })
                             })
-                            .collect::<Vec<_>>();
+                        })
+                        .collect::<Vec<_>>();
+            
+                    // let filtering_duration = filtering_start.elapsed();
+                    // println!(
+                    //     "Thread {} filtering took {:.4} seconds",
+                    //     i,
+                    //     filtering_duration.as_secs_f64()
+                    // );
+            
+                    // Start timer for merging segments
+                    // let merging_start = Instant::now();
+            
+                    // Merge the filtered segments
+                    // let merge_iter = MergeIter::new(run_segments);
+            
+                    // let merging_duration = merging_start.elapsed();
+                    // println!(
+                    //     "Thread {} merging took {:.4} seconds",
+                    //     i,
+                    //     merging_duration.as_secs_f64()
+                    // );
+            
+                    // // Start timer for creating AppendOnlyStore
+                    // let insert_start = Instant::now();
+            
+                    // Define a temporary container key for the merged data
+                    let temp_container_key = ContainerKey {
+                        db_id: dest_c_key.db_id,
+                        c_id: dest_c_key.c_id + i as u16,
+                    };
+            
+                    // Initialize a tuple counter
+                    // let mut tuple_count = 0;
+            
+                    // Inside the per-thread map
+                    let merged_store = Arc::new(AppendOnlyStore::new(temp_container_key, mem_pool.clone()));
+                    let mut tuple_count = 0;
 
-                        // Merge the filtered segments
-                        let merge_iter = MergeIter::new(run_segments);
+                    let mut started = false;
+                    // Iterate over runs and insert directly
+                    for r in runs.iter() {
+                        let lower = lower.clone();
+                        let upper = upper.clone();
+                        for (key, value) in r.scan() {
+                            if key >= lower && key < upper {
+                                if !started{
+                                    println!("thread {} found region", i);
+                                    started = true;
+                                }
+                                merged_store.append(&key, &value).unwrap();
+                                tuple_count += 1;
+                            } else if key >= upper {
+                                break; // Since runs are sorted, we can break early
+                            }
+                        }
+                    }
 
-                        // Define a temporary container key for the merged data
-                        let temp_container_key = ContainerKey {
-                            db_id: dest_c_key.db_id,
-                            c_id: dest_c_key.c_id + i as u16,
-                        };
-
-                        // Initialize a tuple counter
-                        let mut tuple_count = 0;
-
-                        // Wrap the iterator to count tuples
-                        let counting_merge_iter = merge_iter.inspect(|_| tuple_count += 1);
-
-                        // Create an AppendOnlyStore with the merged data
-                        let merged_store = Arc::new(AppendOnlyStore::bulk_insert_create(
-                            temp_container_key,
-                            mem_pool.clone(),
-                            counting_merge_iter,
-                        ));
-
-                        // Stop timer and calculate elapsed time
-                        let thread_duration = thread_start.elapsed();
-                        println!(
-                            "Thread {} completed in {:.4} seconds with {} tuples",
-                            i,
-                            thread_duration.as_secs_f64(),
-                            tuple_count
-                        );
-
-                        (i, merged_store, tuple_count)
-                    })
-                    .collect::<Vec<_>>();
+                    // Log the completion time and tuple count
+                    let thread_duration = thread_start.elapsed();
+                    println!(
+                        "Thread {} completed in {:.4} seconds with {} tuples",
+                        i,
+                        thread_duration.as_secs_f64(),
+                        tuple_count
+                    );
+            
+                    (i, merged_store, tuple_count)
+                })
+                .collect::<Vec<_>>();
 
                 // Stop timer for parallel merging
                 let parallel_duration = parallel_start.elapsed();
