@@ -21,7 +21,7 @@ query_ids=(100)
 memory_sizes=(100)
 
 # List of quantiles to use (if applicable)
-num_quantiles_list=(9)
+num_quantiles_list=(2)
 
 # List of chunk sizes (if applicable)
 chunk_sizes=(1)

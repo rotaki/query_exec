@@ -935,7 +935,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
     ) -> Result<Vec<Arc<SortedRunStore<M>>>, ExecError> {
         // Estimate the total number of tuples
-        let total_tuples = 6005720;
+        // let total_tuples = 6005720;
+        let total_tuples = 657504;
         // println!("Total tuples estimated: {}", total_tuples);
     
         // Decide on the number of threads
@@ -1605,11 +1606,19 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             upper
                         };
     
+                        let run_segment_start  = Instant::now();
                         // Filter relevant segments from each run based on the key range
                         let run_segments = runs
                             .iter()
                             .map(|r| r.scan_range(&lower, &upper))
                             .collect::<Vec<_>>();
+
+                        let run_segment_dureation = run_segment_start.elapsed();
+                        println!(
+                            "Thread {} completed run segment in {:.4} seconds with",
+                            i,
+                            run_segment_dureation.as_secs_f64()
+                        );
     
                         // Merge the filtered segments
                         let merge_iter = MergeIter::new(run_segments);
@@ -1625,6 +1634,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
                         // Wrap the iterator to count tuples
                         let counting_merge_iter = merge_iter.inspect(|_| tuple_count += 1);
+                        let merge_start  = Instant::now();
     
                         // Create an AppendOnlyStore with the merged data
                         let merged_store = Arc::new(AppendOnlyStore::bulk_insert_create(
@@ -1632,15 +1642,22 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             mem_pool.clone(),
                             counting_merge_iter,
                         ));
+
+                        let merge_duration = merge_start.elapsed();
+                        println!(
+                            "Thread {} completed merge in {:.4} seconds with",
+                            i,
+                            merge_duration.as_secs_f64()
+                        );
     
                         // Stop timer and calculate elapsed time
                         let thread_duration = thread_start.elapsed();
-                        println!(
-                            "Thread {} completed in {:.4} seconds with {} tuples",
-                            i,
-                            thread_duration.as_secs_f64(),
-                            tuple_count
-                        );
+                        // println!(
+                        //     "Thread {} completed in {:.4} seconds with {} tuples",
+                        //     i,
+                        //     thread_duration.as_secs_f64(),
+                        //     tuple_count
+                        // );
     
                         (i, merged_store, tuple_count)
                     })
