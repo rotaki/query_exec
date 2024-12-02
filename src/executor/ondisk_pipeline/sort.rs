@@ -689,489 +689,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         Ok(result_buffers)
     }
 
-
-    // Reads then splits then sorts 
-    fn run_generation_1(
-        &mut self,
-        policy: &Arc<MemoryPolicy>,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
-        mem_pool: &Arc<M>,
-        dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
-        const TEMP_C_ID_BASE: u16 = 321;    // Magic number for starting container ID
-    
-        // Step 1: Collect the tuples into chunks
-        let mut chunks = Vec::new();
-        let chunk_size = 10000;
-        let mut current_chunk = Vec::with_capacity(chunk_size);
-    
-        while let Some(tuple) = self.exec_plan.next(context)? {
-            current_chunk.push(tuple);
-            if current_chunk.len() >= chunk_size {
-                chunks.push(std::mem::replace(&mut current_chunk, Vec::with_capacity(chunk_size)));
-            }
-        }
-        // Add the last chunk if it's not empty
-        if !current_chunk.is_empty() {
-            chunks.push(current_chunk);
-        }
-    
-        // Create an atomic counter for container IDs to ensure uniqueness across threads
-        let c_id_counter = Arc::new(AtomicU16::new(TEMP_C_ID_BASE));
-    
-        let num_quantiles = self.quantiles.num_quantiles; // Capture for closure
-        let sort_cols = self.sort_cols.clone();
-        let policy = policy.clone();
-        let mem_pool = mem_pool.clone();
-    
-        // Step 2: Process each chunk in parallel
-        let runs_and_quantiles: Vec<_> = chunks
-            .into_par_iter()
-            .map(|chunk| {
-                let c_id_counter = c_id_counter.clone();
-    
-                let mut runs = Vec::new();
-                let mut run_quantiles = Vec::new();
-    
-                let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
-                let mut temp_container_key = ContainerKey {
-                    db_id: TEMP_DB_ID,
-                    c_id,
-                };
-    
-                let mut sort_buffer = SortBuffer::new(
-                    &mem_pool,
-                    temp_container_key,
-                    &policy,
-                    sort_cols.clone(),
-                );
-    
-                for tuple in chunk {
-                    if sort_buffer.append(&tuple) {
-                        continue;
-                    } else {
-                        // Process the current buffer
-                        sort_buffer.sort();
-                        let quantiles = sort_buffer.sample_quantiles(num_quantiles);
-                        run_quantiles.push(quantiles);
-    
-                        // Generate the run (sorted chunk) and write it back to disk
-                        let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-                            temp_container_key,
-                            mem_pool.clone(),
-                            SortBufferIter::new(&sort_buffer),
-                        ));
-    
-                        runs.push(output);
-    
-                        // Prepare for next run
-                        sort_buffer.reset();
-    
-                        // Generate a new container key for the next run
-                        c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
-                        temp_container_key = ContainerKey {
-                            db_id: TEMP_DB_ID,
-                            c_id,
-                        };
-                        sort_buffer.set_dest_c_key(temp_container_key);
-    
-                        // Try appending the tuple again
-                        if !sort_buffer.append(&tuple) {
-                            panic!("Record too large to fit in a page");
-                        }
-                    }
-                }
-    
-                // After the loop, process any remaining tuples in the sort_buffer
-                if !sort_buffer.ptrs.is_empty() {
-                    sort_buffer.sort();
-                    let quantiles = sort_buffer.sample_quantiles(num_quantiles);
-                    run_quantiles.push(quantiles);
-    
-                    let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-                        temp_container_key,
-                        mem_pool.clone(),
-                        SortBufferIter::new(&sort_buffer),
-                    ));
-    
-                    runs.push(output);
-                }
-    
-                // Merge the quantiles from runs within this chunk
-                let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
-                for q in run_quantiles {
-                    chunk_quantiles.merge(&q);
-                }
-    
-                (runs, chunk_quantiles)
-            })
-            .collect();
-    
-        // Step 3: Collect the runs and merge quantiles
-        let mut result_buffers = Vec::new();
-        let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
-    
-        for (chunk_runs, quantiles) in runs_and_quantiles {
-            result_buffers.extend(chunk_runs);
-            total_quantiles.merge(&quantiles);
-        }
-        self.quantiles = total_quantiles; // Update the global quantiles
-    
-        Ok(result_buffers)
-    }
-
-    // Reads and sorts concurrently
-    fn run_generation_2(
-        &mut self,
-        policy: &Arc<MemoryPolicy>,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
-        mem_pool: &Arc<M>,
-        dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        let num_threads = 1;
-        const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
-        const TEMP_C_ID_BASE: u16 = 321;    // Magic number for starting container ID
-    
-        // Step 1: Set up channels
-        let (chunk_sender, chunk_receiver) = bounded::<Vec<Tuple>>(num_threads * 2);
-        let (result_sender, result_receiver) = unbounded::<(Vec<Arc<AppendOnlyStore<M>>>, SingleRunQuantiles)>();
-    
-        // Step 2: Create an atomic counter for container IDs
-        let c_id_counter = Arc::new(AtomicU16::new(TEMP_C_ID_BASE));
-    
-        let num_quantiles = self.quantiles.num_quantiles; // Capture for closure
-        let sort_cols = self.sort_cols.clone();
-        let policy = policy.clone();
-        let mem_pool = mem_pool.clone();
-    
-        thread::scope(|s| -> Result<(), ExecError> {
-            // Spawn worker threads
-            for _ in 0..num_threads {
-                let chunk_receiver = chunk_receiver.clone();
-                let result_sender = result_sender.clone();
-                let c_id_counter = c_id_counter.clone();
-                let sort_cols = sort_cols.clone();
-                let policy = policy.clone();
-                let mem_pool = mem_pool.clone();
-    
-                s.spawn(move |_| {
-                    // Worker thread code
-                    while let Ok(chunk) = chunk_receiver.recv() {
-                        // Process the chunk
-                        let mut runs = Vec::new();
-                        let mut run_quantiles = Vec::new();
-    
-                        let mut c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
-                        let mut temp_container_key = ContainerKey {
-                            db_id: TEMP_DB_ID,
-                            c_id,
-                        };
-    
-                        let mut sort_buffer = SortBuffer::new(
-                            &mem_pool,
-                            temp_container_key,
-                            &policy,
-                            sort_cols.clone(),
-                        );
-    
-                        for tuple in chunk {
-                            if sort_buffer.append(&tuple) {
-                                continue;
-                            } else {
-                                // Process the current buffer
-                                sort_buffer.sort();
-                                let quantiles = sort_buffer.sample_quantiles(num_quantiles);
-                                run_quantiles.push(quantiles);
-    
-                                // Generate the run (sorted chunk) and write it back to disk
-                                let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-                                    temp_container_key,
-                                    mem_pool.clone(),
-                                    SortBufferIter::new(&sort_buffer),
-                                ));
-    
-                                runs.push(output);
-    
-                                // Prepare for next run
-                                sort_buffer.reset();
-    
-                                // Generate a new container key for the next run
-                                c_id = c_id_counter.fetch_add(1, Ordering::SeqCst);
-                                temp_container_key = ContainerKey {
-                                    db_id: TEMP_DB_ID,
-                                    c_id,
-                                };
-                                sort_buffer.set_dest_c_key(temp_container_key);
-    
-                                // Try appending the tuple again
-                                if !sort_buffer.append(&tuple) {
-                                    panic!("Record too large to fit in a page");
-                                }
-                            }
-                        }
-    
-                        // After the loop, process any remaining tuples in the sort_buffer
-                        if !sort_buffer.ptrs.is_empty() {
-                            sort_buffer.sort();
-                            let quantiles = sort_buffer.sample_quantiles(num_quantiles);
-                            run_quantiles.push(quantiles);
-    
-                            let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-                                temp_container_key,
-                                mem_pool.clone(),
-                                SortBufferIter::new(&sort_buffer),
-                            ));
-    
-                            runs.push(output);
-                        }
-    
-                        // Merge the quantiles from runs within this chunk
-                        let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
-                        for q in run_quantiles {
-                            chunk_quantiles.merge(&q);
-                        }
-    
-                        // Send the results back
-                        if let Err(e) = result_sender.send((runs, chunk_quantiles)) {
-                            eprintln!("Failed to send results: {:?}", e);
-                            break; // Exit the loop if sending fails
-                        }
-                    }
-                    // `result_sender` will be dropped here
-                });
-            }
-    
-            // Drop the main thread's `result_sender` to allow receiver to terminate
-            drop(result_sender);
-    
-            // Step 4: Producer reads data and sends chunks
-            let chunk_size = 10_000; //xtx need to figure out the size
-            let mut current_chunk = Vec::with_capacity(chunk_size);
-    
-            while let Some(tuple) = self.exec_plan.next(context)? {
-                current_chunk.push(tuple);
-                if current_chunk.len() >= chunk_size {
-                    chunk_sender.send(current_chunk).unwrap();
-                    current_chunk = Vec::with_capacity(chunk_size);
-                }
-            }
-            // Send the last chunk if it's not empty
-            if !current_chunk.is_empty() {
-                chunk_sender.send(current_chunk).unwrap();
-            }
-    
-            // Close the sender to signal workers that no more chunks are coming
-            drop(chunk_sender);
-    
-            // Wait for workers to finish
-            Ok(())
-        }).map_err(|e| {
-            // Handle any panics that occurred in the threads
-            let err_msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                format!("Thread panicked with unknown error: {:?}", e)
-            };
-            ExecError::Pipeline(err_msg)
-        })??;
-    
-        // Step 5: Collect the results
-        let mut result_buffers = Vec::new();
-        let mut total_quantiles = SingleRunQuantiles::new(self.quantiles.num_quantiles);
-    
-        for (chunk_runs, quantiles) in result_receiver.iter() {
-            result_buffers.extend(chunk_runs);
-            total_quantiles.merge(&quantiles);
-        }
-        self.quantiles = total_quantiles; // Update the global quantiles
-    
-        Ok(result_buffers)
-    }
-
-    // Doesn't store in chunks goes straight into sort buffers
-    fn run_generation_3(
-        &mut self,
-        policy: &Arc<MemoryPolicy>,
-        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
-        mem_pool: &Arc<M>,
-        dest_c_key: ContainerKey,
-    ) -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-        use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
-        use crossbeam::scope;
-        use crossbeam::select;
-        use std::sync::{Arc, Mutex};
-    
-        println!("Starting run_generation_3");
-    
-        const TEMP_DB_ID: DatabaseId = 321; // Magic number for temporary database ID
-        let c_id_counter = AtomicU16::new(321);
-    
-        let num_quantiles = self.quantiles.num_quantiles;
-        let sort_cols = self.sort_cols.clone();
-        let policy = Arc::clone(policy);
-        let mem_pool = Arc::clone(mem_pool);
-    
-        // Channels for communication
-        let max_threads = 8;
-        let (buffer_sender, buffer_receiver) = bounded::<SortBuffer<M>>(max_threads * 2);
-        let (result_sender, result_receiver) = unbounded::<(Arc<AppendOnlyStore<M>>, SingleRunQuantiles)>();
-    
-        // Shared quantiles
-        let total_quantiles = Mutex::new(SingleRunQuantiles::new(num_quantiles));
-    
-        // Use a scoped thread to avoid lifetime issues
-        let result_buffers = scope(|s| -> Result<Vec<Arc<AppendOnlyStore<M>>>, ExecError> {
-            println!("Inside crossbeam scope");
-    
-            // Start worker threads
-            for i in 0..max_threads {
-                println!("Spawning worker thread {}", i);
-                let buffer_receiver = buffer_receiver.clone();
-                let result_sender = result_sender.clone();
-                let mem_pool = &mem_pool; // Borrow mem_pool
-                let num_quantiles = num_quantiles; // Copy num_quantiles
-    
-                s.spawn(move |_| {
-                    println!("Worker thread {} started", i);
-                    while let Ok(mut sort_buffer) = buffer_receiver.recv() {
-                        println!("Worker thread {} received a sort buffer", i);
-                        // Process the sort buffer
-                        sort_buffer.sort();
-                        let quantiles = sort_buffer.sample_quantiles(num_quantiles);
-    
-                        let output = Arc::new(AppendOnlyStore::bulk_insert_create(
-                            sort_buffer.dest_c_key,
-                            mem_pool.clone(),
-                            SortBufferIter::new(&sort_buffer),
-                        ));
-    
-                        // Send the result
-                        if let Err(e) = result_sender.send((output, quantiles)) {
-                            eprintln!("Worker thread {} failed to send result: {:?}", i, e);
-                            break;
-                        }
-                    }
-                    println!("Worker thread {} finished", i);
-                });
-            }
-    
-            println!("making it to here");
-    
-            // Main thread reads data and fills sort buffers
-            let mut current_sort_buffer = SortBuffer::new(
-                &mem_pool,
-                ContainerKey::new(TEMP_DB_ID, c_id_counter.fetch_add(1, Ordering::SeqCst)),
-                &policy,
-                sort_cols.clone(),
-            );
-    
-            let mut result_buffers = Vec::new();
-    
-            println!("Starting main loop");
-            loop {
-                select! {
-                    recv(result_receiver) -> res => {
-                        if let Ok((output, quantiles)) = res {
-                            println!("Received result from worker thread");
-                            result_buffers.push(output);
-                            // Merging quantiles
-                            {
-                                let mut total_q = total_quantiles.lock().unwrap();
-                                total_q.merge(&quantiles);
-                            }
-                        } else {
-                            // All senders are dropped; break the loop
-                            println!("All result senders dropped");
-                            break;
-                        }
-                    },
-                    default => {
-                        // Read the next tuple
-                        println!("Reading next tuple");
-                        match self.exec_plan.next(context)? {
-                            Some(tuple) => {
-                                println!("Received a tuple");
-                                if current_sort_buffer.append(&tuple) {
-                                    // Continue appending
-                                } else {
-                                    // Sort buffer is full, send it to worker threads
-                                    let full_sort_buffer = std::mem::replace(
-                                        &mut current_sort_buffer,
-                                        SortBuffer::new(
-                                            &mem_pool,
-                                            ContainerKey::new(TEMP_DB_ID, c_id_counter.fetch_add(1, Ordering::SeqCst)),
-                                            &policy,
-                                            sort_cols.clone(),
-                                        ),
-                                    );
-    
-                                    println!("Sort buffer is full; sending to worker threads");
-    
-                                    if let Err(e) = buffer_sender.send(full_sort_buffer) {
-                                        eprintln!("Failed to send sort buffer: {:?}", e);
-                                        break;
-                                    }
-                                }
-                            },
-                            None => {
-                                // No more tuples; send remaining buffer and break
-                                println!("No more tuples");
-                                if !current_sort_buffer.ptrs.is_empty() {
-                                    println!("Sending remaining sort buffer to worker threads");
-                                    if let Err(e) = buffer_sender.send(current_sort_buffer) {
-                                        eprintln!("Failed to send sort buffer: {:?}", e);
-                                    }
-                                }
-                                drop(buffer_sender); // Close the sender
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-    
-            println!("making it to here 2");
-    
-            // Process remaining results
-            for res in result_receiver {
-                println!("Processing remaining results");
-                let (output, quantiles) = res;
-                result_buffers.push(output);
-                // Merging quantiles
-                {
-                    let mut total_q = total_quantiles.lock().unwrap();
-                    total_q.merge(&quantiles);
-                }
-            }
-    
-            // Update the quantiles
-            self.quantiles = total_quantiles.into_inner().unwrap();
-    
-            println!("I make it here 1");
-            // Return the result_buffers without wrapping in Ok(...)
-            Ok(result_buffers)
-            // The scope ends here, ensuring all threads have completed
-        })
-        .map_err(|e| {
-            // Convert the panic payload (e) into an ExecError
-            eprintln!("Scope panicked with error: {:?}", e);
-            if let Some(s) = e.downcast_ref::<&str>() {
-                ExecError::Pipeline(s.to_string())
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                ExecError::Pipeline(s.clone())
-            } else {
-                ExecError::Pipeline("Thread panicked with unknown error".to_string())
-            }
-        })??; // Use double `?` to unwrap both Results
-    
-        println!("I make it here ");
-        Ok(result_buffers)
-    }
-
-
     fn run_generation_4(
         &mut self,
         policy: &Arc<MemoryPolicy>,
@@ -1182,6 +699,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // Estimate the total number of tuples
         // let total_tuples = self.exec_plan.estimate_num_tuples(context);
         let total_tuples = 6005720;
+        // let total_tuples = 655944;
         println!("Total tuples estimated: {}", total_tuples);
     
         // Decide on the number of threads
@@ -1207,7 +725,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let plans: Vec<_> = ranges
             .iter()
             .map(|&(start, end)| {
-                println!("Creating plan for range {} - {}", start, end);
+                // println!("Creating plan for range {} - {}", start, end);
                 self.exec_plan.clone_with_range(start, end)
             })
             .collect::<Vec<_>>();
@@ -1297,13 +815,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 }
     
                let thread_duration = thread_start_time.elapsed();
-                println!(
-                    "Thread {} processed {} tuples, generated {} runs in {:?}",
-                    thread_index,
-                    tuples_processed,
-                    runs.len(),
-                    thread_duration
-                ); 
+                // println!(
+                //     "Thread {} processed {} tuples, generated {} runs in {:?}",
+                //     thread_index,
+                //     tuples_processed,
+                //     runs.len(),
+                //     thread_duration
+                // ); 
                 // Merge quantiles within this thread
                 let mut chunk_quantiles = SingleRunQuantiles::new(num_quantiles);
                 for q in run_quantiles {
@@ -1339,31 +857,52 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
-        println!("entering run merge ");
+        println!("Entering run_merge");
+
+        // Start timer for the entire run_merge function
+        let overall_start = Instant::now();
+
         let result = match policy.as_ref() {
-            MemoryPolicy::FixedSizeLimit(working_mem) => {
+            MemoryPolicy::FixedSizeLimit(_working_mem) => {
+                // Start timer for quantile retrieval
+                let quantile_start = Instant::now();
+
                 // Get global quantiles from previously computed quantiles
-                // println!("Global quantiles:"); xtx
-                // println!("{}", self.quantiles);
+                println!("Global quantiles:");
+                println!("{}", self.quantiles);
                 let global_quantiles = self.quantiles.get_quantiles();
 
-                // If quantile is [a, b, c, d], there are 3 threads each responsible for [a, b), [b, c), [c, d].
-                // Note that last thread is responsible for [c, d] inclusive.
+                let quantile_duration = quantile_start.elapsed();
+                println!(
+                    "Retrieved quantiles in {:.4} seconds",
+                    quantile_duration.as_secs_f64()
+                );
+
+                // Print the initial quantiles
+                println!("Initial Quantiles:");
+                for (idx, q) in global_quantiles.iter().enumerate() {
+                    println!("Quantile {}: {:?}", idx, q);
+                }
+
+                // Determine the number of threads based on quantiles
                 let num_threads = global_quantiles.len() - 1;
-                println!("num_threads = {}", num_threads);
-                // println!("global quantiles {:?}", global_quantiles);
-                let mut merged_buffers = (0..num_threads)
+                println!("Number of threads = {}", num_threads);
+
+                // Start timer for parallel merging
+                let parallel_start = Instant::now();
+
+                // Parallel merging using Rayon
+                let merged_buffers = (0..num_threads)
                     .into_par_iter()
                     .map(|i| {
+                        // Start timer for this thread
+                        let thread_start = Instant::now();
+
                         // Define the regions for each thread
                         let lower = global_quantiles[i].clone(); // Inclusive
                         let upper = global_quantiles[i + 1].clone(); // Exclusive except for the last one
                         let upper = if i == num_threads - 1 {
-                            // For the last thread, the upper bound is inclusive.
-                            // A hack to make the last thread inclusive is to add 1 to the last byte.
-                            // We need to be careful about overflow. If the last byte is 255, then it will increment
-                            // the second last byte and set the last byte to 0. This continues until it finds a byte that
-                            // does not overflow.
+                            // Adjust upper bound for the last thread to be inclusive
                             let mut upper = upper.clone();
                             let mut carry = 1;
                             for byte in upper.iter_mut().rev() {
@@ -1383,8 +922,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         } else {
                             upper
                         };
-                        // println!("Thread {} Merging range [{:?}, {:?})", i, lower, upper); xtx
 
+                        // Filter relevant segments from each run based on the key range
                         let run_segments = runs
                             .iter()
                             .map(|r| {
@@ -1400,48 +939,361 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             })
                             .collect::<Vec<_>>();
 
+                        // Merge the filtered segments
                         let merge_iter = MergeIter::new(run_segments);
 
+                        // Define a temporary container key for the merged data
                         let temp_container_key = ContainerKey {
                             db_id: dest_c_key.db_id,
                             c_id: dest_c_key.c_id + i as u16,
                         };
 
-                        (
+                        // Initialize a tuple counter
+                        let mut tuple_count = 0;
+
+                        // Wrap the iterator to count tuples
+                        let counting_merge_iter = merge_iter.inspect(|_| tuple_count += 1);
+
+                        // Create an AppendOnlyStore with the merged data
+                        let merged_store = Arc::new(AppendOnlyStore::bulk_insert_create(
+                            temp_container_key,
+                            mem_pool.clone(),
+                            counting_merge_iter,
+                        ));
+
+                        // Stop timer and calculate elapsed time
+                        let thread_duration = thread_start.elapsed();
+                        println!(
+                            "Thread {} completed in {:.4} seconds with {} tuples",
                             i,
-                            Arc::new(AppendOnlyStore::bulk_insert_create(
-                                temp_container_key,
-                                mem_pool.clone(),
-                                merge_iter,
-                            )),
-                        )
+                            thread_duration.as_secs_f64(),
+                            tuple_count
+                        );
+
+                        (i, merged_store, tuple_count)
                     })
                     .collect::<Vec<_>>();
 
+                // Stop timer for parallel merging
+                let parallel_duration = parallel_start.elapsed();
+                println!(
+                    "Parallel merging completed in {:.4} seconds",
+                    parallel_duration.as_secs_f64()
+                );
+
+                // Start timer for sorting merged buffers
+                let sorting_start = Instant::now();
+
                 // Sort the merged buffers by the thread id
-                merged_buffers.sort_by_key(|(i, _)| *i);
+                let mut sorted_buffers = merged_buffers.clone();
+                sorted_buffers.sort_by_key(|(i, _, _)| *i);
 
                 // Chain all the merged buffers into one iterator
                 let empty_iter =
                     Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>;
-                let chained_iter = merged_buffers
+                let chained_iter = sorted_buffers
                     .into_iter()
-                    .fold(empty_iter, |acc, (_, iter)| {
+                    .fold(empty_iter, |acc, (_, iter, _)| {
                         Box::new(acc.chain(iter.scan()))
                     });
 
-                Arc::new(AppendOnlyStore::bulk_insert_create(
+                // Stop timer for sorting and chaining
+                let sorting_duration = sorting_start.elapsed();
+                println!(
+                    "Sorting and chaining completed in {:.4} seconds",
+                    sorting_duration.as_secs_f64()
+                );
+
+                // Start timer for final bulk insert
+                let final_insert_start = Instant::now();
+
+                // Create the final merged AppendOnlyStore
+                let final_store = Arc::new(AppendOnlyStore::bulk_insert_create(
                     dest_c_key,
                     mem_pool.clone(),
                     chained_iter,
-                ))
+                ));
+
+                // Stop timer for final bulk insert
+                let final_insert_duration = final_insert_start.elapsed();
+                println!(
+                    "Final bulk insert completed in {:.4} seconds",
+                    final_insert_duration.as_secs_f64()
+                );
+
+                // Optionally, print total tuples merged across all threads
+                let total_tuples: usize = merged_buffers.iter().map(|(_, _, count)| *count).sum();
+                println!("Total tuples merged across all threads: {}", total_tuples);
+
+                // Recompute actual quantiles based on sorted data in final_store
+                println!("Recomputing actual quantiles based on sorted data...");
+
+                // Define the number of quantiles (same as initial quantiles)
+                let num_quantiles = global_quantiles.len();
+
+                // Compute actual quantiles using the corrected method call and iterator
+                let actual_quantiles = self.compute_actual_quantiles(&final_store, num_quantiles);
+
+                // Print actual quantiles
+                println!("Actual Quantiles:");
+                for (idx, q) in actual_quantiles.iter().enumerate() {
+                    println!("Actual Quantile {}: {:?}", idx + 1, q);
+                }
+
+                final_store
             }
-            MemoryPolicy::Unbounded => self.merge_step(runs, mem_pool, dest_c_key),
-            MemoryPolicy::Proportional(rate) => {
+            MemoryPolicy::Unbounded => {
+                // Start timer for unbounded merge_step
+                let unbounded_start = Instant::now();
+
+                // Remove the `?` operator and handle the result directly
+                let merged_store = self.merge_step(runs, mem_pool, dest_c_key);
+
+                let unbounded_duration = unbounded_start.elapsed();
+                println!(
+                    "Unbounded merge_step completed in {:.4} seconds",
+                    unbounded_duration.as_secs_f64()
+                );
+
+                // Wrap the merged_store in Ok since run_merge expects a Result
+                merged_store
+            }
+            MemoryPolicy::Proportional(_rate) => {
                 unimplemented!("Proportional memory policy is not implemented yet");
             }
         };
+
+        // Stop timer for the entire run_merge function
+        let overall_duration = overall_start.elapsed();
+        println!(
+            "Run merge took: {:.2} seconds",
+            overall_duration.as_secs_f64()
+        );
+
         Ok(result)
+    }
+
+
+    fn run_merge_2(
+        &mut self,
+        policy: &Arc<MemoryPolicy>,
+        runs: Vec<Arc<AppendOnlyStore<M>>>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+    ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
+        println!("Entering run_merge_2");
+
+        // Start timer for the entire run_merge_2 function
+        let overall_start = Instant::now();
+
+        let result = match policy.as_ref() {
+            MemoryPolicy::FixedSizeLimit(_working_mem) => {
+                // Start timer for quantile retrieval
+                let quantile_start = Instant::now();
+
+                // Get global quantiles from previously computed quantiles
+                println!("Global quantiles:");
+                println!("{}", self.quantiles);
+                let global_quantiles = self.quantiles.get_quantiles();
+
+                let quantile_duration = quantile_start.elapsed();
+                println!(
+                    "Retrieved quantiles in {:.4} seconds",
+                    quantile_duration.as_secs_f64()
+                );
+
+                // Print the initial quantiles
+                println!("Initial Quantiles:");
+                for (idx, q) in global_quantiles.iter().enumerate() {
+                    println!("Quantile {}: {:?}", idx, q);
+                }
+
+                // Determine the number of partitions based on quantiles
+                let num_partitions = global_quantiles.len() - 1;
+                println!("Number of partitions = {}", num_partitions);
+
+                // Start timer for sequential merging
+                let merge_start = Instant::now();
+
+                // Create a vector to hold merged iterators for each partition
+                let mut merged_iters = Vec::new();
+
+                for i in 0..num_partitions {
+                    // Start timer for this partition
+                    let partition_start = Instant::now();
+
+                    // Define the regions for each partition
+                    let lower = global_quantiles[i].clone(); // Inclusive
+                    let upper = global_quantiles[i + 1].clone(); // Exclusive except for the last one
+
+                    // Adjust upper bound for the last partition to be inclusive
+                    let upper = if i == num_partitions - 1 {
+                        let mut upper = upper.clone();
+                        let mut carry = 1;
+                        for byte in upper.iter_mut().rev() {
+                            let (new_byte, new_carry) = byte.overflowing_add(carry);
+                            *byte = new_byte;
+                            if !new_carry {
+                                carry = 0;
+                                break;
+                            }
+                            carry = 1;
+                        }
+                        if carry != 0 {
+                            // Push a new byte to the front of the vec
+                            upper.insert(0, 1);
+                        }
+                        upper
+                    } else {
+                        upper
+                    };
+
+                    // Filter relevant segments from each run based on the key range
+                    let run_segments = runs
+                        .iter()
+                        .map(|r| {
+                            let lower = lower.clone();
+                            let upper = upper.clone();
+                            r.scan().filter_map(move |(key, value)| {
+                                if key >= lower && key < upper {
+                                    Some((key.to_vec(), value.to_vec()))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    // Merge the filtered segments
+                    let merge_iter = MergeIter::new(run_segments);
+
+                    // Collect merged iterators
+                    merged_iters.push(merge_iter);
+
+                    // Stop timer for this partition
+                    let partition_duration = partition_start.elapsed();
+                    println!(
+                        "Partition {} completed in {:.4} seconds",
+                        i,
+                        partition_duration.as_secs_f64()
+                    );
+                }
+
+                // Chain all the merged iterators into one iterator
+                let chained_iter = merged_iters
+                    .into_iter()
+                    .flat_map(|iter| iter)
+                    .collect::<Vec<_>>()
+                    .into_iter();
+
+                // Start timer for final bulk insert
+                let final_insert_start = Instant::now();
+
+                // Create the final merged AppendOnlyStore
+                let final_store = Arc::new(AppendOnlyStore::bulk_insert_create(
+                    dest_c_key,
+                    mem_pool.clone(),
+                    chained_iter,
+                ));
+
+                // Stop timer for final bulk insert
+                let final_insert_duration = final_insert_start.elapsed();
+                println!(
+                    "Final bulk insert completed in {:.4} seconds",
+                    final_insert_duration.as_secs_f64()
+                );
+
+                // Recompute actual quantiles based on sorted data in final_store
+                println!("Recomputing actual quantiles based on sorted data...");
+
+                // Define the number of quantiles (same as initial quantiles)
+                let num_quantiles = global_quantiles.len();
+
+                // Compute actual quantiles using the corrected method call and iterator
+                let actual_quantiles = self.compute_actual_quantiles(&final_store, num_quantiles);
+
+                // Print actual quantiles
+                println!("Actual Quantiles:");
+                for (idx, q) in actual_quantiles.iter().enumerate() {
+                    println!("Actual Quantile {}: {:?}", idx + 1, q);
+                }
+
+                final_store
+            }
+            MemoryPolicy::Unbounded => {
+                // Start timer for unbounded merge_step
+                let unbounded_start = Instant::now();
+
+                // Use existing merge_step function
+                let merged_store = self.merge_step(runs, mem_pool, dest_c_key);
+
+                let unbounded_duration = unbounded_start.elapsed();
+                println!(
+                    "Unbounded merge_step completed in {:.4} seconds",
+                    unbounded_duration.as_secs_f64()
+                );
+
+                merged_store
+            }
+            MemoryPolicy::Proportional(_rate) => {
+                unimplemented!("Proportional memory policy is not implemented yet");
+            }
+        };
+
+        // Stop timer for the entire run_merge_2 function
+        let overall_duration = overall_start.elapsed();
+        println!(
+            "run_merge_2 took: {:.2} seconds",
+            overall_duration.as_secs_f64()
+        );
+
+        Ok(result)
+    }
+
+    fn compute_actual_quantiles(
+        &self,
+        final_store: &Arc<AppendOnlyStore<M>>,
+        num_quantiles: usize,
+    ) -> Vec<Vec<u8>> {
+        // Step 1: Count the total number of tuples
+        let total_tuples = final_store.scan().count();
+    
+        if total_tuples == 0 {
+            println!("No tuples to compute quantiles.");
+            return Vec::new();
+        }
+    
+        // Step 2: Determine the indices for each quantile
+        let mut quantile_indices = Vec::new();
+        for i in 1..num_quantiles {
+            let idx = (i * total_tuples) / num_quantiles;
+            quantile_indices.push(idx);
+        }
+    
+        // Step 3: Traverse the final_store and capture keys at quantile indices
+        let mut actual_quantiles = Vec::new();
+        let mut current_index = 0;
+        let mut q = 0;
+    
+        for (key, _) in final_store.scan() {
+            if q >= quantile_indices.len() {
+                break;
+            }
+            if current_index == quantile_indices[q] {
+                actual_quantiles.push(key.clone());
+                q += 1;
+            }
+            current_index += 1;
+        }
+    
+        // Handle the edge case where last quantile is the last element
+        if actual_quantiles.len() < num_quantiles - 1 && total_tuples > 0 {
+            if let Some((last_key, _)) = final_store.scan().last() {
+                actual_quantiles.push(last_key.clone());
+            }
+        }
+    
+        actual_quantiles
     }
 
     fn merge_step(
