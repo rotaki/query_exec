@@ -11,6 +11,8 @@ use crate::{
 
 use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
+use chrono::{NaiveDateTime, DateTime, Utc};
+
 
 fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     let mut val_bits = val.to_bits();
@@ -161,6 +163,18 @@ impl Tuple {
                 Field::String(val) => {
                     key.extend(val.clone().unwrap().as_bytes());
                 }
+                Field::Timestamp(timestamp, timezone) => {
+                    if let Some(ts) = timestamp {
+                        key.extend(&ts.to_be_bytes());
+                    } else {
+                        key.extend(&0u64.to_be_bytes());
+                    }
+                    if let Some(tz) = timezone {
+                        key.extend(&tz.to_be_bytes());
+                    } else {
+                        key.extend(&0u64.to_be_bytes());
+                    }
+                }
                 Field::Date(val) => {
                     let val = val.unwrap().num_days_from_ce();
                     key.extend(&val.to_be_bytes());
@@ -240,6 +254,23 @@ impl Tuple {
                             } else {
                                 key.push(!byte);
                             }
+                        }
+                    } else {
+                        key.push(null_prefix);
+                    }
+                }
+                Field::Timestamp(timestamp, timezone) => {
+                    if let (Some(ts), Some(tz)) = (timestamp, timezone) {
+                        key.push(non_null_prefix);
+                        // Serialize Timestamp
+                        let ts_bytes = ts.to_be_bytes();
+                        for byte in &ts_bytes {
+                            key.push(if *asc { *byte } else { !byte });
+                        }
+                        // Serialize Timezone
+                        let tz_bytes = tz.to_be_bytes();
+                        for byte in &tz_bytes {
+                            key.push(if *asc { *byte } else { !byte });
                         }
                     } else {
                         key.push(null_prefix);
@@ -325,6 +356,7 @@ pub enum Field {
     Int(Option<i64>),
     Float(Option<f64>), // f64 should not contain f64::NAN.
     String(Option<String>),
+    Timestamp(Option<u64>, Option<u64>), //xtx update to include timezone info
     Date(Option<NaiveDate>),
     Months(Option<u32>),
     Days(Option<u64>),
@@ -565,6 +597,7 @@ impl Hash for Field {
                 }
             }
             Field::String(val) => val.hash(state),
+            Field::Timestamp(val, _) => val.hash(state), //xtx idk if this is right
             Field::Date(val) => val.hash(state),
             Field::Months(val) => val.hash(state),
             Field::Days(val) => val.hash(state),
@@ -579,6 +612,7 @@ impl Field {
             DataType::Int => Field::Int(None),
             DataType::Float => Field::Float(None),
             DataType::String => Field::String(None),
+            DataType::Timestamp => Field::Timestamp(None, None),
             DataType::Date => Field::Date(None),
             DataType::Months => Field::Months(None),
             DataType::Days => Field::Days(None),
@@ -595,6 +629,7 @@ impl Field {
             Field::Int(val) => Field::Int(val.take()),
             Field::Float(val) => Field::Float(val.take()),
             Field::String(val) => Field::String(val.take()),
+            Field::Timestamp(val, val2) => Field::Timestamp(val.take(), val2.take()),
             Field::Date(val) => Field::Date(val.take()),
             Field::Months(val) => Field::Months(val.take()),
             Field::Days(val) => Field::Days(val.take()),
@@ -604,12 +639,14 @@ impl Field {
     pub fn from_str(column_def: &ColumnDef, field: &str) -> Result<Self, String> {
         let data_type = column_def.data_type();
         let is_nullable = column_def.is_nullable();
-        if is_nullable && (field == "NULL" || field == "null") {
+        let trimmed_field = field.trim();
+        if is_nullable && (trimmed_field.is_empty() || field == "NULL" || field == "null") {
             match data_type {
                 DataType::Boolean => Ok(Field::Boolean(None)),
                 DataType::Int => Ok(Field::Int(None)),
                 DataType::Float => Ok(Field::Float(None)),
                 DataType::String => Ok(Field::String(None)),
+                DataType::Timestamp => Ok(Field::Timestamp(None, None)),
                 DataType::Date => Ok(Field::Date(None)),
                 DataType::Months => Ok(Field::Months(None)),
                 DataType::Days => Ok(Field::Days(None)),
@@ -630,6 +667,20 @@ impl Field {
                     Ok(Field::Float(Some(val)))
                 }
                 DataType::String => Ok(Field::String(Some(field.to_string()))),
+                DataType::Timestamp => {
+                    // Parsing the datetime string "2024-01-01 00:57:55"
+                    let naive_dt = NaiveDateTime::parse_from_str(field, "%Y-%m-%d %H:%M:%S")
+                        .map_err(|e| format!("Invalid Timestamp format: '{}'. Error: {}", field, e))?;
+                    
+                    // Convert to UNIX timestamp
+                    let datetime_utc: DateTime<Utc> = DateTime::<Utc>::from_utc(naive_dt, Utc);
+                    let timestamp = datetime_utc.timestamp() as u64;
+
+                    // Assign default timezone offset (e.g., UTC = 0)
+                    let timezone = 0u64;
+
+                    Ok(Field::Timestamp(Some(timestamp), Some(timezone)))
+                }
                 DataType::Date => {
                     // Date is stored as yyyy-mm-dd
                     let val = chrono::NaiveDate::parse_from_str(field, "%Y-%m-%d")
@@ -695,6 +746,39 @@ impl Field {
             (Field::Days(val), DataType::Days) => Ok(Field::Days(*val)),
             (Field::Int(val), DataType::Float) => Ok(Field::Float(val.map(|v| v as f64))),
             (Field::Float(val), DataType::Int) => Ok(Field::Int(val.map(|v| v as i64))),
+            (Field::Timestamp(ts, tz), DataType::Timestamp) => {
+                Ok(Field::Timestamp(*ts, *tz))
+            }
+            (Field::Timestamp(ts, tz), DataType::String) => {
+                if let (Some(ts_val), Some(tz_val)) = (ts, tz) {
+                    let datetime = chrono::NaiveDateTime::from_timestamp(*ts_val as i64, 0);
+                    let formatted = format!("{}+{:04}", datetime, tz_val);
+                    Ok(Field::String(Some(formatted)))
+                } else {
+                    Ok(Field::String(None))
+                }
+            }
+            (Field::String(val), DataType::Timestamp) => {
+                if let Some(v) = val {
+                    // Expecting format "timestamp,timezone"
+                    let parts: Vec<&str> = v.split('+').collect();
+                    if parts.len() != 2 {
+                        return Err(ExecError::FieldOp(format!(
+                            "Invalid Timestamp string format: '{}'. Expected 'timestamp+timezone'.",
+                            v
+                        )));
+                    }
+                    let timestamp = parts[0]
+                        .parse::<u64>()
+                        .map_err(|e| ExecError::FieldOp(format!("Invalid timestamp value: {}", e)))?;
+                    let timezone = parts[1]
+                        .parse::<u64>()
+                        .map_err(|e| ExecError::FieldOp(format!("Invalid timezone value: {}", e)))?;
+                    Ok(Field::Timestamp(Some(timestamp), Some(timezone)))
+                } else {
+                    Ok(Field::Timestamp(None, None))
+                }
+            }
             (Field::String(val), DataType::Int) => {
                 let val = val.as_ref().and_then(|v| v.parse::<i64>().ok());
                 Ok(Field::Int(val))
@@ -741,6 +825,7 @@ impl Field {
             (_, DataType::Date) => Ok(Field::Date(None)),
             (_, DataType::Months) => Ok(Field::Months(None)),
             (_, DataType::Days) => Ok(Field::Days(None)),
+            (_, DataType::Timestamp) => Ok(Field::Timestamp(None, None)),
             (_, DataType::Unknown) => Err(ExecError::FieldOp("Unknown data type".to_string())),
         }
     }
@@ -778,6 +863,13 @@ impl std::fmt::Display for Field {
             Field::String(val) => match val {
                 Some(val) => write!(f, "{}", val),
                 None => write!(f, "NULL"),
+            },
+            Field::Timestamp(ts, tz) => match (ts, tz) {
+                (Some(ts_val), Some(tz_val)) => {
+                    // Format as "timestamp+timezone"
+                    write!(f, "{}+{}", ts_val, tz_val)
+                }
+                (None, _) | (_, None) => write!(f, "NULL"),
             },
             Field::Date(val) => match val {
                 Some(val) => {
@@ -1043,6 +1135,7 @@ impl IsNull for Field {
             Field::Int(val) => val.is_none(),
             Field::Float(val) => val.is_none(),
             Field::String(val) => val.is_none(),
+            Field::Timestamp(ts, tz) => ts.is_none() || tz.is_none(),
             Field::Date(val) => val.is_none(),
             Field::Months(val) => val.is_none(),
             Field::Days(val) => val.is_none(),

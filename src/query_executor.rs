@@ -145,6 +145,7 @@ fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorErr
                         sqlparser::ast::DataType::Char(_) => DataType::String,
                         sqlparser::ast::DataType::Varchar(_) => DataType::String,
                         sqlparser::ast::DataType::Date => DataType::Date,
+                        sqlparser::ast::DataType::Timestamp(_, _) => DataType::Timestamp,
                         other => {
                             return Err(QueryExecutorError::InvalidSqlString(
                                 ParserError::ParserError(format!(
