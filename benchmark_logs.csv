@@ -1,0 +1,8 @@
+LogPrefix,Engine,Iteration,Phase,OperationType,CPU%,Memory(MB),Runtime(s)
+query_5,duckdb,0,Start,execute_query_5,0.0,33.40625,
+query_5,duckdb,0,Start,execute_query_5,0.0,38.734375,
+query_5,duckdb,0,Start,execute_query_5,0.0,38.765625,
+query_5,duckdb,0,Start,execute_query_5,0.0,38.875,
+one_partition,duckdb,0,Start,sum_of_total_amount,0.0,32.625,
+one_partition,duckdb,0,Start,sum_of_total_amount,0.0,32.609375,
+one_partition,duckdb,0,Start,sum_of_total_amount,0.0,32.84375,

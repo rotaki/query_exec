@@ -15,16 +15,16 @@ use query_exec::{
 #[clap(
     name = "Query Benchmark",
     version = "1.0",
-    author = "Your Name",
+    author = "C",
     about = "Benchmarking query_exec by executing SQL queries."
 )]
 pub struct BenchmarkOpt {
     /// Buffer pool size (number of frames)
-    #[clap(short = 'b', long = "buffer-pool-size", default_value = "524288")]
+    #[clap(short = 'b', long = "buffer-pool-size", default_value = "10000")]
     pub buffer_pool_size: usize,
 
     /// Memory size per operator
-    #[clap(short = 'm', long = "memory-size", default_value = "131072")]
+    #[clap(short = 'm', long = "memory-size", default_value = "100")]
     pub memory_size_per_operator: usize,
 
     /// Number of iterations for the benchmark
@@ -36,7 +36,7 @@ pub struct BenchmarkOpt {
     pub queries: Vec<u32>,
 
     /// Path to buffer pool directory
-    #[clap(short = 'p', long = "path", default_value = "bp-dir-tpch-sf-1")]
+    #[clap(short = 'p', long = "path", default_value = "bp-dir-yellow_tripdata_2024-01")]
     pub path: String,
 }
 
@@ -58,11 +58,11 @@ fn run_query(
 
     let storage = Arc::new(OnDiskStorage::load(&bp));
 
-    let (db_id, catalog) = load_db(&storage, "TPCH")
+    let (db_id, catalog) = load_db(&storage, "data")
         .map_err(|e| format!("Failed to load DB: {:?}", e))?;
 
     // Read SQL query
-    let query_path = format!("tpch/queries/q{}.sql", query_id);
+    let query_path = format!("data/queries/q{}.sql", query_id);
     let sql_string = std::fs::read_to_string(&query_path)
         .map_err(|e| format!("Failed to read SQL file {}: {}", query_path, e))?;
 

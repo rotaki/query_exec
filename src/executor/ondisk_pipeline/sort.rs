@@ -1102,9 +1102,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 // Start timer for quantile retrieval
                 let quantile_start = Instant::now();
 
-                // Get global quantiles from previously computed quantiles
-                println!("Global quantiles:");
-                println!("{}", self.quantiles);
                 let global_quantiles = self.quantiles.get_quantiles();
 
 
@@ -1373,9 +1370,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 // Start timer for quantile retrieval
                 let quantile_start = Instant::now();
 
-                // Get global quantiles from previously computed quantiles
-                println!("Global quantiles:");
-                println!("{}", self.quantiles);
                 let global_quantiles = self.quantiles.get_quantiles();
 
                 let quantile_duration = quantile_start.elapsed();
@@ -1550,9 +1544,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 // Start timer for quantile retrieval
                 let quantile_start = Instant::now();
     
-                // Get global quantiles from previously computed quantiles
-                println!("Global quantiles:");
-                println!("{}", self.quantiles);
                 let global_quantiles = self.quantiles.get_quantiles();
     
                 let quantile_duration = quantile_start.elapsed();
@@ -1606,19 +1597,11 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             upper
                         };
     
-                        let run_segment_start  = Instant::now();
                         // Filter relevant segments from each run based on the key range
                         let run_segments = runs
                             .iter()
                             .map(|r| r.scan_range(&lower, &upper))
                             .collect::<Vec<_>>();
-
-                        let run_segment_dureation = run_segment_start.elapsed();
-                        println!(
-                            "Thread {} completed run segment in {:.4} seconds with",
-                            i,
-                            run_segment_dureation.as_secs_f64()
-                        );
     
                         // Merge the filtered segments
                         let merge_iter = MergeIter::new(run_segments);

@@ -32,13 +32,14 @@ def duckdb_in_memory_operation_one_partition(nums: int):
         
         start_time = time.time()
         file_name = "../data/yellow_tripdata_2024-01.csv"
-        sql_query = "CREATE OR REPLACE VIEW parquet_table AS SELECT * FROM read_csv('{}')".format(file_name)
+        sql_query = "SELECT * FROM read_csv('{}') ORDER BY passenger_count ASC, trip_distance DESC;".format(file_name)
 
         
         # Execute the query
         conn.execute(sql_query)
-        result = conn.execute("SELECT VendorID, SUM(total_amount) AS total_amount FROM parquet_table GROUP BY VendorID").fetchall()
-        print(result)
+
+        # result = conn.execute("SELECT VendorID, SUM(total_amount) AS total_amount FROM parquet_table GROUP BY VendorID").fetchall()
+        # print(result)
         
         end_time = time.time()
         
