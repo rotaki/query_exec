@@ -17,6 +17,7 @@ use crate::{
     log_trace,
     tuple::{FromBool, IsNull, Tuple},
     ColumnId, Field,
+    quantile_lib::QuantileMethod
 };
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
@@ -45,6 +46,28 @@ impl<T: TxnStorageTrait> Executor<T> for VolcanoIterator<T> {
     }
 
     fn execute(mut self, txn: &T::TxnHandle) -> Result<Arc<Self::Buffer>, ExecError> {
+        let results = Arc::new(ResultBuffer::new());
+        loop {
+            log_trace!("------------ VolcanoIterator::next ------------");
+            match self.next(txn)? {
+                Some((_, tuple)) => {
+                    results.push(tuple);
+                }
+                None => {
+                    return Ok(results);
+                }
+            }
+        }
+    }
+
+    // xtx temp
+    fn quantile_generation_execute(mut self, txn: &T::TxnHandle,data_source: &str,
+        query_id: u8,
+        method: QuantileMethod,
+        num_quantiles_per_run: usize,
+        estimated_store_json: &str,
+        actual_store_json: &str,
+        evaluation_json: &str) -> Result<Arc<Self::Buffer>, ExecError> {
         let results = Arc::new(ResultBuffer::new());
         loop {
             log_trace!("------------ VolcanoIterator::next ------------");

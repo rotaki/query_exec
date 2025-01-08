@@ -1960,7 +1960,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     /// Generates runs, computes "estimated" run-level quantiles,
     /// checks/creates "actual" quantiles from a fully merged store,
     /// then evaluates the difference and writes out results as JSON.
-    pub fn quantile_generation_execution(
+    pub fn quantile_generation_execute(
         &mut self,
         context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
         policy: &Arc<MemoryPolicy>,
@@ -1968,22 +1968,24 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
         data_source: &str,
         query_id: u8,
+        method: QuantileMethod,
         num_quantiles_per_run: usize,
         estimated_store_json: &str,
         actual_store_json: &str,
         evaluation_json: &str,
-    ) -> Result<(), ExecError> {
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // 1. Run Generation
         let runs = self.run_generation_5(policy, context, mem_pool, dest_c_key)?;
     
         // 2. Call estimate_quantiles from quantile_lib
-        let estimated_quantiles = estimate_quantiles(&runs, num_quantiles_per_run);
+        let estimated_quantiles = estimate_quantiles(&runs, num_quantiles_per_run, method);
     
         // 3. Store estimated quantiles
         write_quantiles_to_json(
             &estimated_quantiles,
             data_source,
             query_id,
+            method,
             estimated_store_json,
         )?;
     
@@ -1995,6 +1997,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 &actual_quantiles,
                 data_source,
                 query_id, 
+                QuantileMethod::Actual,
                 actual_store_json,
             )?;
         }
@@ -2012,10 +2015,11 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             &actual_quantiles,
             data_source,
             query_id,
+            method,
             evaluation_json,
         )?;
     
-        Ok(())
+        self.execute(context, policy, mem_pool, dest_c_key)
     }
 }
 

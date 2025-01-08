@@ -24,6 +24,7 @@ use crate::{
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, Tuple},
     ColumnId, Field,
+    quantile_lib::QuantileMethod,
 };
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
@@ -1235,6 +1236,50 @@ impl<T: TxnStorageTrait, M: MemPool> BlockingOp<T, M> {
             }
         }
     }
+
+    pub fn quantile_generation_execute(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
+        policy: &Arc<MemoryPolicy>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        data_source: &str,
+        query_id: u8,
+        method: QuantileMethod,
+        num_quantiles_per_run: usize,
+        estimated_store_json: &str,
+        actual_store_json: &str,
+        evaluation_json: &str,
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
+        match self {
+            BlockingOp::Dummy(plan) => {
+                log_debug!("Dummy blocking op");
+                let output = Arc::new(AppendOnlyStore::new(dest_c_key, mem_pool.clone()));
+                while let Some(tuple) = plan.next(context)? {
+                    output.append(&[], &tuple.to_bytes())?
+                }
+                Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(output)))
+            }
+            BlockingOp::OnDiskSort(sort) => sort.quantile_generation_execute(
+                context, 
+                policy, 
+                mem_pool, 
+                dest_c_key,
+                data_source,
+                query_id,
+                method,
+                num_quantiles_per_run,
+                estimated_store_json,
+                actual_store_json,
+                evaluation_json),
+            BlockingOp::OnDiskHashTableCreation(creation) => {
+                creation.execute(context, policy, mem_pool, dest_c_key)
+            }
+            BlockingOp::OnDiskHashAggregate(agg) => {
+                agg.execute(context, policy, mem_pool, dest_c_key)
+            }
+        }
+    }
 }
 
 impl<T: TxnStorageTrait, M: MemPool> From<NonBlockingOp<T, M>> for BlockingOp<T, M> {
@@ -1340,6 +1385,30 @@ impl<T: TxnStorageTrait, M: MemPool> Pipeline<T, M> {
         self.exec_plan
             .execute(&self.context, &self.policy, &self.mem_pool, self.dest_c_key)
     }
+
+    pub fn quantile_generation_execute(
+        &mut self,
+        data_source: &str,
+        query_id: u8,
+        method: QuantileMethod,
+        num_quantiles_per_run: usize,
+        estimated_store_json: &str,
+        actual_store_json: &str,
+        evaluation_json: &str,) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
+        self.exec_plan
+            .quantile_generation_execute(
+                &self.context, 
+                &self.policy, 
+                &self.mem_pool, 
+                self.dest_c_key,
+                data_source,
+                query_id,
+                method,
+                num_quantiles_per_run,
+                estimated_store_json,
+                actual_store_json,
+                evaluation_json)
+    }
 }
 
 pub struct OnDiskPipelineGraph<T: TxnStorageTrait, M: MemPool> {
@@ -1432,6 +1501,47 @@ impl<T: TxnStorageTrait, M: MemPool> Executor<T> for OnDiskPipelineGraph<T, M> {
         );
         while let Some(mut pipeline) = self.queue.pop_front() {
             let current_result = pipeline.execute()?;
+            log_info!(
+                "Pipeline ID: {} executed with output size: {:?}",
+                pipeline.get_id(),
+                current_result.num_tuples()
+            );
+            self.notify_dependants(pipeline.get_id(), current_result.clone());
+            self.push_no_deps_to_queue();
+            log_info!(
+                "Queue: {:?}",
+                self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+            );
+            result = Some(current_result);
+        }
+        result.ok_or(ExecError::Pipeline("No pipeline executed".to_string()))
+    }
+
+    fn quantile_generation_execute(
+        mut self,
+        _txn: &T::TxnHandle,
+        data_source: &str,
+        query_id: u8,
+        method: QuantileMethod,
+        num_quantiles_per_run: usize,
+        estimated_store_json: &str,
+        actual_store_json: &str,
+        evaluation_json: &str) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
+        let mut result = None;
+        self.push_no_deps_to_queue();
+        log_info!(
+            "Initial queue: {:?}",
+            self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+        );
+        while let Some(mut pipeline) = self.queue.pop_front() {
+            let current_result = pipeline.quantile_generation_execute(
+                data_source,
+                query_id,
+                method,
+                num_quantiles_per_run,
+                estimated_store_json,
+                actual_store_json,
+                evaluation_json)?;
             log_info!(
                 "Pipeline ID: {} executed with output size: {:?}",
                 pipeline.get_id(),

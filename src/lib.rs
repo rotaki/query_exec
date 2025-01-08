@@ -9,7 +9,7 @@ mod parser;
 mod query_executor;
 mod rwlatch;
 mod tuple;
-mod quantile_lib;
+pub mod quantile_lib;
 
 pub use fbtree::prelude::*;
 pub use tuple::Field;

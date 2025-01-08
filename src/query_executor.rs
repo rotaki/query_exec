@@ -18,6 +18,7 @@ use crate::loader::prelude::SimpleCsvLoader;
 use crate::loader::DataLoader;
 use crate::parser::{Translator, TranslatorError};
 use crate::prelude::{Catalog, ColumnDef, DataType, Schema, SchemaRef, Table};
+use crate::quantile_lib::QuantileMethod;
 
 pub fn print_tuples(tuples: Arc<impl TupleBuffer>) {
     let mut count = 0;
@@ -112,6 +113,36 @@ pub fn execute<T: TxnStorageTrait, E: Executor<T>>(
     }
     let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
     let result = exec.execute(&txn).unwrap();
+    storage.commit_txn(&txn, false).unwrap();
+    result
+}
+
+pub fn quantile_generation_execute<T: TxnStorageTrait, E: Executor<T>>(
+    db_id: DatabaseId,
+    storage: &Arc<T>,
+    exec: E,
+    verbose: bool,
+    data_source: &str,
+    query_id: u8,
+    method: QuantileMethod,
+    num_quantiles_per_run: usize,
+    estimated_store_json: &str,
+    actual_store_json: &str,
+    evaluation_json: &str) -> Arc<impl TupleBuffer> {
+    if verbose {
+        println!("=== Executor ===");
+        println!("{}", exec.to_pretty_string());
+    }
+    let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+    let result = exec.quantile_generation_execute(
+        &txn,
+        data_source,
+        query_id,
+        method,
+        num_quantiles_per_run,
+        estimated_store_json,
+        actual_store_json,
+        evaluation_json).unwrap();
     storage.commit_txn(&txn, false).unwrap();
     result
 }

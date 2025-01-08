@@ -15,6 +15,7 @@ use crate::{
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
     tuple::{FromBool, Tuple},
     ColumnId, Field,
+    quantile_lib::QuantileMethod
 };
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
@@ -1315,6 +1316,38 @@ impl<T: TxnStorageTrait> Executor<T> for InMemPipelineGraph<T> {
     }
 
     fn execute(mut self, _txn: &T::TxnHandle) -> Result<Arc<InMemBuffer<T>>, ExecError> {
+        let mut result = None;
+        self.push_no_deps_to_queue();
+        log_info!(
+            "Initial queue: {:?}",
+            self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+        );
+        while let Some(mut pipeline) = self.queue.pop_front() {
+            let current_result = pipeline.execute()?;
+            log_info!(
+                "Pipeline ID: {} executed with output size: {:?}",
+                pipeline.get_id(),
+                current_result.num_tuples()
+            );
+            self.notify_dependants(pipeline.get_id(), current_result.clone());
+            self.push_no_deps_to_queue();
+            log_info!(
+                "Queue: {:?}",
+                self.queue.iter().map(|p| p.get_id()).collect::<Vec<_>>()
+            );
+            result = Some(current_result);
+        }
+        result.ok_or(ExecError::Pipeline("No pipeline executed".to_string()))
+    }
+
+    //xtx temp
+    fn quantile_generation_execute(mut self, _txn: &T::TxnHandle, data_source: &str,
+        query_id: u8,
+        method: QuantileMethod,
+        num_quantiles_per_run: usize,
+        estimated_store_json: &str,
+        actual_store_json: &str,
+        evaluation_json: &str) -> Result<Arc<InMemBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         log_info!(
