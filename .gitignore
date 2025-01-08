@@ -17,5 +17,5 @@
 /bp-*
 /benchmark_results
 .bench./*
-/data/*
+/yellow/*
 /quantile_data/*

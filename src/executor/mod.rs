@@ -25,7 +25,7 @@ pub trait Executor<T: TxnStorageTrait> {
         txn: &T::TxnHandle,
         data_source: &str,
         query_id: u8,
-        method: QuantileMethod,
+        methods: &[QuantileMethod],
         num_quantiles_per_run: usize,
         estimated_store_json: &str,
         actual_store_json: &str,

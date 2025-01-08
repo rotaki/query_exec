@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs::File, io::Write, sync::Arc};
 use fbtree::{access_method::sorted_run_store::SortedRunStore, bp::MemPool, prelude::AppendOnlyStore};
+
 use crate::error::ExecError;
 
 // --------------------------------------------------------------------------------------------
@@ -46,11 +47,11 @@ pub struct QuantileEvaluation {
 }
 
 // --------------------------------------------------------------------------------------------
-//  COMPUTING ACTUAL QUANTILES
+//  COMPUTING ACTUAL QUANTILES (No Big-Endian)
 // --------------------------------------------------------------------------------------------
 
 /// A helper that computes actual quantiles from an already-sorted `AppendOnlyStore`.
-/// If the store is truly sorted, these represent the "gold-standard" quantiles.
+/// We assume the `AppendOnlyStore` is sorted lexicographically by `key` (which is `Vec<u8>`).
 pub fn compute_actual_quantiles_helper<M: MemPool>(
     final_store: &Arc<AppendOnlyStore<M>>,
     num_quantiles: usize,
@@ -69,12 +70,11 @@ pub fn compute_actual_quantiles_helper<M: MemPool>(
         quantile_indices.push(idx);
     }
 
-    // Initialize result vector
-    let mut actual_quantiles = Vec::with_capacity(quantile_indices.len());
+    let mut actual_quantiles = Vec::with_capacity(num_quantiles);
     let mut current_index = 0;
     let mut q = 0;
 
-    // Collect quantiles directly from scan
+    // Collect lexicographic quantiles by index
     for (key, _) in final_store.scan() {
         if q >= quantile_indices.len() {
             break;
@@ -89,13 +89,11 @@ pub fn compute_actual_quantiles_helper<M: MemPool>(
     actual_quantiles
 }
 
-
 // --------------------------------------------------------------------------------------------
-//  ESTIMATING QUANTILES
+//  ESTIMATING QUANTILES (No Big-Endian Conversions)
 // --------------------------------------------------------------------------------------------
 
-
-/// Function for estimating quantiles
+/// Master function for estimating quantiles, dispatches to sub-methods
 pub fn estimate_quantiles<M: MemPool>(
     runs: &[Arc<SortedRunStore<M>>],
     num_quantiles_per_run: usize,
@@ -103,29 +101,22 @@ pub fn estimate_quantiles<M: MemPool>(
 ) -> Vec<Vec<u8>> {
     match method {
         QuantileMethod::Sampling => sample_and_combine_run_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::Mean => mean_based_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::Median => median_based_quantiles(runs, num_quantiles_per_run),
+        QuantileMethod::Mean     => mean_based_quantiles(runs, num_quantiles_per_run),
+        QuantileMethod::Median   => median_based_quantiles(runs, num_quantiles_per_run),
         QuantileMethod::Histograms => histogram_based_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::Actual => Vec::new(), // Should not occur hopefully
+        QuantileMethod::Actual => Vec::new(), // Shouldn't happen in "estimate" phase
     }
 }
 
+// --------------------------------------------------------------------------------------------
+//  1) Sampling
+// --------------------------------------------------------------------------------------------
 
-/// Approximates global quantiles by sampling and combining quantiles from individual sorted runs.
-/// This is a type of "multilevel" quantile estimation that:
-/// 1) First samples quantiles from each sorted run 
-/// 2) Then combines these samples to estimate global quantiles
-///
-/// Example with 2 runs, requesting 3 quantiles:
-/// Run 1: [2,4,6,8,10,12]  -> samples: [2,6,12]
-/// Run 2: [3,5,7,9,11,13]  -> samples: [3,7,13]
-/// Combined samples: [2,3,6,7,12,13]
-/// Final quantiles: [2,7,13] (evenly spaced picks from combined sorted samples)
 fn sample_and_combine_run_quantiles<M: MemPool>(
     runs: &[Arc<SortedRunStore<M>>],
     num_quantiles_per_run: usize,
 ) -> Vec<Vec<u8>> {
-    // 1) For each run, compute partial quantiles:
+    // 1) For each run, compute partial quantiles (lexicographic)
     let mut all_partial_keys = Vec::new();
     for run in runs.iter() {
         let total_tuples = run.scan().count();
@@ -133,17 +124,16 @@ fn sample_and_combine_run_quantiles<M: MemPool>(
             continue;
         }
 
-        // Calculate indices for this run
+        // Indices for this run
         let mut quantile_indices = Vec::new();
         for i in 1..=num_quantiles_per_run {
             let idx = (i * total_tuples) / (num_quantiles_per_run + 1);
             quantile_indices.push(idx);
         }
 
-        // Collect quantiles for this run
+        // Collect partial keys for these indices
         let mut current_index = 0;
         let mut q = 0;
-
         for (key, _) in run.scan() {
             if q >= quantile_indices.len() {
                 break;
@@ -156,14 +146,15 @@ fn sample_and_combine_run_quantiles<M: MemPool>(
         }
     }
 
-    // 2) Sort them and pick out "estimated" quantiles:
+    // 2) Sort them lexicographically
     all_partial_keys.sort();
+
+    // 3) Pick out "estimated" quantiles
     let total_keys = all_partial_keys.len();
     if total_keys == 0 {
         return Vec::new();
     }
 
-    // Calculate final estimated quantiles
     let mut estimated = Vec::with_capacity(num_quantiles_per_run);
     for i in 1..=num_quantiles_per_run {
         let idx = (i * total_keys) / (num_quantiles_per_run + 1);
@@ -173,15 +164,11 @@ fn sample_and_combine_run_quantiles<M: MemPool>(
     estimated
 }
 
-/// Estimates global quantiles by computing quantiles for each run and taking their mean.
-/// This is a simple averaging approach that:
-/// 1) First computes quantiles independently for each sorted run
-/// 2) Then averages corresponding quantiles across runs
-///
-/// Example with 2 runs, requesting 3 quantiles:
-/// Run 1: [2,4,6,8,10,12]  -> quantiles: [2,6,12]
-/// Run 2: [3,5,7,9,11,13]  -> quantiles: [3,7,13]
-/// Final quantiles: [(2+3)/2, (6+7)/2, (12+13)/2] = [2.5,6.5,12.5]
+// --------------------------------------------------------------------------------------------
+//  2) Mean (Element-wise Byte Average)
+// --------------------------------------------------------------------------------------------
+
+/// Computes quantiles for each run, then element-wise averages them.
 fn mean_based_quantiles<M: MemPool>(
     runs: &[Arc<SortedRunStore<M>>],
     num_quantiles: usize,
@@ -190,54 +177,91 @@ fn mean_based_quantiles<M: MemPool>(
         return Vec::new();
     }
 
-    // Collect quantiles from each run
-    let mut run_quantiles = Vec::new();
+    // Collect run-specific quantiles into run_quantiles:
+    // run_quantiles[i][j] = j-th quantile for run i, each is Vec<u8>
+    let mut run_quantiles: Vec<Vec<Vec<u8>>> = Vec::new();
+
+    // For each run, compute `num_quantiles` partial quantiles
     for run in runs.iter() {
-        let mut current_run_quantiles = Vec::new();
         let total_tuples = run.scan().count();
         if total_tuples == 0 {
             continue;
         }
 
-        // Calculate indices for quantiles
-        let mut current_index = 0;
+        // Indices for partial quantiles
+        let mut indices = Vec::new();
         for i in 1..=num_quantiles {
-            let target_idx = (i * total_tuples) / (num_quantiles + 1);
-            for (key, _) in run.scan().skip(current_index) {
-                if current_index == target_idx {
-                    current_run_quantiles.push(to_big_endian_u64(&key));
-                    break;
-                }
-                current_index += 1;
-            }
+            let idx = (i * total_tuples) / (num_quantiles + 1);
+            indices.push(idx);
         }
-        run_quantiles.push(current_run_quantiles);
+
+        // Gather the partial quantiles from this run
+        let mut current_run_q = Vec::new();
+        let mut current_index = 0;
+        let mut q = 0;
+        for (key, _) in run.scan() {
+            if q >= indices.len() {
+                break;
+            }
+            if current_index == indices[q] {
+                current_run_q.push(key.clone());
+                q += 1;
+            }
+            current_index += 1;
+        }
+
+        // If we found exactly `num_quantiles` partial quantiles, push
+        if current_run_q.len() == num_quantiles {
+            run_quantiles.push(current_run_q);
+        }
     }
 
-    // Average corresponding quantiles
-    let mut result = Vec::new();
-    for i in 0..num_quantiles {
-        let sum: u64 = run_quantiles.iter().map(|rq| rq[i]).sum();
-        let avg = sum / run_quantiles.len() as u64;
-        result.push(avg.to_be_bytes().to_vec());
+    if run_quantiles.is_empty() {
+        return Vec::new();
+    }
+
+    // We want to produce a final set of `num_quantiles` arrays,
+    // each is the element-wise average across runs for that quantile index.
+    // E.g. final_mean[j] = average( run_quantiles[all runs][j] ) (element-wise).
+    let num_runs = run_quantiles.len();
+    let mut result = Vec::with_capacity(num_quantiles);
+
+    for q_idx in 0..num_quantiles {
+        // All runs have a q_idx-th quantile: each is a Vec<u8>
+        // We'll produce one averaged Vec<u8> of the same length
+        let first_len = run_quantiles[0][q_idx].len();
+
+        // Accumulator: use u16 to avoid overflow if many runs + large bytes
+        let mut acc = vec![0u16; first_len];
+
+        // Accumulate
+        for r_idx in 0..num_runs {
+            let bytes = &run_quantiles[r_idx][q_idx];
+            // If different runs have different lengths, pick the min.
+            let len = first_len.min(bytes.len());
+            for i in 0..len {
+                acc[i] = acc[i].saturating_add(bytes[i] as u16);
+            }
+        }
+
+        // Now produce the averaged result by dividing each sum by num_runs
+        let mut avg_bytes = vec![0u8; first_len];
+        for i in 0..first_len {
+            avg_bytes[i] = (acc[i] / (num_runs as u16)) as u8;
+        }
+
+        result.push(avg_bytes);
     }
 
     result
 }
 
-/// Estimates global quantiles by computing quantiles for each run and taking their median.
-/// This approach is similar to mean-based but more robust to outliers:
-/// 1) First computes quantiles independently for each sorted run
-/// 2) Then takes the median of corresponding quantiles across runs
-///
-/// Example with 3 runs, requesting 3 quantiles:
-/// Run 1: [2,4,6,8,10,12]   -> quantiles: [2,6,12]
-/// Run 2: [1,5,7,9,11,13]   -> quantiles: [1,7,13]
-/// Run 3: [3,4,6,8,10,11]   -> quantiles: [3,6,11]
-/// Final quantiles: [med(2,1,3), med(6,7,6), med(12,13,11)] = [2,6,12]
-///
-/// Note: This method is more robust to outliers than mean-based quantiles,
-/// making it potentially more reliable when some runs contain anomalous values.
+// --------------------------------------------------------------------------------------------
+//  3) Median (Lexicographic Across Runs)
+// --------------------------------------------------------------------------------------------
+
+/// Computes quantiles for each run, then picks the lexicographic median
+/// among those corresponding quantiles.
 fn median_based_quantiles<M: MemPool>(
     runs: &[Arc<SortedRunStore<M>>],
     num_quantiles: usize,
@@ -246,56 +270,74 @@ fn median_based_quantiles<M: MemPool>(
         return Vec::new();
     }
 
-    // Collect quantiles from each run
-    let mut run_quantiles = Vec::new();
+    // Similar logic as mean-based, but we'll store each run's partial quantiles,
+    // then take the median among them.
+    let mut run_quantiles: Vec<Vec<Vec<u8>>> = Vec::new();
+
+    // For each run, gather partial quantiles
     for run in runs.iter() {
-        let mut current_run_quantiles = Vec::new();
         let total_tuples = run.scan().count();
         if total_tuples == 0 {
             continue;
         }
-
-        // Calculate indices for quantiles
-        let mut current_index = 0;
+        let mut indices = Vec::new();
         for i in 1..=num_quantiles {
-            let target_idx = (i * total_tuples) / (num_quantiles + 1);
-            for (key, _) in run.scan().skip(current_index) {
-                if current_index == target_idx {
-                    current_run_quantiles.push(to_big_endian_u64(&key));
-                    break;
-                }
-                current_index += 1;
-            }
+            let idx = (i * total_tuples) / (num_quantiles + 1);
+            indices.push(idx);
         }
-        run_quantiles.push(current_run_quantiles);
+
+        let mut current_run_q = Vec::new();
+        let mut current_index = 0;
+        let mut q = 0;
+        for (key, _) in run.scan() {
+            if q >= indices.len() {
+                break;
+            }
+            if current_index == indices[q] {
+                current_run_q.push(key.clone());
+                q += 1;
+            }
+            current_index += 1;
+        }
+
+        if current_run_q.len() == num_quantiles {
+            run_quantiles.push(current_run_q);
+        }
     }
 
-    // Take median of corresponding quantiles
-    let mut result = Vec::new();
-    for i in 0..num_quantiles {
-        let mut values: Vec<u64> = run_quantiles.iter().map(|rq| rq[i]).collect();
-        values.sort();
-        let median = values[values.len() / 2];
-        result.push(median.to_be_bytes().to_vec());
+    if run_quantiles.is_empty() {
+        return Vec::new();
+    }
+
+    // Now, for each quantile index q_idx, we have `run_quantiles.len()` arrays.
+    // Sort them lexicographically, pick the median.
+    let num_runs = run_quantiles.len();
+    let median_index = num_runs / 2; // integer division
+
+    let mut result = Vec::with_capacity(num_quantiles);
+
+    for q_idx in 0..num_quantiles {
+        // Collect the q_idx-th partial from each run
+        let mut arrays: Vec<Vec<u8>> = run_quantiles.iter().map(|rq| rq[q_idx].clone()).collect();
+        // Sort lexicographically
+        arrays.sort();
+        // Take the middle
+        result.push(arrays[median_index].clone());
     }
 
     result
 }
 
-/// Estimates global quantiles using a histogram-based approach.
-/// This method builds approximate distribution using fixed-width buckets:
-/// 1) Scans each run to determine global min/max
-/// 2) Creates fixed-width buckets spanning the range
-/// 3) Counts values in each bucket across all runs
-/// 4) Uses bucket counts to estimate quantiles
-///
-/// Example with range [0-100] split into 10 buckets, 2 runs, wanting median:
-/// Run 1: [10,20,30,40,50]
-/// Run 2: [15,25,35,45,55]
-/// Buckets: [0-10):0, [10-20):2, [20-30):2, [30-40):2, [40-50):2, [50-60):2, [60-100):0
-/// Total count = 10, median = 30 (middle of bucket containing 5th element)
-///
-/// Note: Accuracy depends on bucket width. Wider buckets are faster but less precise.
+// --------------------------------------------------------------------------------------------
+//  4) Histograms - (Stub) - Lexicographic Approach is Non-Trivial
+// --------------------------------------------------------------------------------------------
+
+/// A "histogram-based" approach for arbitrary byte arrays is non-trivial,
+/// because there's no straightforward numeric range from `global_min` to
+/// `global_max`. You could do lexicographic buckets, but that's more complex.
+/// 
+/// For demonstration, here's a stub that just picks a few sample points
+/// lexicographically and returns them. (This won't behave like a numeric histogram.)
 fn histogram_based_quantiles<M: MemPool>(
     runs: &[Arc<SortedRunStore<M>>],
     num_quantiles: usize,
@@ -304,57 +346,26 @@ fn histogram_based_quantiles<M: MemPool>(
         return Vec::new();
     }
 
-    // Find global min and max
-    let mut global_min = u64::MAX;
-    let mut global_max = u64::MIN;
-    for run in runs.iter() {
-        if let Some((first, _)) = run.scan().next() {
-            let val = to_big_endian_u64(&first);
-            global_min = global_min.min(val);
-        }
-        if let Some((last, _)) = run.scan().last() {
-            let val = to_big_endian_u64(&last);
-            global_max = global_max.max(val);
-        }
-    }
-
-    // Create buckets (using 100 buckets)
-    const NUM_BUCKETS: u64 = 100;
-    let bucket_size = (global_max - global_min + 1) / NUM_BUCKETS;
-    let mut bucket_counts = vec![0u64; NUM_BUCKETS as usize];
-
-    // Count values in buckets
+    // Flatten all keys
+    let mut all_keys = Vec::new();
     for run in runs.iter() {
         for (key, _) in run.scan() {
-            let val = to_big_endian_u64(&key);
-            let bucket_idx = ((val - global_min) / bucket_size) as usize;
-            let bucket_idx = bucket_idx.min(NUM_BUCKETS as usize - 1);
-            bucket_counts[bucket_idx] += 1;
+            all_keys.push(key.clone());
         }
     }
+    if all_keys.is_empty() {
+        return Vec::new();
+    }
+    // Sort lexicographically
+    all_keys.sort();
 
-    // Calculate total count
-    let total_count: u64 = bucket_counts.iter().sum();
-
-    // Estimate quantiles using bucket counts
+    // We'll just pick evenly spaced samples as "histogram" quantiles:
+    let total = all_keys.len();
     let mut result = Vec::new();
     for i in 1..=num_quantiles {
-        let target_count = (i * total_count as usize) / (num_quantiles + 1);
-        let mut cumulative_count = 0;
-        let mut bucket_idx = 0;
-        
-        // Find bucket containing this quantile
-        while bucket_idx < NUM_BUCKETS as usize && cumulative_count < target_count {
-            cumulative_count += bucket_counts[bucket_idx] as usize;
-            bucket_idx += 1;
-        }
-
-        // Estimate value within bucket
-        let bucket_start = global_min + (bucket_idx as u64 - 1) * bucket_size;
-        let estimated_value = bucket_start + bucket_size / 2;
-        result.push(estimated_value.to_be_bytes().to_vec());
+        let idx = (i * total) / (num_quantiles + 1);
+        result.push(all_keys[idx].clone());
     }
-
     result
 }
 
@@ -362,8 +373,7 @@ fn histogram_based_quantiles<M: MemPool>(
 //  EVALUATION FUNCTIONS
 // --------------------------------------------------------------------------------------------
 
-/// Reads the gold-standard quantiles and some merged quantiles from JSON,
-/// computes error metrics, and writes them to a third JSON file.
+/// Example that compares gold vs. merged and writes an evaluation JSON.
 pub fn evaluate_and_store_quantiles(
     gold_path: &str,
     merged_path: &str,
@@ -381,7 +391,7 @@ pub fn evaluate_and_store_quantiles(
     let merged_record: QuantileRecord = serde_json::from_str(&merged_file)
         .map_err(|e| ExecError::Storage(format!("Merged parse error: {:?}", e)))?;
 
-    // 3) Compute error
+    // 3) Compute error (purely byte-wise difference, e.g. sum of absolute differences)
     let (mse, max_abs) = compute_error_metrics(&gold_record.quantiles, &merged_record.quantiles);
 
     // 4) Build final evaluation struct
@@ -405,8 +415,6 @@ pub fn evaluate_and_store_quantiles(
     Ok(())
 }
 
-/// Evaluate the difference between `estimated` vs. `actual` sets of quantiles, 
-/// store results in `evaluation_output` as JSON.
 pub fn evaluate_and_store_quantiles_custom(
     estimated: &[Vec<u8>],
     actual: &[Vec<u8>],
@@ -415,10 +423,8 @@ pub fn evaluate_and_store_quantiles_custom(
     method: QuantileMethod,
     evaluation_output: &str,
 ) -> Result<(), ExecError> {
-    // Example error metric: use the same approach as `compute_error_metrics` above
     let (mse, max_abs_error) = compute_error_metrics(estimated, actual);
 
-    // Build the final record
     let evaluation = QuantileEvaluation {
         data_source: data_source.to_string(),
         query: format!("q{}", query_id),
@@ -427,7 +433,6 @@ pub fn evaluate_and_store_quantiles_custom(
         max_abs_error,
     };
 
-    // Write to JSON
     let serialized = serde_json::to_string_pretty(&evaluation)
         .map_err(|e| ExecError::Conversion(format!("Serialize error: {:?}", e)))?;
     std::fs::write(evaluation_output, serialized)
@@ -437,21 +442,12 @@ pub fn evaluate_and_store_quantiles_custom(
     Ok(())
 }
 
-
 // --------------------------------------------------------------------------------------------
 //  HELPER FUNCTIONS
 // --------------------------------------------------------------------------------------------
 
-
-fn to_big_endian_u64(bytes: &[u8]) -> u64 {
-    let mut array = [0u8; 8];
-    for (i, b) in bytes.iter().rev().enumerate().take(8) {
-        array[7 - i] = *b;
-    }
-    u64::from_be_bytes(array)
-}
-
-/// Interprets each `Vec<u8>` as a big-endian u64 for numeric comparison. Adjust as needed.
+/// Compares two arrays of `Vec<u8>` lexicographically and measures difference byte by byte.
+/// This is purely a sample. You might define "error" differently.
 fn compute_error_metrics(gold: &[Vec<u8>], merged: &[Vec<u8>]) -> (f64, f64) {
     let length = gold.len().min(merged.len());
     if length == 0 {
@@ -460,20 +456,39 @@ fn compute_error_metrics(gold: &[Vec<u8>], merged: &[Vec<u8>]) -> (f64, f64) {
 
     let mut squared_diff_sum = 0.0;
     let mut max_abs = 0.0;
+
     for i in 0..length {
-        let g_val = to_big_endian_u64(&gold[i]);
-        let m_val = to_big_endian_u64(&merged[i]);
-        let diff = (g_val as f64 - m_val as f64).abs();
-        squared_diff_sum += diff * diff;
-        if diff > max_abs {
-            max_abs = diff;
+        // Compare gold[i] and merged[i] lexicographically.
+        // Let's define "distance" as sum of absolute diffs for each byte.
+        let dist = byte_wise_distance(&gold[i], &merged[i]);
+        squared_diff_sum += dist * dist;
+        if dist > max_abs {
+            max_abs = dist;
         }
     }
+
     let mse = squared_diff_sum / length as f64;
     (mse, max_abs)
 }
 
-/// Writes quantiles to JSON
+/// Sum of absolute differences (SAD) for two byte arrays, truncated to the min length.
+/// Example:
+/// gold:   [2, 10, 200]
+/// merged: [3, 9, 199]
+/// dist = |2-3| + |10-9| + |200-199| = 1 + 1 + 1 = 3
+fn byte_wise_distance(a: &[u8], b: &[u8]) -> f64 {
+    let length = a.len().min(b.len());
+    let mut sum = 0.0;
+    for i in 0..length {
+        let diff = (a[i] as i32 - b[i] as i32).abs();
+        sum += diff as f64;
+    }
+    // If arrays differ in length, you might treat extra bytes as penalty.
+    // For now, we ignore extra bytes in the longer array.
+    sum
+}
+
+/// Writes quantiles to JSON, ensuring each quantile sub-array is on one line.
 pub fn write_quantiles_to_json(
     quantiles: &[Vec<u8>],
     data_source: &str,
@@ -481,24 +496,39 @@ pub fn write_quantiles_to_json(
     method: QuantileMethod,
     output_path: &str,
 ) -> Result<(), ExecError> {
-    let record = QuantileRecord {
-        data_source: data_source.to_string(),
-        query: format!("q{}", query_id),
-        method: method.to_string(),
-        quantiles: quantiles.to_vec(),
-    };
-    
-    let serialized = serde_json::to_string_pretty(&record)
-        .map_err(|e| ExecError::Conversion(format!("Serialize error: {:?}", e)))?;
-    std::fs::write(output_path, serialized)
+    // Format the main fields
+    let mut json_string = format!(
+        "{{\n  \"data_source\": \"{}\",\n  \"query\": \"q{}\",\n  \"method\": \"{}\",\n  \"quantiles\": [\n",
+        data_source,
+        query_id,
+        method.to_string()
+    );
+
+    // Format each quantile as a single line of bytes
+    for (i, quantile) in quantiles.iter().enumerate() {
+        let quantile_str = quantile
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if i < quantiles.len() - 1 {
+            json_string.push_str(&format!("    [{}],\n", quantile_str)); 
+        } else {
+            json_string.push_str(&format!("    [{}]\n", quantile_str));
+        }
+    }
+
+    // Close the JSON object
+    json_string.push_str("  ]\n}");
+
+    std::fs::write(output_path, json_string)
         .map_err(|e| ExecError::Storage(format!("File create error: {:?}", e)))?;
 
     println!("Quantiles written to: {}", output_path);
     Ok(())
 }
 
-/// Load quantiles for `(data_source, query_id, num_quantiles)` from a JSON file you wrote earlier.
-/// Return them in-memory.
+/// Reads quantiles from a JSON file
 pub fn load_quantiles_from_json(
     data_source: &str,
     query_id: u8,
@@ -510,7 +540,7 @@ pub fn load_quantiles_from_json(
     let record: QuantileRecord = serde_json::from_str(&file_str)
         .map_err(|e| ExecError::Conversion(format!("Deserialization error: {:?}", e)))?;
 
-    // Optionally, verify record matches your data_source, query_id, etc.
+    // Optionally check matching data_source, query
     if record.data_source != data_source || record.query != format!("q{}", query_id) {
         return Err(ExecError::Conversion(
             "Mismatch in data_source/query_id while loading actual quantiles.".to_string(),
@@ -523,23 +553,17 @@ pub fn load_quantiles_from_json(
     Ok(record.quantiles)
 }
 
-/// Check if "actual" quantiles exist in the given JSON for `(data_source, query_id, num_quantiles)`.
-/// Return true if found, false otherwise.
+/// Check if "actual" quantiles exist in the given JSON
 pub fn check_actual_quantiles_exist(
     data_source: &str,
     query_id: u8,
     num_quantiles: usize,
     actual_store_json: &str,
 ) -> Result<bool, ExecError> {
-    // Pseudocode:
-    // 1) Attempt to open and parse the JSON file
-    // 2) Check if there's an entry for this data_source+query_id that matches num_quantiles
-    // 3) Return Ok(true) if found, else Ok(false)
-
     match std::fs::read_to_string(actual_store_json) {
         Ok(json_str) => {
-            let maybe_existing: serde_json::Result<QuantileRecord> = serde_json::from_str(&json_str);
-            if let Ok(rec) = maybe_existing {
+            let parsed: serde_json::Result<QuantileRecord> = serde_json::from_str(&json_str);
+            if let Ok(rec) = parsed {
                 if rec.data_source == data_source 
                     && rec.query == format!("q{}", query_id)
                     && rec.quantiles.len() == num_quantiles 
@@ -549,9 +573,7 @@ pub fn check_actual_quantiles_exist(
             }
             Ok(false)
         }
-        Err(_) => {
-            // Means no file or parse error, so likely not exist
-            Ok(false)
-        }
+        Err(_) => Ok(false),
     }
 }
+

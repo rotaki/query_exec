@@ -1095,7 +1095,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
-        println!("Entering run_merge");
 
         // Start timer for the entire run_merge function
         let overall_start = Instant::now();
@@ -1359,7 +1358,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
-        println!("Entering run_merge_2");
 
         // Start timer for the entire run_merge_2 function
         let overall_start = Instant::now();
@@ -1528,7 +1526,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
-        println!("Entering run_merge");
     
         // Start timer for the entire run_merge function
         let overall_start = Instant::now();
@@ -1920,7 +1917,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         dest_c_key: ContainerKey,
         data_source: &str,
         query_id: u8,
-        method: QuantileMethod,
+        methods: &[QuantileMethod],
         num_quantiles_per_run: usize,
         estimated_store_json: &str,
         actual_store_json: &str,
@@ -1929,48 +1926,52 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // 1. Run Generation
         let runs = self.run_generation_5(policy, context, mem_pool, dest_c_key)?;
     
-        // 2. Call estimate_quantiles from quantile_lib
-        let estimated_quantiles = estimate_quantiles(&runs, num_quantiles_per_run, method);
-    
-        // 3. Store estimated quantiles
-        write_quantiles_to_json(
-            &estimated_quantiles,
-            data_source,
-            query_id,
-            method,
-            estimated_store_json,
-        )?;
-    
-        // 4. Check if we need to compute actual quantiles
-        if !check_actual_quantiles_exist(data_source, query_id, num_quantiles_per_run, actual_store_json)? {
-            let merged_store = self.run_merge_3(policy, runs, mem_pool, dest_c_key)?;
-            let actual_quantiles = compute_actual_quantiles_helper(&merged_store, num_quantiles_per_run);
+        for method in methods{
+            // 2. Call estimate_quantiles from quantile_lib
+            let estimated_quantiles = estimate_quantiles(&runs, num_quantiles_per_run, method.clone());
+        
+            let estimated_stor_json_path = estimated_store_json.replace("***", &method.to_string());
+            // 3. Store estimated quantiles
             write_quantiles_to_json(
-                &actual_quantiles,
+                &estimated_quantiles,
                 data_source,
-                query_id, 
-                QuantileMethod::Actual,
+                query_id,
+                method.clone(),
+                &estimated_stor_json_path,
+            )?;
+
+        
+            // 4. Check if we need to compute actual quantiles
+            if !check_actual_quantiles_exist(data_source, query_id, num_quantiles_per_run, actual_store_json)? {
+                let merged_store = self.run_merge_3(policy, runs.clone(), mem_pool, dest_c_key)?;
+                let actual_quantiles = compute_actual_quantiles_helper(&merged_store, num_quantiles_per_run);
+                write_quantiles_to_json(
+                    &actual_quantiles,
+                    data_source,
+                    query_id, 
+                    QuantileMethod::Actual,
+                    actual_store_json,
+                )?;
+            }
+        
+            // 5. Load and evaluate
+            let actual_quantiles = load_quantiles_from_json(
+                data_source,
+                query_id,
+                num_quantiles_per_run,
                 actual_store_json,
             )?;
+        
+            let evaluation_json_path = evaluation_json.replace("***", &method.to_string());
+            evaluate_and_store_quantiles_custom(
+                &estimated_quantiles,
+                &actual_quantiles,
+                data_source,
+                query_id,
+                method.clone(),
+                &evaluation_json_path,
+            )?;
         }
-    
-        // 5. Load and evaluate
-        let actual_quantiles = load_quantiles_from_json(
-            data_source,
-            query_id,
-            num_quantiles_per_run,
-            actual_store_json,
-        )?;
-    
-        evaluate_and_store_quantiles_custom(
-            &estimated_quantiles,
-            &actual_quantiles,
-            data_source,
-            query_id,
-            method,
-            evaluation_json,
-        )?;
-    
         self.execute(context, policy, mem_pool, dest_c_key)
     }
 }
