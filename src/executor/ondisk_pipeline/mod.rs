@@ -1,5 +1,5 @@
-mod disk_buffer;
 mod hash_table;
+mod disk_buffer;
 mod sort;
 
 use core::num;

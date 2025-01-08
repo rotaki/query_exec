@@ -6,7 +6,7 @@ use crate::{error::ExecError, tuple::Tuple};
 
 mod bytecode_expr;
 mod inmem_pipeline;
-mod ondisk_pipeline;
+pub mod ondisk_pipeline;
 mod volcano;
 
 pub mod prelude {

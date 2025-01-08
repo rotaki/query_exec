@@ -7,6 +7,7 @@
 // 2 byte: slot count
 // 2 byte: free space offset
 
+use bincode::de;
 use chrono::format::Item;
 use std::cell::UnsafeCell;
 use std::time::Instant;
@@ -32,6 +33,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use crossbeam::channel::{bounded, unbounded};
 use crossbeam::thread;
 
+use crate::quantile_lib::*;
 
 
 use fbtree::access_method::sorted_run_store::SortedRunStore;
@@ -927,7 +929,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     }
 
 
-    fn run_generation_5(
+    pub fn run_generation_5(
         &mut self,
         policy: &Arc<MemoryPolicy>,
         context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
@@ -1085,6 +1087,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         Ok(result_buffers)
     }
 
+    // parallel but is not doing sequentialy
     fn run_merge(
         &mut self,
         policy: &Arc<MemoryPolicy>,
@@ -1353,6 +1356,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     }
 
 
+    // Maybe parallel but not fast
     fn run_merge_2(
         &mut self,
         policy: &Arc<MemoryPolicy>,
@@ -1527,7 +1531,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     }
 
 
-    fn run_merge_3(
+    pub fn run_merge_3(
         &mut self,
         policy: &Arc<MemoryPolicy>,
         mut runs: Vec<Arc<SortedRunStore<M>>>,
@@ -1951,6 +1955,67 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
         println!("Run merge took: {:.2?} seconds", duration_merge);
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
+    }
+
+    /// Generates runs, computes "estimated" run-level quantiles,
+    /// checks/creates "actual" quantiles from a fully merged store,
+    /// then evaluates the difference and writes out results as JSON.
+    pub fn quantile_generation_execution(
+        &mut self,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
+        policy: &Arc<MemoryPolicy>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        data_source: &str,
+        query_id: u8,
+        num_quantiles_per_run: usize,
+        estimated_store_json: &str,
+        actual_store_json: &str,
+        evaluation_json: &str,
+    ) -> Result<(), ExecError> {
+        // 1. Run Generation
+        let runs = self.run_generation_5(policy, context, mem_pool, dest_c_key)?;
+    
+        // 2. Call estimate_quantiles from quantile_lib
+        let estimated_quantiles = estimate_quantiles(&runs, num_quantiles_per_run);
+    
+        // 3. Store estimated quantiles
+        write_quantiles_to_json(
+            &estimated_quantiles,
+            data_source,
+            query_id,
+            estimated_store_json,
+        )?;
+    
+        // 4. Check if we need to compute actual quantiles
+        if !check_actual_quantiles_exist(data_source, query_id, num_quantiles_per_run, actual_store_json)? {
+            let merged_store = self.run_merge_3(policy, runs, mem_pool, dest_c_key)?;
+            let actual_quantiles = compute_actual_quantiles_helper(&merged_store, num_quantiles_per_run);
+            write_quantiles_to_json(
+                &actual_quantiles,
+                data_source,
+                query_id, 
+                actual_store_json,
+            )?;
+        }
+    
+        // 5. Load and evaluate
+        let actual_quantiles = load_quantiles_from_json(
+            data_source,
+            query_id,
+            num_quantiles_per_run,
+            actual_store_json,
+        )?;
+    
+        evaluate_and_store_quantiles_custom(
+            &estimated_quantiles,
+            &actual_quantiles,
+            data_source,
+            query_id,
+            evaluation_json,
+        )?;
+    
+        Ok(())
     }
 }
 
