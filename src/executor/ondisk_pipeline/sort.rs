@@ -1072,7 +1072,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             .collect::<Result<Vec<_>, ExecError>>()?;
     
         let parallel_duration = parallel_start_time.elapsed();
-        println!("Parallel execution took {:?}", parallel_duration);
+        // println!("Parallel execution took {:?}", parallel_duration);
     
         // Collect runs and merge quantiles
         let mut result_buffers: Vec<Arc<SortedRunStore<M>>> = Vec::new();
@@ -1109,11 +1109,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
 
                 let quantile_duration = quantile_start.elapsed();
-                println!(
-                    "Retrieved quantiles in {:.4} seconds",
-                    quantile_duration.as_secs_f64()
-                );
-
                 // Print the initial quantiles
                 println!("Initial Quantiles:");
                 for (idx, q) in global_quantiles.iter().enumerate() {
@@ -1122,7 +1117,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 // Determine the number of threads based on quantiles
                 let num_threads = global_quantiles.len() - 1;
-                println!("Number of threads = {}", num_threads);
+                // println!("Number of threads = {}", num_threads);
 
                 // Start timer for parallel merging
                 let parallel_start = Instant::now();
@@ -1245,12 +1240,12 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                     // Log the completion time and tuple count
                     let thread_duration = thread_start.elapsed();
-                    println!(
-                        "Thread {} completed in {:.4} seconds with {} tuples",
-                        i,
-                        thread_duration.as_secs_f64(),
-                        tuple_count
-                    );
+                    // println!(
+                    //     "Thread {} completed in {:.4} seconds with {} tuples",
+                    //     i,
+                    //     thread_duration.as_secs_f64(),
+                    //     tuple_count
+                    // );
             
                     (i, merged_store, tuple_count)
                 })
@@ -1258,10 +1253,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 // Stop timer for parallel merging
                 let parallel_duration = parallel_start.elapsed();
-                println!(
-                    "Parallel merging completed in {:.4} seconds",
-                    parallel_duration.as_secs_f64()
-                );
+                // println!(
+                //     "Parallel merging completed in {:.4} seconds",
+                //     parallel_duration.as_secs_f64()
+                // );
 
                 // Start timer for sorting merged buffers
                 let sorting_start = Instant::now();
@@ -1298,10 +1293,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 // Stop timer for final bulk insert
                 let final_insert_duration = final_insert_start.elapsed();
-                println!(
-                    "Final bulk insert completed in {:.4} seconds",
-                    final_insert_duration.as_secs_f64()
-                );
+                // println!(
+                //     "Final bulk insert completed in {:.4} seconds",
+                //     final_insert_duration.as_secs_f64()
+                // );
 
                 // Optionally, print total tuples merged across all threads
                 let total_tuples: usize = merged_buffers.iter().map(|(_, _, count)| *count).sum();
@@ -1377,11 +1372,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let global_quantiles = self.quantiles.get_quantiles();
 
                 let quantile_duration = quantile_start.elapsed();
-                println!(
-                    "Retrieved quantiles in {:.4} seconds",
-                    quantile_duration.as_secs_f64()
-                );
-
                 // Print the initial quantiles
                 println!("Initial Quantiles:");
                 for (idx, q) in global_quantiles.iter().enumerate() {
@@ -1478,10 +1468,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 // Stop timer for final bulk insert
                 let final_insert_duration = final_insert_start.elapsed();
-                println!(
-                    "Final bulk insert completed in {:.4} seconds",
-                    final_insert_duration.as_secs_f64()
-                );
+                // println!(
+                //     "Final bulk insert completed in {:.4} seconds",
+                //     final_insert_duration.as_secs_f64()
+                // );
 
                 // Recompute actual quantiles based on sorted data in final_store
                 println!("Recomputing actual quantiles based on sorted data...");
@@ -1551,10 +1541,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let global_quantiles = self.quantiles.get_quantiles();
     
                 let quantile_duration = quantile_start.elapsed();
-                println!(
-                    "Retrieved quantiles in {:.4} seconds",
-                    quantile_duration.as_secs_f64()
-                );
     
                 // Print the initial quantiles
                 println!("Initial Quantiles:");
@@ -1564,7 +1550,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
                 // Determine the number of threads based on quantiles
                 let num_threads = global_quantiles.len() - 1;
-                println!("Number of threads = {}", num_threads);
     
                 // Start timer for parallel merging
                 let parallel_start = Instant::now();
@@ -1631,20 +1616,9 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         ));
 
                         let merge_duration = merge_start.elapsed();
-                        println!(
-                            "Thread {} completed merge in {:.4} seconds with",
-                            i,
-                            merge_duration.as_secs_f64()
-                        );
     
                         // Stop timer and calculate elapsed time
                         let thread_duration = thread_start.elapsed();
-                        // println!(
-                        //     "Thread {} completed in {:.4} seconds with {} tuples",
-                        //     i,
-                        //     thread_duration.as_secs_f64(),
-                        //     tuple_count
-                        // );
     
                         (i, merged_store, tuple_count)
                     })
@@ -1652,10 +1626,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
                 // Stop timer for parallel merging
                 let parallel_duration = parallel_start.elapsed();
-                println!(
-                    "Parallel merging completed in {:.4} seconds",
-                    parallel_duration.as_secs_f64()
-                );
     
                 // Start timer for sorting merged buffers
                 let sorting_start = Instant::now();
@@ -1675,10 +1645,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
                 // Stop timer for sorting and chaining
                 let sorting_duration = sorting_start.elapsed();
-                println!(
-                    "Sorting and chaining completed in {:.4} seconds",
-                    sorting_duration.as_secs_f64()
-                );
     
                 // Start timer for final bulk insert
                 let final_insert_start = Instant::now();
@@ -1692,14 +1658,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
                 // Stop timer for final bulk insert
                 let final_insert_duration = final_insert_start.elapsed();
-                println!(
-                    "Final bulk insert completed in {:.4} seconds",
-                    final_insert_duration.as_secs_f64()
-                );
-    
+
                 // Optionally, print total tuples merged across all threads
                 let total_tuples: usize = merged_buffers.iter().map(|(_, _, count)| *count).sum();
-                println!("Total tuples merged across all threads: {}", total_tuples);
+                // println!("Total tuples merged across all threads: {}", total_tuples);
     
                 // Recompute actual quantiles based on sorted data in final_store
                 println!("Recomputing actual quantiles based on sorted data...");
@@ -1726,10 +1688,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let merged_store = self.merge_step_sorted_store(runs, mem_pool, dest_c_key);
     
                 let unbounded_duration = unbounded_start.elapsed();
-                println!(
-                    "Unbounded merge_step completed in {:.4} seconds",
-                    unbounded_duration.as_secs_f64()
-                );
     
                 merged_store
             }
@@ -1740,10 +1698,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
         // Stop timer for the entire run_merge function
         let overall_duration = overall_start.elapsed();
-        println!(
-            "Run merge took: {:.2} seconds",
-            overall_duration.as_secs_f64()
-        );
+        // println!(
+        //     "Run merge took: {:.2} seconds",
+        //     overall_duration.as_secs_f64()
+        // );
     
         Ok(result)
     }
@@ -1942,18 +1900,12 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let runs = self.run_generation_5(policy, context, mem_pool, dest_c_key)?;
         let duration_generation = start_generation.elapsed();
 
-
-        println!("Run generation took: {:.2?} seconds", duration_generation);
-
-        println!("num runs {}", runs.len());
-
         // -------------- Run Merge Phase --------------
         let start_merge = Instant::now();
         // let final_run = self.run_merge_sorted_store(policy, runs, mem_pool, dest_c_key)?;
         let final_run = self.run_merge_3(policy, runs, mem_pool, dest_c_key)?;
         let duration_merge = start_merge.elapsed();
 
-        println!("Run merge took: {:.2?} seconds", duration_merge);
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 
