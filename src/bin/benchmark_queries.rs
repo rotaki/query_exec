@@ -8,7 +8,7 @@ use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph,
     },
-    BufferPool, ContainerId, OnDiskStorage,
+    BufferPool, ContainerId, OnDiskStorage, MemPool,
 };
 
 #[derive(Debug, Parser)]
@@ -156,6 +156,7 @@ fn main() {
                 eprintln!("Error during query execution: {}", e);
                 std::process::exit(1);
             }
+            let _ = bp.flush_all_and_reset();
         }
     }
 }

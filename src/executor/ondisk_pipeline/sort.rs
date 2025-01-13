@@ -785,10 +785,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // Estimate the total number of tuples
         // let total_tuples = 6005720;
         let total_tuples = 6005720;
-        // println!("Total tuples estimated: {}", total_tuples);
+        println!("Total tuples estimated: {}", total_tuples);
     
         // Decide on the number of threads
-        let num_threads = 8;
+        let num_threads = 6;
     
         // Calculate chunk size
         let chunk_size = (total_tuples + num_threads - 1) / num_threads;
@@ -1098,7 +1098,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             "run_merge_2 took: {:.2} seconds",
             overall_duration.as_secs_f64()
         );
-
+        let num_quantiles = 5;
+        println!("final quantiles {:?}", compute_actual_quantiles_helper(&result, num_quantiles));
         Ok(result)
     }
 
@@ -1120,6 +1121,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let quantile_start = Instant::now();
     
                 let global_quantiles = self.quantiles.get_quantiles();
+                let global_quantiles = estimate_quantiles(&runs, 5, QuantileMethod::Mean);
+                
     
                 let quantile_duration = quantile_start.elapsed();
     
@@ -1145,8 +1148,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         // Define the regions for each thread
                         let lower = global_quantiles[i].clone(); // Inclusive
                         let upper = global_quantiles[i + 1].clone(); // Exclusive except for the last one
-                        let upper = if i == num_threads - 1 {
-                            // Adjust upper bound for the last thread to be inclusive
+                        let num_partitions = global_quantiles.len() - 1;
+
+                        // Adjust upper bound for the last partition to be inclusive
+                        let upper = if i == num_partitions - 1 {
                             let mut upper = upper.clone();
                             let mut carry = 1;
                             for byte in upper.iter_mut().rev() {
@@ -1295,14 +1300,19 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
-        let verbose = false;
+        let verbose = true;
+        let num_quantiles = 5;
+
         let overall_start = Instant::now();
         if verbose { println!("\nStarting parallel merge operation...") };
 
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(_working_mem) => {
                 let quantile_start = Instant::now();
-                let global_quantiles = self.quantiles.get_quantiles();
+                let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::Mean);
+                global_quantiles[0] = vec![0;9];
+                global_quantiles[num_quantiles - 1] = vec![255;9];
+                if verbose {println!("estimated quantiles {:?}", global_quantiles)};
                 let num_threads = global_quantiles.len() - 1;
 
                 if verbose {
@@ -1315,16 +1325,17 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 if verbose { println!("\nStarting parallel merge processing...") };
                 let merge_start = Instant::now();
 
-                // Use rayon's default thread pool with par_iter
                 let merged_buffers = (0..num_threads)
                     .into_par_iter()
                     .map(|i| {
                         let thread_start = Instant::now();
                         
-                        // Define regions using direct indexing
-                        let lower = global_quantiles[i].clone();
+                        // Using correct boundary handling from run_merge_3
+                        let lower = global_quantiles[i].clone(); // Inclusive
+                        let upper = global_quantiles[i + 1].clone(); // Exclusive except for last one
                         let upper = if i == num_threads - 1 {
-                            let mut upper = global_quantiles[i + 1].clone();
+                            // Adjust upper bound for the last thread to be inclusive
+                            let mut upper = upper.clone();
                             let mut carry = 1;
                             for byte in upper.iter_mut().rev() {
                                 let (new_byte, new_carry) = byte.overflowing_add(carry);
@@ -1336,19 +1347,23 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                                 carry = 1;
                             }
                             if carry != 0 {
+                                // Push a new byte to the front of the vec
                                 upper.insert(0, 1);
                             }
                             upper
                         } else {
-                            global_quantiles[i + 1].clone()
+                            upper
                         };
 
                         if verbose { println!("Thread {} starting - Range: {:?} to {:?}", i, &lower, &upper) };
 
-                        // Create segments and merge iterator
+                        // Convert to bytes correctly
+                        let lower_bytes: Vec<u8> = lower.iter().copied().collect();
+                        let upper_bytes: Vec<u8> = upper.iter().copied().collect();
+
                         let run_segments = runs
                             .iter()
-                            .map(|r| r.scan_range(&lower, &upper))
+                            .map(|r| r.scan_range(&lower_bytes, &upper_bytes))
                             .collect::<Vec<_>>();
 
                         let merge_iter = MergeIter::new(run_segments);
@@ -1358,7 +1373,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         };
 
                         let mut tuple_count = 0;
-                        // Use inspect for single-pass counting
                         let counting_merge_iter = merge_iter.inspect(|_| tuple_count += 1);
                         
                         let merge_start = Instant::now();
@@ -1389,15 +1403,11 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 };
 
                 let combine_start = Instant::now();
-
-                // Sort buffers by index
                 let mut sorted_buffers = merged_buffers;
                 sorted_buffers.sort_by_key(|(i, _, _)| *i);
 
-                // Calculate total tuples
                 let total_tuples: usize = sorted_buffers.iter().map(|(_, _, count)| *count).sum();
 
-                // Chain iterators efficiently
                 let chained_iter = sorted_buffers
                     .into_iter()
                     .fold(
@@ -1407,7 +1417,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
                 if verbose { println!("Results combined in {:.2}s", combine_start.elapsed().as_secs_f64()) };
 
-                // Create final store
                 let final_store = Arc::new(AppendOnlyStore::bulk_insert_create(
                     dest_c_key,
                     mem_pool.clone(),
@@ -1435,13 +1444,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 unimplemented!("Proportional memory policy is not implemented yet");
             }
         };
+        if verbose {println!("final quantiles {:?}", compute_actual_quantiles_helper(&result, num_quantiles))};
 
         let overall_duration = overall_start.elapsed();
         if verbose { println!("\nTotal operation completed in {:.2}s", overall_duration.as_secs_f64()) };
 
         Ok(result)
     }
-    
     
     fn run_merge_og(
         &mut self,
@@ -1603,12 +1612,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let runs = self.run_generation_5(policy, context, mem_pool, dest_c_key)?;
         let duration_generation = start_generation.elapsed();
         println!("generation duration {:?}", duration_generation);
-
+        
         // -------------- Run Merge Phase --------------
         let start_merge = Instant::now();
         let final_run = self.run_merge_kraska(policy, runs, mem_pool, dest_c_key)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
+        verify_sorted_store_full(final_run.clone(), &[(0, true, true)], true);
 
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
@@ -1725,6 +1735,148 @@ fn verify_sorted_results(
         }
     }
     Ok(())
+}
+
+fn verify_sorted_store<T: MemPool>(
+    store: Arc<AppendOnlyStore<T>>, 
+    sort_cols: &[(usize, bool, bool)],  // (column_index, ascending, nulls_first)
+    verbose: bool
+) -> Result<(), String> {
+    let mut scanner = store.scan();
+    
+    // Get first record
+    let first = match scanner.next() {
+        Some(kv) => kv,
+        None => return Ok(()), // Empty store is considered sorted
+    };
+
+    let mut prev = first;
+    let mut count = 1;
+
+    // Compare each consecutive pair
+    while let Some(curr) = scanner.next() {
+        count += 1;
+        
+        // Check each sort column in order
+        for &(col_idx, asc, _nulls_first) in sort_cols {
+            // Extract values for the column (assuming key for col_idx 0, value otherwise)
+            let prev_value = if col_idx == 0 { &prev.0 } else { &prev.1 };
+            let curr_value = if col_idx == 0 { &curr.0 } else { &curr.1 };
+            
+            let cmp_result = if asc {
+                prev_value.cmp(curr_value)
+            } else {
+                curr_value.cmp(prev_value)
+            };
+            
+            match cmp_result {
+                std::cmp::Ordering::Greater => {
+                    if verbose {
+                        return Err(format!(
+                            "Sort verification failed at row {}:\n\
+                            Previous record: key={:?}, value={:?}\n\
+                            Current record: key={:?}, value={:?}\n\
+                            Column {} - Expected {:?} should be {:?} but found {:?} is {:?}.",
+                            count,
+                            prev.0, prev.1,
+                            curr.0, curr.1,
+                            col_idx,
+                            prev_value,
+                            if asc { "<=" } else { ">=" },
+                            prev_value,
+                            curr_value
+                        ));
+                    } else {
+                        return Err(format!("Sort violation found at position {}", count));
+                    }
+                },
+                std::cmp::Ordering::Less => {
+                    // If this column is properly ordered, skip checking remaining columns
+                    break;
+                },
+                std::cmp::Ordering::Equal => {
+                    // If equal, continue to next column
+                    continue;
+                }
+            }
+        }
+        
+        prev = curr;
+    }
+
+    if verbose {
+        println!("Store is correctly sorted! ({} records verified)", count);
+    }
+    
+    Ok(())
+}
+
+// Version that collects all violations
+fn verify_sorted_store_full<T: MemPool>(
+    store: Arc<AppendOnlyStore<T>>,
+    sort_cols: &[(usize, bool, bool)],
+    verbose: bool
+) -> Vec<(usize, (Vec<u8>, Vec<u8>), (Vec<u8>, Vec<u8>))> {
+    let mut violations = Vec::new();
+    let mut scanner = store.scan();
+    
+    // Get first record
+    let first = match scanner.next() {
+        Some(kv) => kv,
+        None => return violations, // Empty store has no violations
+    };
+
+    let mut prev = first;
+    let mut count = 1;
+
+    while let Some(curr) = scanner.next() {
+        count += 1;
+        let mut violation_found = false;
+        
+        for &(col_idx, asc, _nulls_first) in sort_cols {
+            let prev_value = if col_idx == 0 { &prev.0 } else { &prev.1 };
+            let curr_value = if col_idx == 0 { &curr.0 } else { &curr.1 };
+            
+            let cmp_result = if asc {
+                prev_value.cmp(curr_value)
+            } else {
+                curr_value.cmp(prev_value)
+            };
+            
+            match cmp_result {
+                std::cmp::Ordering::Greater => {
+                    violation_found = true;
+                    violations.push((count, prev.clone(), curr.clone()));
+                    if verbose {
+                        println!(
+                            "Violation at position {}:\n\
+                            Previous: key={:?}, value={:?}\n\
+                            Current:  key={:?}, value={:?}\n\
+                            Column {} violation",
+                            count, prev.0, prev.1, curr.0, curr.1, col_idx
+                        );
+                    }
+                    break;
+                },
+                std::cmp::Ordering::Less => break,
+                std::cmp::Ordering::Equal => continue,
+            }
+        }
+        
+        if !violation_found {
+            prev = curr;
+        }
+    }
+
+    if verbose {
+        if violations.is_empty() {
+            println!("Store is correctly sorted! ({} records verified)", count);
+        } else {
+            println!("Found {} violations in {} records", violations.len(), count);
+        }
+    }
+
+    violations
 }
 #[cfg(test)]
 mod tests {
