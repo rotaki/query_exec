@@ -11,7 +11,7 @@ rm -rf tempfiles/*
 bp_sizes=(10000)
 
 # List of query IDs
-query_ids=(100)
+query_ids=(1)
 
 # List of memory sizes
 #memory_sizes=(100 200 300 400 500 600 700 800 900 1000 1100 1200 1300 1400 1500 1600 1700 1800 1900 2000)

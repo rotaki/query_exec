@@ -96,7 +96,7 @@ fn main() {
 
     for table in &table_names {
         let c_id = tables[table];
-        let path = format!("data/{}.csv", opt.file_source);
+        let path = format!("yellow/{}.csv", opt.file_source);
         import_csv(&catalog, &storage, db_id, c_id, &path, true, b',')
             .expect(&format!("Failed to import data for table {}", table));
     }

@@ -24,13 +24,15 @@ fn main() -> Result<(), String> {
     // ---------------------------
     // 1) Setup config
     // ---------------------------
-    let data_sources = vec!["yellow-tripdata-2024-01", "tpch-sf-1"]; 
-    let queries = vec![1,2,3,4,5];
+    let data_sources = vec!["yellow-tripdata-2024-01"]; 
+    let data_sources = vec!["tpch-sf-1"]; 
+    let queries = vec![100,101];
     let methods = vec![
         QuantileMethod::Mean,
-        QuantileMethod::Median,
-        QuantileMethod::Sampling,
-        QuantileMethod::Histograms,
+        QuantileMethod::GKSketch,
+        // QuantileMethod::Median,
+        // QuantileMethod::Sampling,
+        // QuantileMethod::Histograms,
     ];
 
     let num_quantiles = 10;

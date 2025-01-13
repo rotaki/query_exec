@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs::File, io::Write, sync::Arc};
 use fbtree::{access_method::sorted_run_store::SortedRunStore, bp::MemPool, prelude::AppendOnlyStore};
+use std::cmp::Ordering;
+
 
 use crate::error::ExecError;
 
@@ -15,6 +17,7 @@ pub enum QuantileMethod {
     Median,
     Sampling,
     Histograms,
+    GKSketch,
 }
 
 impl QuantileMethod {
@@ -25,6 +28,7 @@ impl QuantileMethod {
             QuantileMethod::Median => "median".to_string(),
             QuantileMethod::Sampling => "sampling".to_string(),
             QuantileMethod::Histograms => "histograms".to_string(),
+            QuantileMethod::GKSketch => "GK Sketch".to_string(),
         }
     }
 }
@@ -104,6 +108,7 @@ pub fn estimate_quantiles<M: MemPool>(
         QuantileMethod::Mean     => mean_based_quantiles(runs, num_quantiles_per_run),
         QuantileMethod::Median   => median_based_quantiles(runs, num_quantiles_per_run),
         QuantileMethod::Histograms => histogram_based_quantiles(runs, num_quantiles_per_run),
+        QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
         QuantileMethod::Actual => Vec::new(), // Shouldn't happen in "estimate" phase
     }
 }
@@ -367,6 +372,202 @@ fn histogram_based_quantiles<M: MemPool>(
         result.push(all_keys[idx].clone());
     }
     result
+}
+
+
+// --------------------------------------------------------------------------------------------
+//  5) GK sketches
+// --------------------------------------------------------------------------------------------
+
+/// A tuple in the GK sketch for tracking rank information
+struct GKTuple {
+    value: Vec<u8>,
+    g: usize,     // Gap from previous rank
+    delta: usize, // Maximum error
+}
+
+/// Compute quantiles using the GK sketch algorithm 
+pub fn gk_sketch_quantiles<M: MemPool>(
+    runs: &[Arc<SortedRunStore<M>>],
+    num_quantiles: usize,
+    epsilon: f64,
+) -> Vec<Vec<u8>> {
+    // Validate inputs and handle edge cases
+    if runs.is_empty() || num_quantiles == 0 {
+        return Vec::new();
+    }
+
+    // Initialize data structures
+    let mut tuples: Vec<GKTuple> = Vec::new();
+    let mut total_tuples = 0;
+
+    // First pass: Count total tuples and scan initial samples
+    for run in runs.iter() {
+        total_tuples += run.scan().count();
+    }
+
+    if total_tuples == 0 {
+        return Vec::new();
+    }
+
+    // Compute initial sampling rate based on epsilon
+    let alpha = (2.0 * epsilon * total_tuples as f64).floor() as usize;
+    let sample_rate = (alpha / runs.len()).max(1);
+
+    // Build initial sketch from sampled tuples
+    for run in runs.iter() {
+        let mut current_count = 0;
+        let mut last_value: Option<Vec<u8>> = None;
+        let mut current_g = 0;
+
+        for (value, _) in run.scan() {
+            current_count += 1;
+            current_g += 1;
+
+            // Process value based on sampling rate
+            if current_count % sample_rate == 0 
+                || last_value.as_ref().map_or(true, |v| v != &value) {
+                
+                // Compute delta based on position
+                let delta = if tuples.is_empty() {
+                    alpha 
+                } else {
+                    (alpha - current_g).min(current_g)
+                };
+
+                tuples.push(GKTuple {
+                    value: value.clone(),
+                    g: current_g,
+                    delta,
+                });
+
+                current_g = 0;
+                last_value = Some(value);
+            }
+        }
+    }
+
+    // Sort tuples by value for merging
+    tuples.sort_by(|a, b| a.value.cmp(&b.value));
+
+    // Merge adjacent tuples while maintaining error bounds
+    let mut merged = Vec::new();
+    let mut i = 0;
+    while i < tuples.len() {
+        let mut j = i + 1;
+        let mut g_sum = tuples[i].g;
+
+        while j < tuples.len() {
+            let next_g_sum = g_sum + tuples[j].g;
+            if next_g_sum + tuples[j].delta <= alpha {
+                g_sum = next_g_sum;
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        merged.push(GKTuple {
+            value: tuples[i].value.clone(),
+            g: g_sum,
+            delta: tuples[i].delta,
+        });
+        i = j;
+    }
+
+    // Extract final quantiles
+    let mut result = Vec::with_capacity(num_quantiles);
+    let mut current_rank = 0;
+
+    for i in 1..=num_quantiles {
+        let target_rank = (i * total_tuples) / (num_quantiles + 1);
+        
+        // Find tuple containing target rank
+        while current_rank < merged.len() {
+            let tuple = &merged[current_rank];
+            let upper_rank = tuple.g + tuple.delta;
+            
+            if target_rank <= upper_rank {
+                result.push(tuple.value.clone());
+                break;
+            }
+            
+            current_rank += 1;
+        }
+
+        // Handle edge case for last quantile
+        if current_rank >= merged.len() && result.len() < num_quantiles {
+            if let Some(last) = merged.last() {
+                result.push(last.value.clone());
+            }
+        }
+    }
+
+    result
+}
+
+/// Helper function to check if two tuples can be merged within error bounds
+fn can_merge(t1: &GKTuple, t2: &GKTuple, alpha: usize) -> bool {
+    let merged_g = t1.g + t2.g;
+    merged_g + t1.delta.max(t2.delta) <= alpha
+}
+
+/// Implementation for parallel processing using multiple runs
+pub fn parallel_gk_quantiles<M: MemPool>(
+    runs: &[Arc<SortedRunStore<M>>],
+    num_quantiles: usize,
+    epsilon: f64,
+    num_threads: usize,
+) -> Vec<Vec<u8>> {
+    if runs.len() <= num_threads {
+        return gk_sketch_quantiles(runs, num_quantiles, epsilon);
+    }
+
+    // Split runs among threads
+    let runs_per_thread = runs.len() / num_threads;
+    let mut thread_results = Vec::with_capacity(num_threads);
+
+    // Process each chunk of runs
+    for chunk in runs.chunks(runs_per_thread) {
+        let sketch_result = gk_sketch_quantiles(chunk, num_quantiles, epsilon / 2.0);
+        thread_results.push(sketch_result);
+    }
+
+    // Merge results from all threads
+    let mut merged = thread_results[0].clone();
+    for other in thread_results.iter().skip(1) {
+        let mut combined = Vec::new();
+        let mut i = 0;
+        let mut j = 0;
+
+        // Merge sorted sequences
+        while i < merged.len() && j < other.len() {
+            match merged[i].cmp(&other[j]) {
+                Ordering::Less => {
+                    combined.push(merged[i].clone());
+                    i += 1;
+                }
+                Ordering::Greater => {
+                    combined.push(other[j].clone());
+                    j += 1;
+                }
+                Ordering::Equal => {
+                    combined.push(merged[i].clone());
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+
+        // Add remaining elements
+        combined.extend_from_slice(&merged[i..]);
+        combined.extend_from_slice(&other[j..]);
+
+        merged = combined;
+    }
+
+    // Extract final number of quantiles
+    merged.into_iter().take(num_quantiles).collect()
 }
 
 // --------------------------------------------------------------------------------------------

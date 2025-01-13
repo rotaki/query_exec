@@ -1928,8 +1928,9 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     
         for method in methods{
             // 2. Call estimate_quantiles from quantile_lib
+            println!("estimating quantiles");
             let estimated_quantiles = estimate_quantiles(&runs, num_quantiles_per_run, method.clone());
-        
+            println!("done estimating quantiles");
             let estimated_stor_json_path = estimated_store_json.replace("***", &method.to_string());
             // 3. Store estimated quantiles
             write_quantiles_to_json(
