@@ -1295,164 +1295,119 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
-        let num_threads = Some(4);
-        let verbose = true;
+        let verbose = false;
         let overall_start = Instant::now();
-        if verbose { println!("\nStarting parallel merge operation...")};
-
-        // Configure thread pool if num_threads is specified
-        let pool = if let Some(threads) = num_threads {
-            if verbose { println!("Using {} threads", threads) };
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .expect("Failed to create thread pool")
-        } else {
-            // Use default thread pool if no thread count specified
-            rayon::ThreadPoolBuilder::new()
-                .build()
-                .expect("Failed to create thread pool")
-        };
+        if verbose { println!("\nStarting parallel merge operation...") };
 
         let result = match policy.as_ref() {
-            MemoryPolicy::FixedSizeLimit(working_mem) => {
+            MemoryPolicy::FixedSizeLimit(_working_mem) => {
                 let quantile_start = Instant::now();
                 let global_quantiles = self.quantiles.get_quantiles();
-                if verbose {println!("Retrieved {} quantiles in {:.2}s", 
-                    global_quantiles.len(),
-                    quantile_start.elapsed().as_secs_f64())};
-                
-                let max_partition_size = *working_mem as usize;
-                let total_records: usize = runs.iter().map(|r| r.len()).sum();
-                
-                // Calculate number of partitions based on both memory limit and thread count
-                let memory_based_partitions = (total_records + max_partition_size - 1) / max_partition_size;
-                let thread_based_partitions = num_threads.unwrap_or_else(|| pool.current_num_threads());
-                let num_partitions = std::cmp::min(
-                    std::cmp::min(memory_based_partitions, thread_based_partitions),
-                    global_quantiles.len() - 1
-                );
-                
+                let num_threads = global_quantiles.len() - 1;
+
                 if verbose {
-                    println!("\nPlanning merge operation:");
-                    println!("  - Total records: {}", total_records);
-                    println!("  - Max partition size: {}", max_partition_size);
-                    println!("  - Memory-based partitions: {}", memory_based_partitions);
-                    println!("  - Thread-based partitions: {}", thread_based_partitions);
-                    println!("  - Final number of partitions: {}", num_partitions);
-                }
-                
-                let partition_setup_start = Instant::now();
-                let partition_ranges: Vec<_> = (0..num_partitions)
+                    println!("Using {} threads (based on quantiles - 1)", num_threads);
+                    println!("Retrieved {} quantiles in {:.2}s", 
+                        global_quantiles.len(),
+                        quantile_start.elapsed().as_secs_f64())
+                };
+
+                if verbose { println!("\nStarting parallel merge processing...") };
+                let merge_start = Instant::now();
+
+                // Use rayon's default thread pool with par_iter
+                let merged_buffers = (0..num_threads)
+                    .into_par_iter()
                     .map(|i| {
-                        let lower = if i == 0 {
-                            global_quantiles[0].clone()
-                        } else {
-                            global_quantiles[i * (global_quantiles.len() - 1) / num_partitions].clone()
-                        };
+                        let thread_start = Instant::now();
                         
-                        let upper = if i == num_partitions - 1 {
-                            let mut upper = global_quantiles.last().unwrap().clone();
+                        // Define regions using direct indexing
+                        let lower = global_quantiles[i].clone();
+                        let upper = if i == num_threads - 1 {
+                            let mut upper = global_quantiles[i + 1].clone();
                             let mut carry = 1;
                             for byte in upper.iter_mut().rev() {
                                 let (new_byte, new_carry) = byte.overflowing_add(carry);
                                 *byte = new_byte;
                                 if !new_carry {
+                                    carry = 0;
                                     break;
                                 }
+                                carry = 1;
                             }
-                            if carry == 1 {
+                            if carry != 0 {
                                 upper.insert(0, 1);
                             }
                             upper
                         } else {
-                            global_quantiles[(i + 1) * (global_quantiles.len() - 1) / num_partitions].clone()
+                            global_quantiles[i + 1].clone()
                         };
+
+                        if verbose { println!("Thread {} starting - Range: {:?} to {:?}", i, &lower, &upper) };
+
+                        // Create segments and merge iterator
+                        let run_segments = runs
+                            .iter()
+                            .map(|r| r.scan_range(&lower, &upper))
+                            .collect::<Vec<_>>();
+
+                        let merge_iter = MergeIter::new(run_segments);
+                        let temp_container_key = ContainerKey {
+                            db_id: dest_c_key.db_id,
+                            c_id: dest_c_key.c_id + i as u16,
+                        };
+
+                        let mut tuple_count = 0;
+                        // Use inspect for single-pass counting
+                        let counting_merge_iter = merge_iter.inspect(|_| tuple_count += 1);
                         
-                        (lower, upper)
+                        let merge_start = Instant::now();
+                        let merged_store = Arc::new(AppendOnlyStore::bulk_insert_create(
+                            temp_container_key,
+                            mem_pool.clone(),
+                            counting_merge_iter,
+                        ));
+                        let merge_duration = merge_start.elapsed();
+
+                        let thread_duration = thread_start.elapsed();
+                        if verbose {
+                            println!("Thread {} completed:", i);
+                            println!("  - Merge time: {:.2}s", merge_duration.as_secs_f64());
+                            println!("  - Total time: {:.2}s", thread_duration.as_secs_f64());
+                            println!("  - Tuples processed: {}", tuple_count);
+                            println!("  - Throughput: {:.2}M tuples/s", 
+                                (tuple_count as f64) / (1_000_000.0 * thread_duration.as_secs_f64()));
+                        }
+
+                        (i, merged_store, tuple_count)
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
 
-                if verbose {println!("Partition ranges created in {:.2}s", 
-                    partition_setup_start.elapsed().as_secs_f64())};
+                if verbose { 
+                    println!("\nParallel merge completed in {:.2}s", merge_start.elapsed().as_secs_f64());
+                    println!("Combining results...") 
+                };
 
-                if verbose {println!("\nStarting parallel merge processing...")};
-                let merge_start = Instant::now();
-
-                // Use the configured thread pool for parallel processing
-                let merged_partitions = pool.install(|| {
-                    partition_ranges
-                        .into_par_iter()
-                        .enumerate()
-                        .map(|(i, (lower, upper))| {
-                            let thread_start = Instant::now();
-                            if verbose { println!("Thread {} starting - Range: {:?} to {:?}", i, &lower, &upper)};
-
-                            // Rest of the merge logic remains the same...
-                            let mut total_tuples = 0;
-                            for run in runs.iter() {
-                                let range_scan = run.scan_range(&lower, &upper);
-                                total_tuples += range_scan.count();
-                            }
-
-                            if verbose {println!("Thread {} processing {} runs with estimated {} tuples", 
-                                i, runs.len(), total_tuples)};
-
-                            let run_segments = runs
-                                .iter()
-                                .map(|r| r.scan_range(&lower, &upper))
-                                .collect::<Vec<_>>();
-
-                            let segment_merge_start = Instant::now();
-                            let merge_iter = MergeIter::new(run_segments);
-
-                            let temp_container_key = ContainerKey {
-                                db_id: dest_c_key.db_id,
-                                c_id: dest_c_key.c_id + i as u16,
-                            };
-
-                            let merged_store = Arc::new(AppendOnlyStore::bulk_insert_create(
-                                temp_container_key,
-                                mem_pool.clone(),
-                                merge_iter,
-                            ));
-
-                            let thread_duration = thread_start.elapsed();
-                            let merge_duration = segment_merge_start.elapsed();
-                            
-                            if verbose {
-                                println!("Thread {} completed:", i);
-                                println!("  - Merge time: {:.2}s", merge_duration.as_secs_f64());
-                                println!("  - Total time: {:.2}s", thread_duration.as_secs_f64());
-                                println!("  - Throughput: {:.2}M tuples/s", 
-                                    (total_tuples as f64) / (1_000_000.0 * thread_duration.as_secs_f64()));
-                            }
-
-                            (i, merged_store, total_tuples)
-                        })
-                        .collect::<Vec<_>>()
-                });
-
-                // Rest of the code remains the same...
-                if verbose {println!("\nParallel merge completed in {:.2}s", 
-                    merge_start.elapsed().as_secs_f64());
-                println!("Combining results...") };
-                
                 let combine_start = Instant::now();
-                let mut sorted_partitions = merged_partitions;
-                sorted_partitions.sort_by_key(|(i, _, _)| *i);
 
-                let total_tuples: usize = sorted_partitions.iter().map(|(_, _, count)| *count).sum();
+                // Sort buffers by index
+                let mut sorted_buffers = merged_buffers;
+                sorted_buffers.sort_by_key(|(i, _, _)| *i);
 
-                let empty_iter = Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>;
-                let chained_iter = sorted_partitions
+                // Calculate total tuples
+                let total_tuples: usize = sorted_buffers.iter().map(|(_, _, count)| *count).sum();
+
+                // Chain iterators efficiently
+                let chained_iter = sorted_buffers
                     .into_iter()
-                    .fold(empty_iter, |acc, (_, store, _)| {
-                        Box::new(acc.chain(store.scan()))
-                    });
+                    .fold(
+                        Box::new(std::iter::empty()) as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>>,
+                        |acc, (_, store, _)| Box::new(acc.chain(store.scan()))
+                    );
 
-                if verbose {println!("Results combined in {:.2}s", combine_start.elapsed().as_secs_f64())};
+                if verbose { println!("Results combined in {:.2}s", combine_start.elapsed().as_secs_f64()) };
 
+                // Create final store
                 let final_store = Arc::new(AppendOnlyStore::bulk_insert_create(
                     dest_c_key,
                     mem_pool.clone(),
@@ -1651,7 +1606,6 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
 
         // -------------- Run Merge Phase --------------
         let start_merge = Instant::now();
-        // let final_run = self.run_merge_sorted_store(policy, runs, mem_pool, dest_c_key)?;
         let final_run = self.run_merge_kraska(policy, runs, mem_pool, dest_c_key)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
@@ -2148,7 +2102,7 @@ mod tests {
             );
 
             let runs = external_sort
-                .run_generation_old(&policy, &context, &bp, dest_c_key)
+                .run_generation_4(&policy, &context, &bp, dest_c_key)
                 .unwrap();
 
             println!("Num runs: {}", runs.len());

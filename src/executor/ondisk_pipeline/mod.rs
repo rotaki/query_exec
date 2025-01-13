@@ -1984,7 +1984,7 @@ impl<T: TxnStorageTrait, M: MemPool> PhysicalRelExprToPipelineQueue<T, M> {
                     .collect();
                 let schema = input_op.schema().clone();
                 let num_quantiles = std::env::var("BENCH_NUM_QUANTILES") //xtx janky way of updating the number of quantiles/threads
-                    .unwrap_or_else(|_| "10".to_string())
+                    .unwrap_or_else(|_| "9".to_string())
                     .parse::<usize>()
                     .expect("Invalid num quantiles");
                 let sort = BlockingOp::OnDiskSort(OnDiskSort::new(
