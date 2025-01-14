@@ -110,13 +110,15 @@ pub fn estimate_quantiles<M: MemPool>(
         QuantileMethod::Histograms => histogram_based_quantiles(runs, num_quantiles_per_run),
         QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
         QuantileMethod::Actual => vec![
-            // vec![0, 0, 0, 0, 0, 0, 0, 130, 191], 
-            vec![0, 0, 0, 0, 0, 0, 0, 0, 0], 
-            vec![0, 0, 0, 0, 0, 0, 1, 4, 149], 
-            vec![0, 0, 0, 0, 0, 0, 1, 134, 99], 
-            vec![0, 0, 0, 0, 0, 0, 2, 8, 214], 
-            // vec![0, 0, 0, 0, 0, 0, 2, 139, 8],
-            vec![255, 255, 255, 255, 255, 255, 255, 255, 255]
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 1], 
+            vec![0, 0, 0, 0, 0, 0, 0, 4, 227], 
+            vec![0, 0, 0, 0, 0, 0, 0, 9, 199], 
+            vec![0, 0, 0, 0, 0, 0, 0, 14, 169], 
+            vec![0, 0, 0, 0, 0, 0, 0, 19, 135],
+            vec![0, 0, 0, 0, 0, 0, 0, 24, 109],
+            vec![0, 0, 0, 0, 0, 0, 0, 29, 73],
+            vec![0, 0, 0, 0, 0, 0, 0, 34, 45],
+            vec![0, 0, 0, 0, 0, 0, 0, 19, 135],
         ], // Shouldn't happen in "estimate" phase
     }
 }
