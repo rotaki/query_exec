@@ -1299,9 +1299,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mut runs: Vec<Arc<SortedRunStore<M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
+        num_threads: usize,
     ) -> Result<Arc<AppendOnlyStore<M>>, ExecError> {
         let verbose = true;
-        let num_quantiles = 5;
+        let num_quantiles = num_threads+ 1;
 
         let overall_start = Instant::now();
         if verbose { println!("\nStarting parallel merge operation...") };
@@ -1725,6 +1726,11 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     .map(|r| r.scan_range(&lower_bytes, &upper_bytes))
                     .collect::<Vec<_>>();
 
+                let mut str = format!("thread {} lower bytes {:?} upperbytes {:?}", i, lower_bytes, upper_bytes);
+                // for (j, run) in run_segments.iter().enumerate(){
+                //     str.push_str(&format!("(run {} is starting at {})",j, run.current_page_index));
+                // }
+                println!("{}",str);
                 let thread_duration = thread_start.elapsed();
                 if verbose {
                     println!("Thread {} completed -1 in {:.2}s", 
@@ -1737,7 +1743,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     c_id: dest_c_key.c_id + i as u16,
                 };
 
-                let mut tuple_count = 0;
+                // let mut tuple_count = 0;
                 // let counting_iter = merge_iter.inspect(|_| tuple_count += 1);
                 
                 let thread_duration = thread_start.elapsed();
@@ -1754,6 +1760,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     mem_pool.clone(),
                     merge_iter,
                 ));
+                let tuple_count = partial_store.num_kvs();
 
                 let merge_duration = merge_start.elapsed();
 
@@ -1888,9 +1895,9 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         println!("generation duration {:?}", duration_generation);
         
         // -------------- Run Merge Phase --------------
-        let merge_num_threads = 8;
+        let merge_num_threads = 1;
         let start_merge = Instant::now();
-        let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
+        let final_run = self.run_merge_kraska(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
         verify_sorted_store_full(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
