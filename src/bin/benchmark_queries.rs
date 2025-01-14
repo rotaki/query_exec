@@ -161,6 +161,7 @@ fn main() {
                 eprintln!("Error during query execution: {}", e);
                 std::process::exit(1);
             }
+            let _ = bp.clear_dirty_flags();
             let _ = bp.flush_all_and_reset();
         }
     }
