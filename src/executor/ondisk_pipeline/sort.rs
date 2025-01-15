@@ -36,7 +36,7 @@ use crossbeam::thread;
 use crate::quantile_lib::*;
 
 
-use fbtree::access_method::sorted_run_store::SortedRunStore;
+use fbtree::access_method::sorted_run_store::{SortedRunStore, BigSortedRunStore};
 
 #[derive(Clone, Debug)]
 pub struct SingleRunQuantiles {
@@ -1656,6 +1656,240 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         Ok(result)
     }
 
+    //Run merge parllel but uses a big sorted store
+    fn run_merge_parallel_bss(
+        &mut self,
+        policy: &Arc<MemoryPolicy>,
+        mut runs: Vec<Arc<SortedRunStore<M>>>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        num_threads: usize,
+    ) -> Result<Arc<BigSortedRunStore<M>>, ExecError> {
+        let verbose = true;
+        let num_quantiles = num_threads + 1; // Number of parallel chunks per merge
+        
+        if verbose { println!("\nStarting hierarchical parallel merge operation...") };
+    
+        let result = match policy.as_ref() {
+            MemoryPolicy::FixedSizeLimit(working_mem) => {
+                let mut merge_fanins = Vec::new();
+                let working_mem = *working_mem;
+                let num_buffers = working_mem;
+                
+                // Main merge loop
+                while runs.len() > 1 {
+                    if verbose {
+                        println!("\nStarting merge step with {} runs remaining", runs.len());
+                    }
+    
+                    runs.sort_by_key(|r| r.len());
+                    let runs_to_merge = runs
+                        .drain(0..num_buffers.min(runs.len()))
+                        .collect::<Vec<_>>();
+    
+                    merge_fanins.push(runs_to_merge.len());
+                    
+                    let merged_bss = self.parallel_merge_step(
+                        runs_to_merge,
+                        mem_pool,
+                        dest_c_key,
+                        num_quantiles,
+                        verbose
+                    )?;
+    
+                    // Convert the BigSortedRunStore back to a single SortedRunStore for the next iteration
+                    let merged_store = SortedRunStore::new(
+                        merged_bss.c_key,
+                        mem_pool.clone(),
+                        merged_bss.scan() // This will use the BigSortedRunStore's iterator
+                    );
+                    runs.push(Arc::new(merged_store));
+                }
+    
+                if verbose {
+                    println!("\nMerge tree statistics:");
+                    println!("  - Total merge steps: {}", merge_fanins.len());
+                    println!("  - Fanins per step: {:?}", merge_fanins);
+                }
+    
+                // Handle the final run
+                match Arc::try_unwrap(runs.pop().unwrap()) {
+                    Ok(store) => {
+                        let mut final_bss = BigSortedRunStore::new();
+                        final_bss.add_store(store);
+                        Arc::new(final_bss)
+                    },
+                    Err(arc_store) => {
+                        // If we can't get ownership, create a new store from the iterator
+                        let final_store = SortedRunStore::new(
+                            dest_c_key,
+                            mem_pool.clone(),
+                            arc_store.scan()
+                        );
+                        let mut final_bss = BigSortedRunStore::new();
+                        final_bss.add_store(final_store);
+                        Arc::new(final_bss)
+                    }
+                }
+            }
+            MemoryPolicy::Unbounded => {
+                if verbose { println!("Using unbounded merge strategy") };
+                self.parallel_merge_step_bss(
+                    runs,
+                    mem_pool,
+                    dest_c_key,
+                    num_quantiles,
+                    verbose
+                )?
+            }
+            MemoryPolicy::Proportional(_) => {
+                unimplemented!("Proportional memory policy not implemented");
+            }
+        };
+    
+        Ok(result)
+    }
+    
+
+
+    /// Performs a single parallel merge step combining multiple sorted runs into a BigSortedRunStore
+    fn parallel_merge_step_bss(
+        &self,
+        runs: Vec<Arc<SortedRunStore<M>>>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        num_quantiles: usize,
+        verbose: bool,
+    ) -> Result<Arc<BigSortedRunStore<M>>, ExecError> {
+        let merge_start = Instant::now();
+        
+        if verbose {
+            println!("Starting parallel merge of {} runs...", runs.len());
+        }
+        println!("  - Total time 0: {:.2}s", merge_start.elapsed().as_secs_f64());
+
+        // Calculate quantiles across input runs
+        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::Actual);
+        global_quantiles[0] = vec![0;9];
+        global_quantiles[num_quantiles - 1] = vec![255;9];
+
+        let num_threads = global_quantiles.len() - 1;
+
+        if verbose {
+            println!("  - Using {} threads based on quantiles", num_threads);
+            println!("  - Quantile boundaries computed");
+        }
+
+        println!("  - Total time 1: {:.2}s", merge_start.elapsed().as_secs_f64());
+
+        // Process each range in parallel
+        let merged_buffers = (0..num_threads)
+            .into_par_iter()
+            .map(|i| {
+                let thread_start = Instant::now();
+                
+                let lower = global_quantiles[i].clone();
+                let upper = global_quantiles[i + 1].clone();
+                let upper = if i == num_threads - 1 {
+                    // Adjust upper bound for last thread
+                    let mut upper = upper.clone();
+                    let mut carry = 1;
+                    for byte in upper.iter_mut().rev() {
+                        let (new_byte, new_carry) = byte.overflowing_add(carry);
+                        *byte = new_byte;
+                        if !new_carry {
+                            carry = 0;
+                            break;
+                        }
+                        carry = 1;
+                    }
+                    if carry != 0 {
+                        upper.insert(0, 1);
+                    }
+                    upper
+                } else {
+                    upper
+                };
+
+                // Convert bounds to bytes
+                let lower_bytes: Vec<u8> = lower.iter().copied().collect();
+                let upper_bytes: Vec<u8> = upper.iter().copied().collect();
+
+                // Get iterators for this range from each run
+                let merge_start = Instant::now();
+                let run_segments = runs
+                    .iter()
+                    .map(|r| r.scan_range(&lower_bytes, &upper_bytes))
+                    .collect::<Vec<_>>();
+
+                let mut str = format!("thread {} lower bytes {:?} upperbytes {:?}", i, lower_bytes, upper_bytes);
+                println!("{}",str);
+
+                let thread_duration = thread_start.elapsed();
+                if verbose {
+                    println!("Thread {} completed -1 in {:.2}s", 
+                        i, thread_duration.as_secs_f64());
+                }
+
+                // Merge segments
+                let merge_iter = MergeIter::new(run_segments);
+                let temp_key = ContainerKey {
+                    db_id: dest_c_key.db_id,
+                    c_id: dest_c_key.c_id + i as u16,
+                };
+                
+                let thread_duration = thread_start.elapsed();
+                if verbose {
+                    println!("Thread {} completed 0 in {:.2}s", 
+                        i, thread_duration.as_secs_f64());
+                }
+
+                let merge_start = Instant::now();
+
+                // Create SortedRunStore for this partition
+                let partial_store = SortedRunStore::new(
+                    temp_key,
+                    mem_pool.clone(),
+                    merge_iter,
+                );
+
+                let merge_duration = merge_start.elapsed();
+                let tuple_count = partial_store.len();
+
+                if verbose {
+                    println!("Thread {} completed in {:.2}s ({} records)", 
+                        i, merge_duration.as_secs_f64(), tuple_count);
+                }
+
+                (i, partial_store, tuple_count)
+            })
+            .collect::<Vec<_>>();
+
+        println!("  - Total time 2: {:.2}s", merge_start.elapsed().as_secs_f64());
+
+        // Create BigSortedRunStore and add all partitions
+        let mut bss = BigSortedRunStore::new();
+        
+        // Add stores in order
+        let mut sorted_buffers = merged_buffers;
+        sorted_buffers.sort_by_key(|(i, _, _)| *i);
+        
+        let total_tuples: usize = sorted_buffers.iter().map(|(_, _, count)| *count).sum();
+
+        // Add each sorted run to the BigSortedRunStore
+        for (_, store, _) in sorted_buffers {
+            bss.add_store(store);
+        }
+
+        if verbose {
+            println!("\nMerge step completed:");
+            println!("  - Total time: {:.2}s", merge_start.elapsed().as_secs_f64());
+            println!("  - Records processed: {}", total_tuples);
+        }
+
+        Ok(Arc::new(bss))
+    }
+
     /// Performs a single parallel merge step combining multiple sorted runs
     fn parallel_merge_step(
         &self,
@@ -1895,13 +2129,17 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         println!("generation duration {:?}", duration_generation);
         
         // -------------- Run Merge Phase --------------
-        let merge_num_threads = 1;
+        let merge_num_threads = 8;
         let start_merge = Instant::now();
-        let final_run = self.run_merge_kraska(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
+        // let final_run = self.run_merge_kraska(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
+        // let final_run = self.run_merge_parallel_bss(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
+        let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
+        // verify_sorted_store_full_bss(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
         verify_sorted_store_full(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
 
+        // Ok(Arc::new(OnDiskBuffer::BigSortedRunStore(final_run)))
         Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(final_run)))
     }
 
@@ -2096,6 +2334,88 @@ fn verify_sorted_store<T: MemPool>(
 // Version that collects all violations
 fn verify_sorted_store_full<T: MemPool>(
     store: Arc<AppendOnlyStore<T>>,
+    sort_cols: &[(usize, bool, bool)],
+    verbose: bool,
+    num_threads: usize,
+) -> Vec<(usize, Vec<u8>, Vec<u8>)> {
+    let mut violations = Vec::new();
+    let mut scanner = store.scan();
+    
+    // Get first record
+    let first = match scanner.next() {
+        Some(kv) => kv,
+        None => return violations, // Empty store has no violations
+    };
+
+    let mut prev_key = first.clone().0;
+    let mut count = 1;
+
+    if count == 1{
+        println!("{:?}", first.0);
+    }
+
+
+    while let Some((curr_key, _curr_value)) = scanner.next() {
+
+        if count % (6005720 / num_threads) == 0{
+            println!("{:?}", curr_key.clone());
+        }
+
+        count += 1;
+        let mut violation_found = false;
+        
+        for &(col_idx, asc, _nulls_first) in sort_cols {
+            
+            let cmp_result = if asc {
+                // println!("prev_value {:?} curr_value {:?}", prev_key, curr_key);
+                prev_key.cmp(&curr_key)
+            } else {
+                curr_key.cmp(&prev_key)
+            };
+
+            
+            match cmp_result {
+                std::cmp::Ordering::Greater => {
+                    violation_found = true;
+                    violations.push((count, prev_key.clone(), curr_key.clone()));
+                    if verbose {
+                        println!(
+                            "Violation at position {}:\n\
+                            Previous: key={:?}, \n\
+                            Current:  key={:?},\n\
+                            Column {} violation",
+                            count, prev_key, curr_key, col_idx
+                        );
+                    }
+                    break;
+                },
+                std::cmp::Ordering::Less => break,
+                std::cmp::Ordering::Equal => continue,
+            }
+        }
+        
+        if !violation_found {
+            prev_key = curr_key;
+        }
+        else{
+            break;
+        }
+    }
+
+    if verbose {
+        if violations.is_empty() {
+            println!("Store is correctly sorted! ({} records verified)", count);
+        } else {
+            println!("Found {} violations in {} records", violations.len(), count);
+        }
+    }
+
+    violations
+}
+
+// Version that collects all violations
+fn verify_sorted_store_full_bss<T: MemPool>(
+    store: Arc<BigSortedRunStore<T>>,
     sort_cols: &[(usize, bool, bool)],
     verbose: bool,
     num_threads: usize,
