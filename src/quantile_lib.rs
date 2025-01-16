@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs::File, io::Write, sync::Arc};
-use fbtree::{access_method::sorted_run_store::SortedRunStore, bp::MemPool, prelude::AppendOnlyStore};
+use fbtree::{access_method::sorted_run_store::{SortedRunStore, BigSortedRunStore},  bp::MemPool, prelude::AppendOnlyStore};
 use std::cmp::Ordering;
 
 
@@ -99,16 +99,18 @@ pub fn compute_actual_quantiles_helper<M: MemPool>(
 
 /// Master function for estimating quantiles, dispatches to sub-methods
 pub fn estimate_quantiles<M: MemPool>(
-    runs: &[Arc<SortedRunStore<M>>],
+    runs: &[Arc<BigSortedRunStore<M>>],
     num_quantiles_per_run: usize,
     method: QuantileMethod,
 ) -> Vec<Vec<u8>> {
     match method {
-        QuantileMethod::Sampling => sample_and_combine_run_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::Mean     => mean_based_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::Median   => median_based_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::Histograms => histogram_based_quantiles(runs, num_quantiles_per_run),
-        QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
+        // QuantileMethod::Sampling => vec![],
+        // // sample_and_combine_run_quantiles(runs, num_quantiles_per_run),
+        // QuantileMethod::Mean     => vec![]
+        // mean_based_quantiles(runs, num_quantiles_per_run),
+        // QuantileMethod::Median   => median_based_quantiles(runs, num_quantiles_per_run),
+        // QuantileMethod::Histograms => histogram_based_quantiles(runs, num_quantiles_per_run),
+        // QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
         QuantileMethod::Actual => vec![
             vec![0, 0, 0, 0, 0, 0, 0, 0, 1], 
             vec![0, 0, 0, 0, 0, 0, 0, 4, 227], 
@@ -120,6 +122,7 @@ pub fn estimate_quantiles<M: MemPool>(
             vec![0, 0, 0, 0, 0, 0, 0, 34, 45],
             vec![0, 0, 0, 0, 0, 0, 0, 19, 135],
         ], // Shouldn't happen in "estimate" phase
+        _ => panic!("impelemnted qunatile estimation")
     }
 }
 
