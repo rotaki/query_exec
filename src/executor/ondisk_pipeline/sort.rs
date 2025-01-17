@@ -1257,7 +1257,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     runs,
                     mem_pool,
                     dest_c_key,
-                    num_quantiles,
+                    num_threads,
                     verbose
                 )?
             }
@@ -1731,7 +1731,7 @@ fn verify_sorted_store_full<T: MemPool>(
 
     while let Some((curr_key, _curr_value)) = scanner.next() {
 
-        if count % (6005720 / num_threads) == 0{
+        if count % (6005720 / (num_threads)) == 0{
             println!("{:?}", curr_key.clone());
         }
 
@@ -1810,6 +1810,7 @@ fn verify_sorted_store_full_bss<T: MemPool>(
         println!("{:?}", first.0);
     }
 
+    let mut last: Vec<u8> = Vec::new();
 
     while let Some((curr_key, _curr_value)) = scanner.next() {
 
@@ -1824,9 +1825,9 @@ fn verify_sorted_store_full_bss<T: MemPool>(
             
             let cmp_result = if asc {
                 // println!("prev_value {:?} curr_value {:?}", prev_key, curr_key);
-                prev_key.cmp(&curr_key)
+                prev_key.cmp(&curr_key.clone())
             } else {
-                curr_key.cmp(&prev_key)
+                curr_key.clone().cmp(&prev_key)
             };
 
             
@@ -1851,11 +1852,16 @@ fn verify_sorted_store_full_bss<T: MemPool>(
         }
         
         if !violation_found {
-            prev_key = curr_key;
+            prev_key = curr_key.clone();
         }
         else{
             break;
         }
+        last = curr_key.clone();
+    }
+
+    if count == 6005720{
+        println!("{:?}", last);
     }
 
     if verbose {
