@@ -1191,7 +1191,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let mut merge_fanins = Vec::new();
-                let working_mem = *working_mem;
+                let working_mem = 2;
                 let num_buffers = working_mem;
                 
                 // Main merge loop
@@ -1503,7 +1503,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             big_runs.push(Arc::new(temp));
         }
         // -------------- Run Merge Phase --------------
-        let merge_num_threads = 8;
+        let merge_num_threads = 32;
         let start_merge = Instant::now();
         // let final_run = self.run_merge_kraska(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;
         let final_run = self.run_merge_parallel_bss(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;
