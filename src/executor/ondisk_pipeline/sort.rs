@@ -1182,8 +1182,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
         num_threads: usize,
+        verbose: bool,
     ) -> Result<Arc<BigSortedRunStore<M>>, ExecError> {
-        let verbose = true;
         let num_quantiles = num_threads + 1; // Number of parallel chunks per merge
         
         if verbose { println!("\nStarting hierarchical parallel merge operation...") };
@@ -1285,7 +1285,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         if verbose {
             println!("Starting parallel merge of {} runs...", runs.len());
         }
-        println!("  - Total time 0: {:.2}s", merge_start.elapsed().as_secs_f64());
+        if verbose{ println!("  - Total time 0: {:.2}s", merge_start.elapsed().as_secs_f64())};
 
         // Calculate quantiles across input runs
         let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::Actual);
@@ -1297,7 +1297,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             println!("  - Quantile boundaries computed");
         }
 
-        println!("  - Total time 1: {:.2}s", merge_start.elapsed().as_secs_f64());
+        if verbose {println!("  - Total time 1: {:.2}s", merge_start.elapsed().as_secs_f64())};
 
         // Process each range in parallel
         let merged_buffers = (0..num_threads)
@@ -1339,8 +1339,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     .map(|r| r.scan_range(&lower_bytes, &upper_bytes))
                     .collect::<Vec<_>>();
 
-                let mut str = format!("thread {} lower bytes {:?} upperbytes {:?}", i, lower_bytes, upper_bytes);
-                println!("{}",str);
+                if verbose{
+                    let mut str = format!("thread {} lower bytes {:?} upperbytes {:?}", i, lower_bytes, upper_bytes);
+                    println!("{}",str);
+                };
 
                 let thread_duration = thread_start.elapsed();
                 if verbose {
@@ -1382,7 +1384,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             })
             .collect::<Vec<_>>();
 
-        println!("  - Total time 2: {:.2}s", merge_start.elapsed().as_secs_f64());
+        if verbose {println!("  - Total time 2: {:.2}s", merge_start.elapsed().as_secs_f64())};
 
         // Create BigSortedRunStore and add all partitions
         let mut bss = BigSortedRunStore::new();
@@ -1505,12 +1507,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // -------------- Run Merge Phase --------------
         let merge_num_threads = 8;
         let start_merge = Instant::now();
+        let verbose = false;
         // let final_run = self.run_merge_kraska(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;
-        let final_run = self.run_merge_parallel_bss(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;
+        let final_run = self.run_merge_parallel_bss(policy, big_runs, mem_pool, dest_c_key, merge_num_threads, verbose)?;
         // let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
-        verify_sorted_store_full_bss(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
+        verify_sorted_store_full_bss(final_run.clone(), &[(1, true, false)], verbose, merge_num_threads);
         // verify_sorted_store_full(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
 
         Ok(Arc::new(OnDiskBuffer::BigSortedRunStore(final_run)))
@@ -1807,7 +1810,7 @@ fn verify_sorted_store_full_bss<T: MemPool>(
     let mut count = 1;
 
     if count == 1{
-        println!("{:?}", first.0);
+        if verbose {println!("{:?}", first.0)};
     }
 
     let mut last: Vec<u8> = Vec::new();
@@ -1815,7 +1818,7 @@ fn verify_sorted_store_full_bss<T: MemPool>(
     while let Some((curr_key, _curr_value)) = scanner.next() {
 
         if count % (6005720 / num_threads) == 0{
-            println!("{:?}", curr_key.clone());
+            if verbose{println!("{:?}", curr_key.clone())};
         }
 
         count += 1;
@@ -1861,7 +1864,7 @@ fn verify_sorted_store_full_bss<T: MemPool>(
     }
 
     if count == 6005720{
-        println!("{:?}", last);
+        if verbose {println!("{:?}", last)};
     }
 
     if verbose {

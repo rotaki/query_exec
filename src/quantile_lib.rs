@@ -113,7 +113,6 @@ pub fn estimate_quantiles<M: MemPool>(
         // QuantileMethod::Histograms => histogram_based_quantiles(runs, num_quantiles_per_run),
         // QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
         QuantileMethod::Actual => {
-            println!("num quantiles {}", num_quantiles_per_run);
             match num_quantiles_per_run {
                 2 => vec![
                     vec![0;9], 
