@@ -9,7 +9,7 @@
 
 use bincode::de;
 use chrono::format::Item;
-use std::cell::UnsafeCell;
+use std::env;
 use std::time::Instant;
 use rayon::{iter, prelude::*, result};
 use core::{num, panic};
@@ -1191,7 +1191,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let mut merge_fanins = Vec::new();
-                let working_mem = 2;
+                let working_mem: usize = env::var("WORKING_MEM")
+                    .unwrap_or_else(|_| "100".to_string()) // Default to 100
+                    .parse()
+                    .expect("WORKING_MEM must be a valid number");
                 let num_buffers = working_mem;
                 
                 // Main merge loop
@@ -1505,7 +1508,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             big_runs.push(Arc::new(temp));
         }
         // -------------- Run Merge Phase --------------
-        let merge_num_threads = 32;
+        let merge_num_threads = env::var("NUM_THREADS")
+            .unwrap_or_else(|_| "8".to_string())
+            .parse()
+            .expect("NUM_THREADS must be a valid number");
         let start_merge = Instant::now();
         let verbose = false;
         // let final_run = self.run_merge_kraska(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;

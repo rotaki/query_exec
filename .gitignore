@@ -19,3 +19,4 @@
 .bench./*
 /yellow/*
 /quantile_data/*
+benchmark_results.csv
