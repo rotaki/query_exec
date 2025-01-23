@@ -3,14 +3,14 @@ import csv
 import os
 import math
 
-buffer_pool_sizes = [150000, 175000, 5000]
-num_threads_options = [1, 2, 4, 8, 16, 32]
-working_mem_options = [100, 200, 400]
+buffer_pool_sizes = [150000, 75000, 5000]
+num_threads_options = [1, 2, 4, 8, 16, 24, 32]
+working_mem_options = [300, 100, 50, 10, 2]
 
 # Constants for the new columns
 MACHINE = "Lincoln"
 METHOD = "Parallel_BSS"
-MEMORY_TYPE = "mnt/nvme"
+MEMORY_TYPE = "mnt/nvme1 + io-uring"
 QUERY_NUM = "100"  
 SF = "1" 
 QUANTILE_METHOD = "Actual"
