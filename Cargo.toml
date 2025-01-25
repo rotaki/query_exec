@@ -4,17 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["async_writeback"]  # Enable async writeback by default
+default = []
 log_trace = []
 log_debug = []
 log_info = []
 log_warn = []
 log_error = []
 datafusion_bench = ["datafusion", "tokio"]
-async_writeback = ["fbtree/async_write"]  # New feature that depends on fbtree's async_write
 
 [dependencies]
-fbtree = { path = "../FosterBtree/", features = ["async_write"] }
+# fbtree = { git = "https://github.com/rotaki/FosterBtree.git", branch = "master"}
+#fbtree = { git = "https://github.com/rotaki/FosterBtree.git", branch = "master"}
+fbtree = { path = "../FosterBtree/" } 
 csv = "1.3"
 tempfile = "3.2"
 serde = { version = "1.0", features = ["derive"] }
@@ -26,12 +27,10 @@ clap = "4.5"
 regex = "1.5"
 rstest = "0.21"
 datafusion = { version = "39.0", optional = true }
-tokio = { version = "1.0", features = ["rt-multi-thread", "io-util"], optional = true }
-rayon = "1.5.1"
+tokio = { version = "1.0", features = ["rt-multi-thread"], optional = true }
+rayon = "1.5.1" 
 crossbeam = "0.8"
 sysinfo = "0.28.0"
-io-uring = "0.6"  # Add io-uring dependency
-libc = "0.2"      # Add libc dependency
 
 [dev-dependencies]
 criterion = "0.5.1"
@@ -39,3 +38,10 @@ criterion = "0.5.1"
 [[bench]]
 name = "sort_bench"
 harness = false
+
+[profile.release]
+debug = true
+
+
+# [patch."https://github.com/rotaki/FosterBtree.git"]
+fbtree = { path = "../FosterBtree/" } 
