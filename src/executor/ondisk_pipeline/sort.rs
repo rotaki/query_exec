@@ -630,7 +630,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         println!("Total tuples estimated: {}", total_tuples);
     
         // Decide on the number of threads
-        let num_threads = 48;
+        let num_threads = 24;
     
         // Calculate chunk size
         let chunk_size = (total_tuples + num_threads - 1) / num_threads;
@@ -1509,7 +1509,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         }
         // -------------- Run Merge Phase --------------
         let merge_num_threads = env::var("NUM_THREADS")
-            .unwrap_or_else(|_| 8.to_string())
+            .unwrap_or_else(|_|8.to_string())
             .parse()
             .expect("NUM_THREADS must be a valid number");
         let start_merge = Instant::now();
@@ -1519,7 +1519,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
-        verify_sorted_store_full_bss(final_run.clone(), &[(1, true, false)], verbose, merge_num_threads);
+        verify_sorted_store_full_bss(final_run.clone(), &[(0, true, false)], verbose, merge_num_threads);
         // verify_sorted_store_full(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
 
         Ok(Arc::new(OnDiskBuffer::BigSortedRunStore(final_run)))

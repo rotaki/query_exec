@@ -2129,6 +2129,8 @@ dependencies = [
  "datafusion",
  "fbtree",
  "hex",
+ "rayon",
+ "regex",
  "rstest",
  "serde",
  "serde_json",
