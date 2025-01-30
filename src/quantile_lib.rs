@@ -114,9 +114,13 @@ pub fn estimate_quantiles<M: MemPool>(
         // QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
         QuantileMethod::Actual => {
             match num_quantiles_per_run {
+               // 2 => vec![
+               //     vec![0;9], 
+               //     vec![255;9], 
+               // ],
                 2 => vec![
-                    vec![0;9], 
-                    vec![255;9], 
+                    vec![0, 10, 32, 32, 47, 79, 122, 100, 70, 77, 123],
+                    vec![0, 126, 126, 124, 32, 32, 48, 48, 48, 48, 48],
                 ],
                 3 => vec![
                     vec![0, 0, 0, 0, 0, 0, 0, 0, 1],

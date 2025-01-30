@@ -1,0 +1,4 @@
+CREATE TABLE gensort_data (
+	k VARCHAR(10) NOT NULL PRIMARY KEY,
+	payload TEXT NOT NULL
+);

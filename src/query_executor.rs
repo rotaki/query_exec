@@ -1,5 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::fs::File;
+use std::io::Read;
 
 use fbtree::prelude::{
     ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
@@ -19,6 +21,10 @@ use crate::loader::DataLoader;
 use crate::parser::{Translator, TranslatorError};
 use crate::prelude::{Catalog, ColumnDef, DataType, Schema, SchemaRef, Table};
 use crate::quantile_lib::QuantileMethod;
+use crate::tuple::{Field, Tuple};
+
+use hex;
+
 
 pub fn print_tuples(tuples: Arc<impl TupleBuffer>) {
     let mut count = 0;
@@ -344,6 +350,122 @@ pub fn create_table<T: TxnStorageTrait>(
 
     storage.commit_txn(&txn, false)?;
     Ok(c_id)
+}
+
+/// Imports a gensort file in the same style as the CSV loader:
+/// building tuples and calling `insert_values` in (key, value) pairs.
+pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
+    catalog_ref: &CatalogRef,
+    storage: &Arc<T>,
+    db_id: DatabaseId,
+    c_id: ContainerId,
+    file_path: P,
+) -> Result<(), QueryExecutorError> {
+    const RECORD_SIZE: usize = 100; // Gensort records are 100 bytes
+
+    // 1. Open the file for reading.
+    let mut file = File::open(file_path.as_ref())
+        .map_err(|e| QueryExecutorError::InvalidCSV(e.to_string()))?;
+
+    // 2. Look up the schema so we know how to build the tuple.
+    let schema: SchemaRef = catalog_ref
+        .get_schema(c_id)
+        .ok_or_else(|| {
+            QueryExecutorError::InvalidTable("Table not found".to_string())
+        })?;
+
+    // 3. Begin one transaction for the bulk load.
+    let txn = storage
+        .begin_txn(&db_id, TxnOptions::default())?;
+
+    let primary_key_indices = schema.primary_key_indices();
+    let mut buffer = [0u8; RECORD_SIZE];
+    let mut pairs = Vec::new();
+    let mut count = 0;
+
+    // You can choose a batch size to avoid storing *all* pairs in memory:
+    let batch_size = 100_000;
+
+    // 4. Loop over the gensort file
+    loop {
+        // Read exactly RECORD_SIZE bytes (or 0 if EOF).
+        match file.read_exact(&mut buffer) {
+            Ok(()) => {
+                // We got exactly 100 bytes in `buffer`.
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // We reached EOF without a full read -> break if 0 bytes
+                // or error if partial record.  Use the simpler approach:
+                // Eof => break the loop.
+                break;
+            }
+            Err(e) => {
+                // Some other I/O error or partial read.
+                // For partial read, we treat it as incomplete record:
+                return Err(QueryExecutorError::InvalidCSV(format!(
+                    "I/O error (or incomplete record): {}",
+                    e
+                )));
+            }
+        }
+
+        // 5. Parse the 100-byte record into the table’s columns.
+        let key_bytes = &buffer[0..10];   //  first 10 bytes (Key)
+        let value_bytes = &buffer[10..];  // next 90 bytes (Payload)
+
+        // Convert them into strings (like CSV loader does).
+        let key_str   = hex::encode(key_bytes); // readable hex
+        let value_str = String::from_utf8_lossy(value_bytes).to_string();
+
+        // 6. Build a Tuple from these two columns
+        //    (assuming your schema has 2 columns: e.g. "gensort_key" and "gensort_val").
+        //    If your actual table has more or different columns, adapt accordingly.
+        let mut tuple = Tuple::with_capacity(schema.columns().len());
+        // For column 0:
+        let col_0 = schema.get_column(0);
+        let field_0 = Field::from_str(col_0, &key_str).map_err(|e| {
+            QueryExecutorError::InvalidCSV(format!(
+                "Error parsing key field: {}", e
+            ))
+        })?;
+        tuple.push(field_0);
+
+        // For column 1:
+        let col_1 = schema.get_column(1);
+        let field_1 = Field::from_str(col_1, &value_str).map_err(|e| {
+            QueryExecutorError::InvalidCSV(format!(
+                "Error parsing value field: {}", e
+            ))
+        })?;
+        tuple.push(field_1);
+
+        // 7. Convert `Tuple` → (primary_key_bytes, tuple_bytes).
+        let pk_bytes  = tuple.to_primary_key_bytes(primary_key_indices);
+        let val_bytes = tuple.to_bytes();
+        pairs.push((pk_bytes, val_bytes));
+
+        count += 1;
+        if pairs.len() == batch_size {
+            // Insert the accumulated batch
+            storage
+                .insert_values(&txn, &c_id, std::mem::take(&mut pairs))
+                .map_err(|e| QueryExecutorError::InvalidCSV(format!("{}","error inserting")))?;
+            println!("Inserted {} gensort records so far...", count);
+        }
+    }
+
+    // 8. Insert any remaining pairs if the file ended before we hit `batch_size`.
+    if !pairs.is_empty() {
+        storage
+            .insert_values(&txn, &c_id, pairs)
+            .map_err(|e| QueryExecutorError::InvalidCSV(format!("{}","error inserting")))?;
+    }
+
+    // 9. Commit the transaction.
+    storage.commit_txn(&txn, false)?;
+
+    println!("Inserted {} gensort records in total.", count);
+    Ok(())
 }
 
 pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
@@ -975,3 +1097,4 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 }
+

@@ -69,7 +69,7 @@ fn run_query(
         .map_err(|e| format!("Failed to load DB: {:?}", e))?;
 
     // Read SQL query
-    let query_path = format!("{}/queries/q{}.sql", db_name, query_id);
+    let query_path = format!("gensort/queries/q{}.sql", query_id);
     let sql_string = std::fs::read_to_string(&query_path)
         .map_err(|e| format!("Failed to read SQL file {}: {}", query_path, e))?;
 

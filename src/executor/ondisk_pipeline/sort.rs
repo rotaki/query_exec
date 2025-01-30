@@ -630,7 +630,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         println!("Total tuples estimated: {}", total_tuples);
     
         // Decide on the number of threads
-        let num_threads = 8;
+        let num_threads = 48;
     
         // Calculate chunk size
         let chunk_size = (total_tuples + num_threads - 1) / num_threads;
@@ -1513,7 +1513,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             .parse()
             .expect("NUM_THREADS must be a valid number");
         let start_merge = Instant::now();
-        let verbose = false;
+        let verbose = true;
         // let final_run = self.run_merge_kraska(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;
         let final_run = self.run_merge_parallel_bss(policy, big_runs, mem_pool, dest_c_key, merge_num_threads, verbose)?;
         // let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
