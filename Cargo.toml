@@ -40,16 +40,9 @@ criterion = "0.5.1"
 name = "sort_bench"
 harness = false
 
-<<<<<<< HEAD
-=======
 [profile.release]
 debug = true
->>>>>>> e2ac09e3e4a55b4db7a7bc34a77581eecbb44002
 
 
 # [patch."https://github.com/rotaki/FosterBtree.git"]
 fbtree = { path = "../FosterBtree/" } 
-<<<<<<< HEAD
-
-=======
->>>>>>> e2ac09e3e4a55b4db7a7bc34a77581eecbb44002
