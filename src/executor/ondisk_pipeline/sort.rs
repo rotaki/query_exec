@@ -1509,7 +1509,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         }
         // -------------- Run Merge Phase --------------
         let merge_num_threads = env::var("NUM_THREADS")
-            .unwrap_or_else(|_| "8".to_string())
+            .unwrap_or_else(|_| 8.to_string())
             .parse()
             .expect("NUM_THREADS must be a valid number");
         let start_merge = Instant::now();
