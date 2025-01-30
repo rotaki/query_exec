@@ -962,7 +962,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(_working_mem) => {
                 let quantile_start = Instant::now();
-                let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::Actual);
+                let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_4);
                 global_quantiles[0] = vec![0;9];
                 global_quantiles[num_quantiles - 1] = vec![255;9];
                 if verbose {println!("estimated quantiles {:?}", global_quantiles)};
@@ -1291,7 +1291,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         if verbose{ println!("  - Total time 0: {:.2}s", merge_start.elapsed().as_secs_f64())};
 
         // Calculate quantiles across input runs
-        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::Actual);
+        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_4);
         global_quantiles[0] = vec![0;9];
         global_quantiles[num_quantiles - 1] = vec![255;9];
 
