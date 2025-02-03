@@ -962,7 +962,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let result = match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(_working_mem) => {
                 let quantile_start = Instant::now();
-                let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_4);
+                let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_1);
                 global_quantiles[0] = vec![0;9];
                 global_quantiles[num_quantiles - 1] = vec![255;9];
                 if verbose {println!("estimated quantiles {:?}", global_quantiles)};
@@ -1291,7 +1291,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         if verbose{ println!("  - Total time 0: {:.2}s", merge_start.elapsed().as_secs_f64())};
 
         // Calculate quantiles across input runs
-        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_4);
+        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_1);
         global_quantiles[0] = vec![0;9];
         global_quantiles[num_quantiles - 1] = vec![255;9];
 
@@ -1519,7 +1519,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         // let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
-        verify_sorted_store_full_bss(final_run.clone(), &[(0, true, false)], verbose, merge_num_threads);
+        verify_sorted_store_full_bss(final_run.clone(), &[(0, true, false)], false, merge_num_threads);
         // verify_sorted_store_full(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
 
         Ok(Arc::new(OnDiskBuffer::BigSortedRunStore(final_run)))
