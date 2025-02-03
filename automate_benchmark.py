@@ -4,8 +4,8 @@ import os
 import math
 
 buffer_pool_sizes = [150000]
-num_threads_options = [1, 2, 4, 8, 16, 24, 32]
-working_mem_options = [300, 50, 10, 2]
+num_threads_options = [1, 2, 4, 8, 16]
+working_mem_options = [300]
 
 # Constants for the new columns
 MACHINE = "Lincoln"
@@ -43,7 +43,7 @@ with open(output_csv, mode="w", newline="") as file:
                 result = subprocess.run(
                     ["./temp.sh", str(bp_size), str(num_threads), str(working_mem)],
                     env=env,
-                    capture_output=True,
+                    capture_output=False,
                     text=True,
                 )
 
