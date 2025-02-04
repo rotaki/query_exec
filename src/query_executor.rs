@@ -383,7 +383,7 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
     let mut pairs = Vec::new();
     let mut count = 0;
 
-    // You can choose a batch size to avoid storing *all* pairs in memory:
+    // Can choose a batch size to avoid storing *all* pairs in memory:
     let batch_size = 100_000;
 
     // 4. Loop over the gensort file
@@ -395,7 +395,7 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // We reached EOF without a full read -> break if 0 bytes
-                // or error if partial record.  Use the simpler approach:
+                // or error if partial record. 
                 // Eof => break the loop.
                 break;
             }
@@ -418,8 +418,6 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
         let value_str = String::from_utf8_lossy(value_bytes).to_string();
 
         // 6. Build a Tuple from these two columns
-        //    (assuming your schema has 2 columns: e.g. "gensort_key" and "gensort_val").
-        //    If your actual table has more or different columns, adapt accordingly.
         let mut tuple = Tuple::with_capacity(schema.columns().len());
         // For column 0:
         let col_0 = schema.get_column(0);
