@@ -1269,7 +1269,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let num_quantiles = num_threads + 1;
     
         // (1) Compute global quantiles, etc. exactly as before
-        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::TPCH_100);
+        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_1);
         global_quantiles[0] = vec![0; 9];
         global_quantiles[num_quantiles - 1] = vec![255; 9];
         let global_quantiles = Arc::new(global_quantiles);

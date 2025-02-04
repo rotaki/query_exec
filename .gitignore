@@ -22,3 +22,5 @@
 benchmark_results.csv
 gensort-linux-1.5/data/*
 gensort/data/*
+gensort/uniform
+gensort/skewed
