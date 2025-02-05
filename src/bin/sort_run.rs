@@ -1,41 +1,65 @@
-use std::env;
+use clap::Parser;
 use std::sync::Arc;
 use query_exec::{
-    prelude::{
-        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph,
-    },
+    prelude::{execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph},
     BufferPool, ContainerId, OnDiskStorage,
 };
 
-fn run_sort(
-    memory_size: usize,
-    bp: Arc<BufferPool>,
+#[derive(Debug, Parser)]
+#[clap(
+    name = "Sort Benchmark",
+    version = "1.0",
+    author = "C",
+    about = "Benchmarking sort execution for TPCH queries."
+)]
+struct SortOpt {
+    /// Buffer pool size (number of frames)
+    #[clap(short = 'b', long = "buffer-pool-size", default_value = "10000")]
+    buffer_pool_size: usize,
+
+    /// Query ID to benchmark (e.g., 100)
+    #[clap(short = 'q', long = "query", default_value = "100")]
     query_id: u32,
-) -> Result<(), String> {
+
+    /// Memory size per operator
+    #[clap(short = 'm', long = "memory-size", default_value = "100")]
+    memory_size: usize,
+
+    /// Number of iterations for the benchmark
+    #[clap(short = 'n', long = "num-iterations", default_value = "1")]
+    num_iterations: usize,
+
+    /// Path to the buffer pool directory
+    #[clap(short = 'p', long = "path", default_value = "bp-dir-tpch-sf-1")]
+    path: String,
+}
+
+fn run_sort(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) -> Result<(), String> {
     let temp_c_id = 1000;
     let exclude_last_pipeline = true;
 
-    // OnDiskStorage::load does not return a Result
+    // Load the on-disk storage from the BufferPool.
     let storage = Arc::new(OnDiskStorage::load(&bp));
 
-    // load_db returns Result<(u32, Catalog), QueryExecutorError>
+    // Load the database named "TPCH".
     let (db_id, catalog) = load_db(&storage, "TPCH")
         .map_err(|e| format!("Failed to load DB: {:?}", e))?;
 
-    // Read SQL query
+    // Construct the path to the SQL query file.
     let query_path = format!("tpch/queries/q{}.sql", query_id);
     let sql_string = std::fs::read_to_string(&query_path)
         .map_err(|e| format!("Failed to read SQL file {}: {}", query_path, e))?;
 
+    // Convert the SQL string into a logical expression.
     let logical = to_logical(db_id, &catalog, &sql_string)
         .map_err(|e| format!("Failed to convert to logical: {:?}", e))?;
-
+    // Convert the logical plan to a physical plan.
     let physical = to_physical(logical);
 
-    // Set memory policy
+    // Set a memory policy for query execution.
     let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(memory_size));
 
-    // Create pipeline graph
+    // Create the pipeline graph for executing the query.
     let exe = OnDiskPipelineGraph::new(
         db_id,
         temp_c_id as ContainerId,
@@ -47,7 +71,7 @@ fn run_sort(
         exclude_last_pipeline,
     );
 
-    // Execute the pipeline
+    // Execute the pipeline.
     let _result = execute(db_id, &storage, exe, false);
 
     println!("Sort execution completed successfully.");
@@ -56,33 +80,21 @@ fn run_sort(
 }
 
 fn main() {
-    // Retrieve environment variables or use default values
-    let buffer_pool_size = env::var("BENCH_BP_SIZE")
-        .unwrap_or_else(|_| "10000".to_string())
-        .parse::<usize>()
-        .expect("Invalid buffer pool size");
+    // Parse command-line arguments.
+    let opt = SortOpt::parse();
 
-    let query_id = env::var("BENCH_QUERY_ID")
-        .unwrap_or_else(|_| "100".to_string())
-        .parse::<u32>()
-        .expect("Invalid query ID");
-
-    let memory_size = env::var("BENCH_MEMORY_SIZE")
-        .unwrap_or_else(|_| "100".to_string())
-        .parse::<usize>()
-        .expect("Invalid memory size");
-
-    let path = "bp-dir-tpch-sf-1"; // Should be configurable
-
-    // Initialize the BufferPool
+    // Initialize the BufferPool using the provided parameters.
     let bp = Arc::new(
-        BufferPool::new(path, buffer_pool_size, false)
+        BufferPool::new(&opt.path, opt.buffer_pool_size, false)
             .expect("Failed to initialize BufferPool"),
     );
 
-    // Run the sort
-    if let Err(e) = run_sort(memory_size, bp, query_id) {
-        eprintln!("Error during sort execution: {}", e);
-        std::process::exit(1);
+    // Run the sort benchmark for the specified number of iterations.
+    for itr in 0..opt.num_iterations {
+        println!("Iteration {}", itr + 1);
+        if let Err(e) = run_sort(opt.memory_size, bp.clone(), opt.query_id) {
+            eprintln!("Error during sort execution: {}", e);
+            std::process::exit(1);
+        }
     }
 }

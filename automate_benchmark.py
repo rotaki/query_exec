@@ -14,7 +14,7 @@ MEMORY_TYPE = "tank/local"
 QUERY_NUM = "100"  
 SF = "1" 
 QUANTILE_METHOD = "Actual"
-mem_size = 288 * int(SF)
+mem_size = 188 * int(SF)
 
 # Output CSV file
 output_csv = "benchmark_results.csv"
