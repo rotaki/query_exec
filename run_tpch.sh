@@ -8,6 +8,7 @@ WORKING_MEM=300
 # Set environment variables
 export NUM_THREADS=$NUM_THREADS
 export WORKING_MEM=$WORKING_MEM
+export QUANTILE_METHOD=TPCH_100
 
 # Clean up previous runs
 rm -rf bp-dir-tpch-sf-1/0/??*

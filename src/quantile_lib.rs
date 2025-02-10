@@ -36,6 +36,15 @@ impl QuantileMethod {
             QuantileMethod::GKSketch => "GK Sketch".to_string(),
         }
     }
+
+    pub fn from_string(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "GENSORT_1" => Some(QuantileMethod::GENSORT_1),
+            "GENSORT_4" => Some(QuantileMethod::GENSORT_4),
+            "TPCH_100" => Some(QuantileMethod::TPCH_100),
+            _ => None
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

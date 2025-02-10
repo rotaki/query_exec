@@ -8,6 +8,7 @@ WORKING_MEM=200
 # Set environment variables
 export NUM_THREADS=$NUM_THREADS
 export WORKING_MEM=$WORKING_MEM
+export QUANTILE_METHOD=GENSORT_1
 
 # Clean up previous runs
 rm -rf bp-dir-gesnort-sf-6005720-uniform/0/??*

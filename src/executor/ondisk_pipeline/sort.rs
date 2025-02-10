@@ -21,6 +21,9 @@ use std::{
     thread,
 };
 
+use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
+
 use crate::{
     error::ExecError,
     executor::TupleBuffer,
@@ -1268,8 +1271,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let merge_start = Instant::now();
         let num_quantiles = num_threads + 1;
     
+
+        let quantile_method = env::var("QUANTILE_METHOD")
+        .map(|s| QuantileMethod::from_string(&s))
+        .unwrap_or(Some(QuantileMethod::TPCH_100))
+        .expect("Invalid QUANTILE_METHOD");
         // (1) Compute global quantiles, etc. exactly as before
-        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::GENSORT_1);
+        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, quantile_method);
         global_quantiles[0] = vec![0; 9];
         global_quantiles[num_quantiles - 1] = vec![255; 9];
         let global_quantiles = Arc::new(global_quantiles);
@@ -1367,6 +1375,186 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         }
     
         Ok(Arc::new(bss))
+    }
+
+
+    fn run_merge_unix_style(
+        &mut self,
+        policy: &Arc<MemoryPolicy>,
+        mut runs: Vec<Arc<BigSortedRunStore<M>>>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+        num_threads: usize,
+        verbose: bool
+    ) -> Result<Arc<BigSortedRunStore<M>>, ExecError> {
+        let start_merge = Instant::now();
+        
+        // Calculate optimal fan-in based on memory policy
+        let fanin = match policy.as_ref() {
+            MemoryPolicy::FixedSizeLimit(limit) => {
+                (*limit).min(16)
+            },
+            _ => 16
+        };
+    
+        if verbose {
+            println!("Starting Unix-style merge with fanin {}", fanin);
+            println!("Initial number of runs: {}", runs.len());
+        }
+    
+        while runs.len() > 1 {
+            println!("{}", runs.len());
+            let mut new_runs = Vec::new();
+            
+            // Process runs in groups of fanin size
+            for chunk in runs.chunks(fanin) {
+                if chunk.len() == 1 {
+                    new_runs.push(chunk[0].clone());
+                    continue;
+                }
+    
+                let merge_key = ContainerKey {
+                    db_id: dest_c_key.db_id,
+                    c_id: dest_c_key.c_id + new_runs.len() as u16,
+                };
+    
+                let merged = self.merge_chunk_unix(
+                    chunk.to_vec(),
+                    mem_pool,
+                    merge_key,
+                    num_threads,
+                    verbose
+                )?;
+    
+                new_runs.push(Arc::new(merged));
+            }
+    
+            if verbose {
+                println!("Completed merge pass. Runs reduced from {} to {}", 
+                        runs.len(), new_runs.len());
+            }
+    
+            runs = new_runs;
+        }
+    
+        let duration = start_merge.elapsed();
+        if verbose {
+            println!("Unix-style merge completed in {:?}", duration);
+        }
+    
+        Ok(runs.pop().unwrap())
+    }
+    
+    fn merge_chunk_unix(
+        &self,
+        runs: Vec<Arc<BigSortedRunStore<M>>>,
+        mem_pool: &Arc<M>,
+        dest_key: ContainerKey,
+        num_threads: usize,
+        verbose: bool
+    ) -> Result<BigSortedRunStore<M>, ExecError> {
+        let start = Instant::now();
+    
+        // Create merged store
+        let mut merged_store = BigSortedRunStore::new();
+    
+        // Calculate chunk boundaries upfront
+        let mut boundaries = Vec::new();
+        let min_key = vec![0; 9];  // Explicitly using Vec<u8> instead of [u8]
+        let max_key = vec![255; 9];
+    
+        // Sample keys from runs to determine boundaries
+        let samples_per_run = (1000f64 / runs.len() as f64).ceil() as usize;
+        for run in &runs {
+            let mut scanner = run.scan();
+            let skip_size = std::cmp::max(1, run.len() / samples_per_run);
+            let mut count = 0;
+            
+            while let Some((key, _)) = scanner.next() {
+                if count % skip_size == 0 {
+                    boundaries.push(key.to_vec());
+                }
+                count += 1;
+            }
+        }
+        boundaries.sort();
+    
+        // Divide work into chunks - explicitly using Vec<u8>
+        let chunk_count = num_threads;
+        let chunks: Vec<(Vec<u8>, Vec<u8>)> = (0..chunk_count).map(|i| {
+            let start_idx = (i * boundaries.len()) / chunk_count;
+            let start_key = if i == 0 {
+                min_key.clone()
+            } else {
+                boundaries[start_idx].clone()
+            };
+    
+            let end_key = if i == chunk_count - 1 {
+                max_key.clone()
+            } else {
+                let end_idx = ((i + 1) * boundaries.len()) / chunk_count;
+                boundaries[end_idx].clone()
+            };
+    
+            (start_key, end_key)
+        }).collect();
+    
+        // Use a thread pool to process chunks
+        let (tx, rx) = crossbeam::channel::bounded::<(Vec<u8>, Vec<u8>)>(num_threads);
+        let store = Arc::new(Mutex::new(&mut merged_store));
+        let completed = Arc::new(AtomicUsize::new(0));
+    
+        thread::scope(|scope| {
+            // Launch worker threads
+            for _ in 0..num_threads {
+                let rx = rx.clone();
+                let store = store.clone();
+                let runs = runs.clone();
+                let completed = completed.clone();
+                let mem_pool = mem_pool.clone();
+    
+                scope.spawn(move || {
+                    while let Ok((start_key, end_key)) = rx.recv() {
+                        // Get iterators for this range
+                        let iters = runs.iter()
+                            .map(|r| r.scan_range(&start_key, &end_key))
+                            .collect::<Vec<_>>();
+    
+                        // Merge
+                        let merged_iter = MergeIter::new(iters);
+                        let chunk_store = SortedRunStore::new(
+                            dest_key,
+                            mem_pool.clone(),
+                            merged_iter
+                        );
+    
+                        // Add to final store
+                        let mut store = store.lock().unwrap();
+                        store.add_store(Arc::new(chunk_store));
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+    
+            // Send all chunks to be processed
+            for chunk in chunks {
+                tx.send(chunk).unwrap();
+            }
+            
+            // Drop the sender to signal no more work
+            drop(tx);
+    
+            // Wait for all chunks to complete
+            while completed.load(Ordering::SeqCst) < chunk_count {
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+    
+        if verbose {
+            println!("Merged {} runs in {:?}", runs.len(), start.elapsed());
+        }
+    
+        Ok(merged_store)
     }
 
     fn compute_actual_quantiles(
@@ -1472,7 +1660,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let verbose = true;
         // let final_run = self.run_merge_kraska(policy, big_runs, mem_pool, dest_c_key, merge_num_threads)?;
         let final_run = self.run_merge_parallel_bss(policy, big_runs, mem_pool, dest_c_key, merge_num_threads, verbose)?;
-        // let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
+        // let final_run = self.run_merge_unix_style(policy, big_runs, mem_pool, dest_c_key, merge_num_threads, verbose)?;        // let final_run = self.run_merge_parallel(policy, runs, mem_pool, dest_c_key, merge_num_threads)?;
         let duration_merge = start_merge.elapsed();
         println!("merge duration {:?}", duration_merge);
         verify_sorted_store_full_bss(final_run.clone(), &[(0, true, false)], false, merge_num_threads);
