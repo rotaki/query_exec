@@ -40,7 +40,10 @@ pub fn create_gensort_db(sf: f64, buffer_pool_size: usize, name: &str) {
     // 1. Check for the input file path: "gensort/data/sf-<sf>-<name>"
     let data_path = format!("gensort/{}", name);
     if !PathBuf::from(&data_path).exists() {
-        panic!("Data file {} does not exist. Please provide valid Gensort data.", data_path);
+        panic!(
+            "Data file {} does not exist. Please provide valid Gensort data.",
+            data_path
+        );
     }
     println!("Loading Gensort binary data from {}", data_path);
 
@@ -58,8 +61,8 @@ pub fn create_gensort_db(sf: f64, buffer_pool_size: usize, name: &str) {
 
     // 5. Read the CREATE TABLE statement from "gensort/tables/gensort_data.sql"
     let table_sql_path = "gensort/tables/gensort_data.sql";
-    let table_sql = std::fs::read_to_string(table_sql_path)
-        .expect("Failed to read gensort_data.sql file.");
+    let table_sql =
+        std::fs::read_to_string(table_sql_path).expect("Failed to read gensort_data.sql file.");
     // 6. Create the table in "GENSORT" using your existing function
     let c_id = create_table_from_sql(
         &catalog,
@@ -67,7 +70,8 @@ pub fn create_gensort_db(sf: f64, buffer_pool_size: usize, name: &str) {
         db_id,
         &table_sql,
         ContainerType::AppendOnly,
-    ).expect("Failed to create gensort_data table");
+    )
+    .expect("Failed to create gensort_data table");
     // 7. Import raw gensort records from data_path using `import_gensort`
     import_gensort(&catalog, &storage, db_id, c_id, &data_path)
         .expect("Error importing Gensort data");

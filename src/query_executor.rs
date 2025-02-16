@@ -1,7 +1,7 @@
-use std::path::Path;
-use std::sync::Arc;
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
+use std::sync::Arc;
 
 use fbtree::prelude::{
     ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
@@ -24,7 +24,6 @@ use crate::quantile_lib::QuantileMethod;
 use crate::tuple::{Field, Tuple};
 
 use hex;
-
 
 pub fn print_tuples(tuples: Arc<impl TupleBuffer>) {
     let mut count = 0;
@@ -134,21 +133,25 @@ pub fn quantile_generation_execute<T: TxnStorageTrait, E: Executor<T>>(
     num_quantiles_per_run: usize,
     estimated_store_json: &str,
     actual_store_json: &str,
-    evaluation_json: &str) -> Arc<impl TupleBuffer> {
+    evaluation_json: &str,
+) -> Arc<impl TupleBuffer> {
     if verbose {
         println!("=== Executor ===");
         println!("{}", exec.to_pretty_string());
     }
     let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
-    let result = exec.quantile_generation_execute(
-        &txn,
-        data_source,
-        query_id,
-        methods,
-        num_quantiles_per_run,
-        estimated_store_json,
-        actual_store_json,
-        evaluation_json).unwrap();
+    let result = exec
+        .quantile_generation_execute(
+            &txn,
+            data_source,
+            query_id,
+            methods,
+            num_quantiles_per_run,
+            estimated_store_json,
+            actual_store_json,
+            evaluation_json,
+        )
+        .unwrap();
     storage.commit_txn(&txn, false).unwrap();
     result
 }
@@ -370,13 +373,10 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
     // 2. Look up the schema so we know how to build the tuple.
     let schema: SchemaRef = catalog_ref
         .get_schema(c_id)
-        .ok_or_else(|| {
-            QueryExecutorError::InvalidTable("Table not found".to_string())
-        })?;
+        .ok_or_else(|| QueryExecutorError::InvalidTable("Table not found".to_string()))?;
 
     // 3. Begin one transaction for the bulk load.
-    let txn = storage
-        .begin_txn(&db_id, TxnOptions::default())?;
+    let txn = storage.begin_txn(&db_id, TxnOptions::default())?;
 
     let primary_key_indices = schema.primary_key_indices();
     let mut buffer = [0u8; RECORD_SIZE];
@@ -395,7 +395,7 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
             }
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // We reached EOF without a full read -> break if 0 bytes
-                // or error if partial record. 
+                // or error if partial record.
                 // Eof => break the loop.
                 break;
             }
@@ -410,11 +410,11 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
         }
 
         // 5. Parse the 100-byte record into the table’s columns.
-        let key_bytes = &buffer[0..10];   //  first 10 bytes (Key)
-        let value_bytes = &buffer[10..];  // next 90 bytes (Payload)
+        let key_bytes = &buffer[0..10]; //  first 10 bytes (Key)
+        let value_bytes = &buffer[10..]; // next 90 bytes (Payload)
 
         // Convert them into strings (like CSV loader does).
-        let key_str   = hex::encode(key_bytes); // readable hex
+        let key_str = hex::encode(key_bytes); // readable hex
         let value_str = String::from_utf8_lossy(value_bytes).to_string();
 
         // 6. Build a Tuple from these two columns
@@ -422,23 +422,19 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
         // For column 0:
         let col_0 = schema.get_column(0);
         let field_0 = Field::from_str(col_0, &key_str).map_err(|e| {
-            QueryExecutorError::InvalidCSV(format!(
-                "Error parsing key field: {}", e
-            ))
+            QueryExecutorError::InvalidCSV(format!("Error parsing key field: {}", e))
         })?;
         tuple.push(field_0);
 
         // For column 1:
         let col_1 = schema.get_column(1);
         let field_1 = Field::from_str(col_1, &value_str).map_err(|e| {
-            QueryExecutorError::InvalidCSV(format!(
-                "Error parsing value field: {}", e
-            ))
+            QueryExecutorError::InvalidCSV(format!("Error parsing value field: {}", e))
         })?;
         tuple.push(field_1);
 
         // 7. Convert `Tuple` → (primary_key_bytes, tuple_bytes).
-        let pk_bytes  = tuple.to_primary_key_bytes(primary_key_indices);
+        let pk_bytes = tuple.to_primary_key_bytes(primary_key_indices);
         let val_bytes = tuple.to_bytes();
         pairs.push((pk_bytes, val_bytes));
 
@@ -447,7 +443,7 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
             // Insert the accumulated batch
             storage
                 .insert_values(&txn, &c_id, std::mem::take(&mut pairs))
-                .map_err(|e| QueryExecutorError::InvalidCSV(format!("{}","error inserting")))?;
+                .map_err(|e| QueryExecutorError::InvalidCSV(format!("{}", "error inserting")))?;
             println!("Inserted {} gensort records so far...", count);
         }
     }
@@ -456,7 +452,7 @@ pub fn import_gensort<P: AsRef<Path>, T: TxnStorageTrait>(
     if !pairs.is_empty() {
         storage
             .insert_values(&txn, &c_id, pairs)
-            .map_err(|e| QueryExecutorError::InvalidCSV(format!("{}","error inserting")))?;
+            .map_err(|e| QueryExecutorError::InvalidCSV(format!("{}", "error inserting")))?;
     }
 
     // 9. Commit the transaction.
@@ -1095,4 +1091,3 @@ mod tests {
         check_result(result, &mut expected, true, false);
     }
 }
-

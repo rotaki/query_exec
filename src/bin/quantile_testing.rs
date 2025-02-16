@@ -3,11 +3,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 
-use csv::Writer;           // Add `csv = "1"` to Cargo.toml
+use csv::Writer; // Add `csv = "1"` to Cargo.toml
 use serde::Deserialize;
 
 use query_exec::{
-    prelude::{load_db, quantile_generation_execute, to_logical, to_physical, DataType, MemoryPolicy, OnDiskPipelineGraph}, quantile_lib::QuantileMethod, BufferPool, ContainerId, OnDiskStorage
+    prelude::{
+        load_db, quantile_generation_execute, to_logical, to_physical, DataType, MemoryPolicy,
+        OnDiskPipelineGraph,
+    },
+    quantile_lib::QuantileMethod,
+    BufferPool, ContainerId, OnDiskStorage,
 };
 
 // A small struct to hold MSE and max-abs-error:
@@ -24,9 +29,9 @@ fn main() -> Result<(), String> {
     // ---------------------------
     // 1) Setup config
     // ---------------------------
-    let data_sources = vec!["yellow-tripdata-2024-01"]; 
-    let data_sources = vec!["tpch-sf-1"]; 
-    let queries = vec![100,101];
+    let data_sources = vec!["yellow-tripdata-2024-01"];
+    let data_sources = vec!["tpch-sf-1"];
+    let queries = vec![100, 101];
     let methods = vec![
         QuantileMethod::Mean,
         QuantileMethod::GKSketch,
@@ -53,14 +58,17 @@ fn main() -> Result<(), String> {
         let bp = Arc::new(
             BufferPool::new(bp_joined.clone(), buffer_pool_size, false)
                 .map_err(|e| format!("Failed to initialize BufferPool: {:?}", e))?,
-        );        
+        );
         // Create directory: e.g. "quantile_data/TPCH_SF1" if needed
         let base_path = format!("quantile_data/{}", ds);
         fs::create_dir_all(&base_path)
             .map_err(|e| format!("Failed to create directory {}: {:?}", base_path, e))?;
 
         for &query_id in &queries {
-            println!("executing query {} for data source {}", query_id, &bp_joined);
+            println!(
+                "executing query {} for data source {}",
+                query_id, &bp_joined
+            );
             // (A) Run the pipeline for (method, ds, query_id):
             if let Err(e) = run_quantile_generation(
                 memory_size,
@@ -71,19 +79,21 @@ fn main() -> Result<(), String> {
                 ds,
                 &base_path,
             ) {
-                eprintln!("Error: method={:?}, ds={}, q={}: {}", methods, ds, query_id, e);
+                eprintln!(
+                    "Error: method={:?}, ds={}, q={}: {}",
+                    methods, ds, query_id, e
+                );
                 // decide whether to exit or keep going
                 return Err(e);
             }
 
             // (B) The code above will write "q<query_id>_<method>_eval.json"
             //     We can parse it to get MSE & max_err:
-            
         }
     }
 
-    for method in methods.clone(){
-        for ds in &data_sources{
+    for method in methods.clone() {
+        for ds in &data_sources {
             let base_path = format!("quantile_data/{}", ds);
             for &query_id in &queries {
                 let method_str = method.to_string();
@@ -92,7 +102,11 @@ fn main() -> Result<(), String> {
                     Ok((mse, max_abs)) => {
                         // Insert into our results map
                         results_map.insert(
-                            (format!("{} {} quantiles", method_str.clone(), num_quantiles), ds.to_string(), query_id),
+                            (
+                                format!("{} {} quantiles", method_str.clone(), num_quantiles),
+                                ds.to_string(),
+                                query_id,
+                            ),
                             ErrorMetrics { mse, max_abs },
                         );
                     }
@@ -108,8 +122,8 @@ fn main() -> Result<(), String> {
     // 3) Build the CSV in "wide" format
     // ---------------------------
     let out_csv = "quantile_data/wide_results.csv";
-    let mut wtr = Writer::from_path(&out_csv)
-        .map_err(|e| format!("Failed to create CSV writer: {:?}", e))?;
+    let mut wtr =
+        Writer::from_path(&out_csv).map_err(|e| format!("Failed to create CSV writer: {:?}", e))?;
 
     // (A) Construct the header row
     // First column: "method"
@@ -176,15 +190,14 @@ fn run_quantile_generation(
     base_path: &str,
 ) -> Result<(), String> {
     let storage = Arc::new(OnDiskStorage::<BufferPool>::load(&bp));
-    let (db_id, catalog) = load_db(&storage, data_source)
-        .map_err(|e| format!("Failed to load DB: {:?}", e))?;
+    let (db_id, catalog) =
+        load_db(&storage, data_source).map_err(|e| format!("Failed to load DB: {:?}", e))?;
 
     // read the .sql
-    let prefix = if let Some(prefix) = data_source.split("-").next(){
+    let prefix = if let Some(prefix) = data_source.split("-").next() {
         prefix.to_string()
-    }
-    else{
-        return Err("Failed to extract keyword".to_string())
+    } else {
+        return Err("Failed to extract keyword".to_string());
     };
     let query_path = format!("{}/queries/q{}.sql", prefix, query_id);
     let sql_string = fs::read_to_string(&query_path)
@@ -211,14 +224,14 @@ fn run_quantile_generation(
     // Filenames
     // let method_str = method.to_string();
     let estimated_path = format!("{}/q{}_***_estimated.json", base_path, query_id);
-    let actual_path    = format!("{}/q{}_actual.json",       base_path, query_id);
-    let eval_path      = format!("{}/q{}_***_eval.json",      base_path, query_id);
+    let actual_path = format!("{}/q{}_actual.json", base_path, query_id);
+    let eval_path = format!("{}/q{}_***_eval.json", base_path, query_id);
 
     let _ = quantile_generation_execute(
         db_id,
         &storage,
         exe,
-        false, 
+        false,
         data_source,
         query_id as u8,
         methods,

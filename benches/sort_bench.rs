@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use query_exec::{
-    prelude::{execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph}, BufferPool, ContainerId, MemPool, OnDiskStorage
+    prelude::{execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph},
+    BufferPool, ContainerId, MemPool, OnDiskStorage,
 };
 use std::sync::Arc;
 

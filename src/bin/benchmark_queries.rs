@@ -1,15 +1,13 @@
 // src/bin/benchmark_queries.rs
 
 use clap::Parser;
+use query_exec::{
+    prelude::{execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph},
+    BufferPool, ContainerId, MemPool, OnDiskStorage,
+};
 use std::sync::Arc;
 use std::time::Instant;
 use sysinfo::{CpuExt, System, SystemExt};
-use query_exec::{
-    prelude::{
-        execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph,
-    },
-    BufferPool, ContainerId, OnDiskStorage, MemPool,
-};
 
 #[derive(Debug, Parser)]
 #[clap(
@@ -36,9 +34,12 @@ pub struct BenchmarkOpt {
     pub queries: Vec<u32>,
 
     /// Path to buffer pool directory
-    #[clap(short = 'p', long = "path", default_value = "bp-dir-yellow-tripdata-2024-01")]
+    #[clap(
+        short = 'p',
+        long = "path",
+        default_value = "bp-dir-yellow-tripdata-2024-01"
+    )]
     pub path: String,
-
 
     /// Enable verbose output
     #[clap(short = 'v', long = "verbose")]
@@ -65,8 +66,8 @@ fn run_query(
     let storage = Arc::new(OnDiskStorage::load(&bp));
     let db_name = "tpch";
 
-    let (db_id, catalog) = load_db(&storage, &db_name)
-        .map_err(|e| format!("Failed to load DB: {:?}", e))?;
+    let (db_id, catalog) =
+        load_db(&storage, &db_name).map_err(|e| format!("Failed to load DB: {:?}", e))?;
 
     // Read SQL query
     let query_path = format!("gensort/queries/q{}.sql", query_id);
@@ -106,22 +107,19 @@ fn run_query(
         exclude_last_pipeline,
     );
 
-
     // Capture metrics before execution
     let (cpu_start, mem_start) = get_system_metrics(system);
-    if verbose{
+    if verbose {
         println!(
             "Start - CPU: {:.2}%, Memory: {:.2} MB",
-            cpu_start,
-            mem_start
+            cpu_start, mem_start
         );
     }
-        
+
     let start_time = Instant::now();
 
     // Execute the pipeline
     let _result = execute(db_id, &storage, exe, false);
-
 
     println!("stats after {:?}", bp.stats());
 
@@ -129,15 +127,13 @@ fn run_query(
 
     // Capture metrics after execution
     let (cpu_end, mem_end) = get_system_metrics(system);
-    if verbose{
+    if verbose {
         println!(
             "End - CPU: {:.2}%, Memory: {:.2} MB, Runtime: {:.2?}",
-            cpu_end,
-            mem_end,
-            duration
+            cpu_end, mem_end, duration
         );
     }
-        
+
     println!("Query execution completed successfully.");
 
     Ok(())
@@ -157,7 +153,13 @@ fn main() {
     for &query_id in &opt.queries {
         for itr in 0..opt.num_iterations {
             println!("Running query {} - Iteration {}", query_id, itr + 1);
-            if let Err(e) = run_query(bp.clone(), query_id, opt.memory_size_per_operator, &mut system, opt.verbose) {
+            if let Err(e) = run_query(
+                bp.clone(),
+                query_id,
+                opt.memory_size_per_operator,
+                &mut system,
+                opt.verbose,
+            ) {
                 eprintln!("Error during query execution: {}", e);
                 std::process::exit(1);
             }

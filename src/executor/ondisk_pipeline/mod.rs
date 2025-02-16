@@ -1,5 +1,5 @@
-mod hash_table;
 mod disk_buffer;
+mod hash_table;
 mod sort;
 
 use core::num;
@@ -22,9 +22,9 @@ use crate::{
     log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
+    quantile_lib::QuantileMethod,
     tuple::{FromBool, Tuple},
     ColumnId, Field,
-    quantile_lib::QuantileMethod,
 };
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
@@ -311,11 +311,11 @@ impl<T: TxnStorageTrait, M: MemPool> PRangeScanIter<T, M> {
                 return Ok(None);
             }
         }
-    
+
         if self.current_index >= self.end_index {
             return Ok(None);
         }
-    
+
         if let Some(iter) = &self.iter {
             match iter.next() {
                 Ok(Some(next_tuple)) => {
@@ -1261,9 +1261,9 @@ impl<T: TxnStorageTrait, M: MemPool> BlockingOp<T, M> {
                 Ok(Arc::new(OnDiskBuffer::AppendOnlyStore(output)))
             }
             BlockingOp::OnDiskSort(sort) => sort.quantile_generation_execute(
-                context, 
-                policy, 
-                mem_pool, 
+                context,
+                policy,
+                mem_pool,
                 dest_c_key,
                 data_source,
                 query_id,
@@ -1271,7 +1271,8 @@ impl<T: TxnStorageTrait, M: MemPool> BlockingOp<T, M> {
                 num_quantiles_per_run,
                 estimated_store_json,
                 actual_store_json,
-                evaluation_json),
+                evaluation_json,
+            ),
             BlockingOp::OnDiskHashTableCreation(creation) => {
                 creation.execute(context, policy, mem_pool, dest_c_key)
             }
@@ -1394,20 +1395,21 @@ impl<T: TxnStorageTrait, M: MemPool> Pipeline<T, M> {
         num_quantiles_per_run: usize,
         estimated_store_json: &str,
         actual_store_json: &str,
-        evaluation_json: &str,) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
-        self.exec_plan
-            .quantile_generation_execute(
-                &self.context, 
-                &self.policy, 
-                &self.mem_pool, 
-                self.dest_c_key,
-                data_source,
-                query_id,
-                methods,
-                num_quantiles_per_run,
-                estimated_store_json,
-                actual_store_json,
-                evaluation_json)
+        evaluation_json: &str,
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
+        self.exec_plan.quantile_generation_execute(
+            &self.context,
+            &self.policy,
+            &self.mem_pool,
+            self.dest_c_key,
+            data_source,
+            query_id,
+            methods,
+            num_quantiles_per_run,
+            estimated_store_json,
+            actual_store_json,
+            evaluation_json,
+        )
     }
 }
 
@@ -1526,7 +1528,8 @@ impl<T: TxnStorageTrait, M: MemPool> Executor<T> for OnDiskPipelineGraph<T, M> {
         num_quantiles_per_run: usize,
         estimated_store_json: &str,
         actual_store_json: &str,
-        evaluation_json: &str) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
+        evaluation_json: &str,
+    ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         log_info!(
@@ -1541,7 +1544,8 @@ impl<T: TxnStorageTrait, M: MemPool> Executor<T> for OnDiskPipelineGraph<T, M> {
                 num_quantiles_per_run,
                 estimated_store_json,
                 actual_store_json,
-                evaluation_json)?;
+                evaluation_json,
+            )?;
             log_info!(
                 "Pipeline ID: {} executed with output size: {:?}",
                 pipeline.get_id(),

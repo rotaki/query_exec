@@ -1,9 +1,9 @@
 use clap::Parser;
-use std::sync::Arc;
 use query_exec::{
     prelude::{execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph},
     BufferPool, ContainerId, OnDiskStorage,
 };
+use std::sync::Arc;
 
 #[derive(Debug, Parser)]
 #[clap(
@@ -42,8 +42,8 @@ fn run_sort(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) -> Result<()
     let storage = Arc::new(OnDiskStorage::load(&bp));
 
     // Load the database named "TPCH".
-    let (db_id, catalog) = load_db(&storage, "TPCH")
-        .map_err(|e| format!("Failed to load DB: {:?}", e))?;
+    let (db_id, catalog) =
+        load_db(&storage, "TPCH").map_err(|e| format!("Failed to load DB: {:?}", e))?;
 
     // Construct the path to the SQL query file.
     let query_path = format!("tpch/queries/q{}.sql", query_id);

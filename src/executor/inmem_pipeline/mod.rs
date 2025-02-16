@@ -13,9 +13,9 @@ use crate::{
     log_debug, log_info,
     optimizer::PhysicalRelExpr,
     prelude::{CatalogRef, ColumnDef, DataType, Schema, SchemaRef},
+    quantile_lib::QuantileMethod,
     tuple::{FromBool, Tuple},
     ColumnId, Field,
-    quantile_lib::QuantileMethod
 };
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
@@ -1341,13 +1341,17 @@ impl<T: TxnStorageTrait> Executor<T> for InMemPipelineGraph<T> {
     }
 
     //xtx temp
-    fn quantile_generation_execute(mut self, _txn: &T::TxnHandle, data_source: &str,
+    fn quantile_generation_execute(
+        mut self,
+        _txn: &T::TxnHandle,
+        data_source: &str,
         query_id: u8,
         methods: &[QuantileMethod],
         num_quantiles_per_run: usize,
         estimated_store_json: &str,
         actual_store_json: &str,
-        evaluation_json: &str) -> Result<Arc<InMemBuffer<T>>, ExecError> {
+        evaluation_json: &str,
+    ) -> Result<Arc<InMemBuffer<T>>, ExecError> {
         let mut result = None;
         self.push_no_deps_to_queue();
         log_info!(

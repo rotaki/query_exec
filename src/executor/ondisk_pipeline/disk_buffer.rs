@@ -4,9 +4,9 @@ use fbtree::{
     access_method::{
         append_only_store::AppendOnlyStore,
         append_only_store::AppendOnlyStoreRangeIter,
-        sorted_run_store::{BigSortedRunStore, BigSortedRunStoreScanner},
         fbt::{FosterBtree, FosterBtreeRangeScanner},
         hash_fbt::HashFosterBtreeIter,
+        sorted_run_store::{BigSortedRunStore, BigSortedRunStoreScanner},
         UniqueKeyIndex,
     },
     bp::{ContainerId, ContainerKey, DatabaseId, MemPool},
@@ -164,7 +164,6 @@ pub enum OnDiskBufferIter<T: TxnStorageTrait, M: MemPool> {
 unsafe impl<T: TxnStorageTrait, M: MemPool> Send for OnDiskBufferIter<T, M> {}
 unsafe impl<T: TxnStorageTrait, M: MemPool> Sync for OnDiskBufferIter<T, M> {}
 
-
 pub struct TxnStorage<T: TxnStorageTrait> {
     schema: SchemaRef,
     db_id: DatabaseId,
@@ -189,7 +188,13 @@ impl<T: TxnStorageTrait> TxnStorage<T> {
 
     pub fn range_scan(&self, start: usize, end: usize) -> TxnStorageRangeIter<T> {
         //xtx rushed
-        TxnStorageRangeIter::new(self.storage.clone(), self.db_id, self.container_id, start, end)
+        TxnStorageRangeIter::new(
+            self.storage.clone(),
+            self.db_id,
+            self.container_id,
+            start,
+            end,
+        )
     }
 }
 
@@ -221,15 +226,21 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBufferIter for OnDiskBufferIter<T, M> 
             OnDiskBufferIter::TxnStorage(iter) => {
                 Ok(iter.next()?.map(|(_, v)| Tuple::from_bytes(&v)))
             }
-            OnDiskBufferIter::TxnStorageRange(iter) => {
-                iter.lock().unwrap().next().map(|opt| opt.map(|(_, v)| Tuple::from_bytes(&v)))
-            }
+            OnDiskBufferIter::TxnStorageRange(iter) => iter
+                .lock()
+                .unwrap()
+                .next()
+                .map(|opt| opt.map(|(_, v)| Tuple::from_bytes(&v))),
             OnDiskBufferIter::AppendOnlyStore(iter) => Ok(iter
                 .lock()
                 .unwrap()
                 .next()
                 .map(|(_, v)| Tuple::from_bytes(&v))),
-            OnDiskBufferIter::AppendOnlyStoreRange(iter) => Ok(iter.lock().unwrap().next().map(|(_k, v)| Tuple::from_bytes(&v))),
+            OnDiskBufferIter::AppendOnlyStoreRange(iter) => Ok(iter
+                .lock()
+                .unwrap()
+                .next()
+                .map(|(_k, v)| Tuple::from_bytes(&v))),
             OnDiskBufferIter::FosterBTree(iter) => Ok(iter
                 .lock()
                 .unwrap()
@@ -250,7 +261,6 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBufferIter for OnDiskBufferIter<T, M> 
         }
     }
 }
-
 
 pub struct TxnStorageRangeIter<T: TxnStorageTrait> {
     storage: Arc<T>,
@@ -276,9 +286,9 @@ impl<T: TxnStorageTrait> TxnStorageRangeIter<T> {
 
         // Skip to start_index
         // for _ in 0..start_index {
-            // storage.iter_next(&iter).unwrap(); //xtx this is the slow part
+        // storage.iter_next(&iter).unwrap(); //xtx this is the slow part
         // }
-        
+
         let _ = storage.seek(&txn, &c_id, &iter, start_index);
 
         Self {

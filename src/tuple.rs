@@ -9,10 +9,9 @@ use crate::{
     error::ExecError,
 };
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
-use chrono::{NaiveDateTime, DateTime, Utc};
-
 
 fn f64_to_order_preserving_bytes(val: f64) -> [u8; 8] {
     let mut val_bits = val.to_bits();
@@ -670,8 +669,10 @@ impl Field {
                 DataType::Timestamp => {
                     // Parsing the datetime string "2024-01-01 00:57:55"
                     let naive_dt = NaiveDateTime::parse_from_str(field, "%Y-%m-%d %H:%M:%S")
-                        .map_err(|e| format!("Invalid Timestamp format: '{}'. Error: {}", field, e))?;
-                    
+                        .map_err(|e| {
+                            format!("Invalid Timestamp format: '{}'. Error: {}", field, e)
+                        })?;
+
                     // Convert to UNIX timestamp
                     let datetime_utc: DateTime<Utc> = DateTime::<Utc>::from_utc(naive_dt, Utc);
                     let timestamp = datetime_utc.timestamp() as u64;
@@ -746,9 +747,7 @@ impl Field {
             (Field::Days(val), DataType::Days) => Ok(Field::Days(*val)),
             (Field::Int(val), DataType::Float) => Ok(Field::Float(val.map(|v| v as f64))),
             (Field::Float(val), DataType::Int) => Ok(Field::Int(val.map(|v| v as i64))),
-            (Field::Timestamp(ts, tz), DataType::Timestamp) => {
-                Ok(Field::Timestamp(*ts, *tz))
-            }
+            (Field::Timestamp(ts, tz), DataType::Timestamp) => Ok(Field::Timestamp(*ts, *tz)),
             (Field::Timestamp(ts, tz), DataType::String) => {
                 if let (Some(ts_val), Some(tz_val)) = (ts, tz) {
                     let datetime = chrono::NaiveDateTime::from_timestamp(*ts_val as i64, 0);
@@ -768,12 +767,12 @@ impl Field {
                             v
                         )));
                     }
-                    let timestamp = parts[0]
-                        .parse::<u64>()
-                        .map_err(|e| ExecError::FieldOp(format!("Invalid timestamp value: {}", e)))?;
-                    let timezone = parts[1]
-                        .parse::<u64>()
-                        .map_err(|e| ExecError::FieldOp(format!("Invalid timezone value: {}", e)))?;
+                    let timestamp = parts[0].parse::<u64>().map_err(|e| {
+                        ExecError::FieldOp(format!("Invalid timestamp value: {}", e))
+                    })?;
+                    let timezone = parts[1].parse::<u64>().map_err(|e| {
+                        ExecError::FieldOp(format!("Invalid timezone value: {}", e))
+                    })?;
                     Ok(Field::Timestamp(Some(timestamp), Some(timezone)))
                 } else {
                     Ok(Field::Timestamp(None, None))

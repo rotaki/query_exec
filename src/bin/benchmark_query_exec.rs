@@ -3,14 +3,18 @@ use query_exec::{
     prelude::{create_db, create_table_from_sql, import_csv, Catalog},
     BufferPool, ContainerType, OnDiskStorage,
 };
+use std::time::Instant;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use sysinfo::{CpuExt, ProcessExt, System, SystemExt};
-use std::time::Instant;
 
 #[derive(Debug, Parser)]
 #[clap(name = "TPC-H Benchmark", about = "Benchmarking query_exec vs DuckDB.")]
 pub struct TpchOpt {
-    #[clap(short = 'f', long = "file-source", default_value = "yellow_tripdata_2024-01")]
+    #[clap(
+        short = 'f',
+        long = "file-source",
+        default_value = "yellow_tripdata_2024-01"
+    )]
     pub file_source: Box<str>,
 
     /// Buffer pool size.
@@ -56,7 +60,6 @@ fn main() {
         println!("Importing data from {}.", data_dir);
     }
 
-
     let catalog = get_catalog();
     let bp_name = format!("bp-dir-{}", opt.file_source);
 
@@ -71,7 +74,7 @@ fn main() {
 
     let table_names = vec![
         "yellow_tripdata", // Your new table
-        // Add other tables if needed
+                           // Add other tables if needed
     ];
 
     println!("Creating tables...");
