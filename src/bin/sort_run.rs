@@ -4,6 +4,7 @@ use query_exec::{
     BufferPool, ContainerId, OnDiskStorage,
 };
 use std::sync::Arc;
+use query_exec::MemPool;
 
 #[derive(Debug, Parser)]
 #[clap(
@@ -73,6 +74,8 @@ fn run_sort(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) -> Result<()
 
     // Execute the pipeline.
     let _result = execute(db_id, &storage, exe, false);
+    println!("stats after {:?}", bp.stats());
+
 
     println!("Sort execution completed successfully.");
 
