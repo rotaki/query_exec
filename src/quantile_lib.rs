@@ -17,6 +17,7 @@ use crate::error::ExecError;
 #[derive(Debug, Clone, Copy)]
 pub enum QuantileMethod {
     TPCH_100,
+    TPCH_100_5,
     GENSORT_1,
     GENSORT_1_10576511,
     GENSORT_4,
@@ -31,6 +32,7 @@ impl QuantileMethod {
     pub fn to_string(&self) -> String {
         match self {
             QuantileMethod::TPCH_100 => "TPCH".to_string(),
+            QuantileMethod::TPCH_100_5 => "TPCH_5".to_string(),
             QuantileMethod::GENSORT_1 => "GENSORT_1".to_string(),
             QuantileMethod::GENSORT_1_10576511 => "GENSORT_1_10576511".to_string(),
             QuantileMethod::GENSORT_4 => "GENSORT_4".to_string(),
@@ -48,6 +50,7 @@ impl QuantileMethod {
             "GENSORT_1_10576511" => Some(QuantileMethod::GENSORT_1_10576511),
             "GENSORT_4" => Some(QuantileMethod::GENSORT_4),
             "TPCH_100" => Some(QuantileMethod::TPCH_100),
+            "TPCH_100_5" => Some(QuantileMethod::TPCH_100_5),
             _ => None,
         }
     }
@@ -235,6 +238,55 @@ pub fn estimate_quantiles<M: MemPool>(
                 vec![0, 0, 0, 0, 0, 0, 0, 36, 160],
                 vec![0, 0, 0, 0, 0, 0, 0, 37, 215],
                 vec![0, 0, 0, 0, 0, 0, 0, 39, 16],
+            ],
+            _ => Vec::new(),
+        },
+        QuantileMethod::TPCH_100_5 => match num_quantiles_per_run {
+            2 => vec![
+                vec![0, 0, 0, 0, 0, 0, 0, 0, 1],
+                vec![0, 0, 0, 0, 0, 0, 0, 195, 80],
+            ],
+            3 => vec![
+                vec![0, 0, 0, 0, 0, 0, 0, 0, 1],
+                vec![0, 0, 0, 0, 0, 0, 0, 97, 177],
+                vec![0, 0, 0, 0, 0, 0, 0, 195, 80],
+            ],
+            5 => vec![
+                vec![0, 0, 0, 0, 0, 0, 0, 0, 1],
+                vec![0, 0, 0, 0, 0, 0, 0, 48, 233],
+                vec![0, 0, 0, 0, 0, 0, 0, 97, 177],
+                vec![0, 0, 0, 0, 0, 0, 0, 146, 125],
+                vec![0, 0, 0, 0, 0, 0, 0, 195, 80],
+            ],
+            9 => vec![
+                vec![0, 0, 0, 0, 0, 0, 0, 0, 1],
+                vec![0, 0, 0, 0, 0, 0, 0, 24, 109],
+                vec![0, 0, 0, 0, 0, 0, 0, 48, 233],
+                vec![0, 0, 0, 0, 0, 0, 0, 73, 83],
+                vec![0, 0, 0, 0, 0, 0, 0, 97, 177],
+                vec![0, 0, 0, 0, 0, 0, 0, 122, 37],
+                vec![0, 0, 0, 0, 0, 0, 0, 146, 125],
+                vec![0, 0, 0, 0, 0, 0, 0, 170, 244],
+                vec![0, 0, 0, 0, 0, 0, 0, 195, 80],
+            ],
+            17 => vec![
+                vec![0, 0, 0, 0, 0, 0, 0, 0, 1],
+                vec![0, 0, 0, 0, 0, 0, 0, 12, 60],
+                vec![0, 0, 0, 0, 0, 0, 0, 24, 109],
+                vec![0, 0, 0, 0, 0, 0, 0, 36, 175],
+                vec![0, 0, 0, 0, 0, 0, 0, 48, 233],
+                vec![0, 0, 0, 0, 0, 0, 0, 61, 39],
+                vec![0, 0, 0, 0, 0, 0, 0, 73, 83],
+                vec![0, 0, 0, 0, 0, 0, 0, 85, 142],
+                vec![0, 0, 0, 0, 0, 0, 0, 97, 177],
+                vec![0, 0, 0, 0, 0, 0, 0, 109, 241],
+                vec![0, 0, 0, 0, 0, 0, 0, 122, 37],
+                vec![0, 0, 0, 0, 0, 0, 0, 134, 90],
+                vec![0, 0, 0, 0, 0, 0, 0, 146, 125],
+                vec![0, 0, 0, 0, 0, 0, 0, 158, 186],
+                vec![0, 0, 0, 0, 0, 0, 0, 170, 244],
+                vec![0, 0, 0, 0, 0, 0, 0, 183, 48],
+                vec![0, 0, 0, 0, 0, 0, 0, 195, 80],
             ],
             _ => Vec::new(),
         },
