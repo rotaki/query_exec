@@ -36,7 +36,7 @@ struct SortOpt {
 }
 
 fn run_sort(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) -> Result<(), String> {
-    let temp_c_id = 1000;
+    let temp_c_id = 100000;
     let exclude_last_pipeline = true;
 
     // Load the on-disk storage from the BufferPool.
@@ -85,13 +85,13 @@ fn run_sort(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) -> Result<()
 fn main() {
     // Parse command-line arguments.
     let opt = SortOpt::parse();
-
     // Initialize the BufferPool using the provided parameters.
     let bp = Arc::new(
         BufferPool::new(&opt.path, opt.buffer_pool_size, false)
             .expect("Failed to initialize BufferPool"),
     );
-
+            let _ = bp.clear_dirty_flags();
+            let _ = bp.flush_all_and_reset();
     // Run the sort benchmark for the specified number of iterations.
     for itr in 0..opt.num_iterations {
         println!("Iteration {}", itr + 1);
@@ -100,4 +100,6 @@ fn main() {
             std::process::exit(1);
         }
     }
+    let _ = bp.clear_dirty_flags();
+    let _ = bp.flush_all_and_reset();
 }

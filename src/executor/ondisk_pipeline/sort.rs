@@ -1738,7 +1738,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         verify_sorted_store_full_bss(
             final_run.clone(),
             &[(0, true, false)],
-            false,
+            true,
             merge_num_threads,
         );
         // verify_sorted_store_full(final_run.clone(), &[(1, true, false)], true, merge_num_threads);
