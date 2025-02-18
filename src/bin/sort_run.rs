@@ -90,8 +90,6 @@ fn main() {
         BufferPool::new(&opt.path, opt.buffer_pool_size, false)
             .expect("Failed to initialize BufferPool"),
     );
-            let _ = bp.clear_dirty_flags();
-            let _ = bp.flush_all_and_reset();
     // Run the sort benchmark for the specified number of iterations.
     for itr in 0..opt.num_iterations {
         println!("Iteration {}", itr + 1);
