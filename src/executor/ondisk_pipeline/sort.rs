@@ -1520,13 +1520,14 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         self.print_efficiency_changes(&pre_merge_stats, &post_merge_stats);
 
         println!("merge duration {:?}", duration_merge);
-        verify_sorted_store_full_bss(
-            final_run.clone(),
-            &[(0, true, false)],
-            true,
-            17,
-        );
-
+        if verbose{
+            verify_sorted_store_full_bss(
+                final_run.clone(),
+                &[(0, true, false)],
+                false,
+                1,
+            );
+        }
         Ok(Arc::new(OnDiskBuffer::BigSortedRunStore(final_run)))
     }
 

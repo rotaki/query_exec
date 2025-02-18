@@ -8,13 +8,14 @@ WORKING_MEM=1420
 # Set environment variables
 export NUM_THREADS=$NUM_THREADS
 export WORKING_MEM=$WORKING_MEM
-export QUANTILE_METHOD=TPCH_100_5
+export QUANTILE_METHOD=TPCH_100_2
 #NUM_TUPLES=6005720 
-export NUM_TUPLES=30028600
+export NUM_TUPLES=12011440
+# export NUM_TUPLES=30028600
 
 # Clean up previous runs
-rm -rf bp-dir-tpch-sf-5/0/??*
+rm -rf bp-dir-tpch-sf-2/0/??*
 
-cargo run --release --bin sort_run  -- -q 100 -p bp-dir-tpch-sf-5 -n 1 -b "$BUFFER_POOL_SIZE"
+cargo run --release --bin sort_run  -- -q 100 -p bp-dir-tpch-sf-2 -n 1 -b "$BUFFER_POOL_SIZE"
 
-rm -rf bp-dir-tpch-sf-5/0/??*
+rm -rf bp-dir-tpch-sf-2/0/??*
