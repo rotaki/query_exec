@@ -786,6 +786,162 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         Ok(result_buffers)
     }
 
+    fn run_generation_kraska(
+        &mut self,
+        policy: &Arc<MemoryPolicy>,
+        context: &HashMap<PipelineID, Arc<OnDiskBuffer<T, M>>>,
+        mem_pool: &Arc<M>,
+        dest_c_key: ContainerKey,
+    ) -> Result<Vec<Arc<SortedRunStore<M>>>, ExecError> {
+        let total_tuples = env::var("NUM_TUPLES")
+            .unwrap_or_else(|_| "6005720".to_string())
+            .parse()
+            .expect("NUM_TUPLES must be a valid number");
+        
+        match policy.as_ref() {
+            MemoryPolicy::FixedSizeLimit(working_mem) => {
+                let max_parallel_partitions = std::cmp::min(*working_mem, 8);
+                println!("Total tuples estimated: {}", total_tuples);
+                println!("Working memory limit (runs): {}", working_mem);
+                println!("Maximum parallel partitions: {}", max_parallel_partitions);
+    
+                // First generate initial sorted runs in parallel
+                let target_tuples_per_run = total_tuples / max_parallel_partitions;
+    
+                let initial_runs: Vec<Arc<SortedRunStore<M>>> = (0..max_parallel_partitions)
+                    .into_par_iter()
+                    .map(|run_id| {
+                        let start = run_id * target_tuples_per_run;
+                        let end = if run_id == max_parallel_partitions - 1 {
+                            total_tuples
+                        } else {
+                            std::cmp::min(start + target_tuples_per_run, total_tuples)
+                        };
+    
+                        let mut exec_plan = self.exec_plan.clone_with_range(start, end);
+                        let run_container_key = ContainerKey {
+                            db_id: dest_c_key.db_id,
+                            c_id: dest_c_key.c_id + run_id as u16,
+                        };
+    
+                        let mut sort_buffer = SortBuffer::new(
+                            &mem_pool,
+                            run_container_key,
+                            policy,
+                            self.sort_cols.clone()
+                        );
+    
+                        let mut runs = Vec::new();
+    
+                        // Fill buffer with tuples for this range
+                        while let Some(tuple) = exec_plan.next(context)? {
+                            if !sort_buffer.append(&tuple) {
+                                sort_buffer.sort();
+                                let run = Arc::new(SortedRunStore::new(
+                                    run_container_key,
+                                    mem_pool.clone(),
+                                    SortBufferIter::new(&sort_buffer),
+                                ));
+                                runs.push(run);
+                                sort_buffer.reset();
+                                assert!(sort_buffer.append(&tuple));
+                            }
+                        }
+    
+                        // Handle remaining tuples
+                        if sort_buffer.ptrs.len() > 0 {
+                            sort_buffer.sort();
+                            let run = Arc::new(SortedRunStore::new(
+                                run_container_key,
+                                mem_pool.clone(),
+                                SortBufferIter::new(&sort_buffer),
+                            ));
+                            runs.push(run);
+                        }
+    
+                        // For each range, create a BigSortedRunStore from its runs
+                        let mut big_store = BigSortedRunStore::new();
+                        for run in runs {
+                            big_store.add_store(run);
+                        }
+                        
+                        // Return a single merged run for this range
+                        let merge_iter = big_store.scan();
+                        Ok(Arc::new(SortedRunStore::new(
+                            run_container_key,
+                            mem_pool.clone(),
+                            merge_iter,
+                        )))
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?;
+    
+                // Create a BigSortedRunStore from initial runs to get quantiles
+                let mut big_store = BigSortedRunStore::new();
+                for run in initial_runs.iter() {
+                    big_store.add_store(run.clone());
+                }
+                let big_store = Arc::new(big_store);
+    
+                // Calculate partition boundaries using the BigSortedRunStore
+                let mut global_quantiles = estimate_quantiles(
+                    &[big_store], 
+                    max_parallel_partitions + 1,
+                    QuantileMethod::TPCH_100_2
+                );
+    
+                // Ensure boundary conditions
+                if global_quantiles.is_empty() {
+                    global_quantiles = vec![vec![0; 9]; max_parallel_partitions + 1];
+                }
+                global_quantiles[0] = vec![0; 9];
+                global_quantiles[max_parallel_partitions] = vec![255; 9];
+    
+                // Now redistribute records into final partitions
+                let final_runs: Vec<Arc<SortedRunStore<M>>> = (0..max_parallel_partitions)
+                    .into_par_iter()
+                    .map(|partition_id| {
+                        let lower = global_quantiles[partition_id].clone();
+                        let upper = global_quantiles[partition_id + 1].clone();
+                        
+                        let partition_key = ContainerKey {
+                            db_id: dest_c_key.db_id,
+                            c_id: dest_c_key.c_id + partition_id as u16,
+                        };
+    
+                        // Create merger for this partition's range
+                        let run_segments = initial_runs
+                            .iter()
+                            .map(|run| run.scan_range(&lower, &upper))
+                            .collect::<Vec<_>>();
+    
+                        let merge_iter = MergeIter::new(run_segments);
+                        let merged_store = Arc::new(SortedRunStore::new(
+                            partition_key,
+                            mem_pool.clone(),
+                            merge_iter
+                        ));
+    
+                        println!("Partition {} contains {} records", 
+                            partition_id, merged_store.len());
+    
+                        Ok(merged_store)
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?;
+    
+                // Verify total record count
+                let total_records: usize = final_runs.iter().map(|r| r.len()).sum();
+                println!("Total records: {}", total_records);
+                assert_eq!(total_records, total_tuples,
+                    "Record count mismatch! Expected {} but got {}", 
+                    total_tuples, total_records);
+    
+                Ok(final_runs)
+            },
+            _ => panic!("Only FixedSizeLimit policy supported")
+        }
+    }
+
+
     // Maybe parallel but not fast
     fn run_merge_2(
         &mut self,
@@ -960,116 +1116,103 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     fn run_merge_kraska(
         &mut self,
         policy: &Arc<MemoryPolicy>,
-        mut runs: Vec<Arc<BigSortedRunStore<M>>>,
+        runs: Vec<Arc<BigSortedRunStore<M>>>,
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
         num_threads: usize,
     ) -> Result<Arc<BigSortedRunStore<M>>, ExecError> {
         let verbose = true;
-        
+    
         match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
-                let working_mem = 5;
+                let working_mem = 400;
                 let overall_start = Instant::now();
-                
-                // Ensure at least 1 partition
-                let num_partitions = std::cmp::max(1, std::cmp::min(
-                    std::cmp::min(working_mem, num_threads),
-                    runs.len()
-                ));
-                
+    
+                // Sum up the total records in all input runs (for a sanity-check later).
+                let total_records: usize = runs.iter().map(|r| r.len()).sum();
+    
+                // We use the smaller of:
+                //   - the memory-based max fan-in (working_mem)
+                //   - the actual number of threads we want to run
+                let max_parallel_partitions = std::cmp::min(working_mem, num_threads);
+    
                 if verbose {
                     println!("Working memory (max runs): {}", working_mem);
-                    println!("Number of threads: {}", num_threads); 
-                    println!("Total runs: {}", runs.len());
-                    println!("Using {} partitions", num_partitions);
+                    println!("Number of threads available: {}", num_threads);
+                    println!("Maximum parallel partitions: {}", max_parallel_partitions);
+                    println!("Total runs to merge: {}", runs.len());
                 }
     
-                // Calculate quantiles based on number of partitions xtx update quantile information
-                let num_quantiles = num_partitions + 1;
-                let mut global_quantiles = 
-                    estimate_quantiles(&runs, num_quantiles, QuantileMethod::TPCH_100);
+                // 1) Get partition boundaries (quantiles). We want max_parallel_partitions + 1 boundaries:
+                let mut global_quantiles =
+                    estimate_quantiles(&runs, max_parallel_partitions + 1, QuantileMethod::TPCH_100_2);
     
-                // Ensure we always have quantiles even if estimation fails
+                // If for some reason there's no data, fill in trivial boundaries
                 if global_quantiles.is_empty() {
-                    global_quantiles = vec![vec![0; 9]; num_quantiles];
+                    global_quantiles = vec![vec![0; 9]; max_parallel_partitions + 1];
                 }
+    
+                // Force the first boundary to "all zeroes" and the last boundary to "all 255"
+                // so that partition 0 covers [00..0, Q1) ... partition last covers [Q_{last}, FF..F)
                 global_quantiles[0] = vec![0; 9];
-                global_quantiles[num_quantiles - 1] = vec![255; 9];
+                global_quantiles[max_parallel_partitions] = vec![255; 9];
     
-                // Process partitions in parallel
+                // 2) Each partition i handles the half-open interval [Q[i], Q[i+1]).
+                // We spin up parallel tasks for i in 0..max_parallel_partitions
                 let merge_start = Instant::now();
-                
-                let merged_buffers = (0..num_partitions)
-                    .into_par_iter()
-                    .map(|i| {
-                        let thread_start = Instant::now();
-                        
-                        // Define partition boundaries
-                        let lower = global_quantiles[i].clone();
-                        let upper = if i == num_partitions - 1 {
-                            let mut upper = global_quantiles[i + 1].clone();
-                            // Make last partition inclusive
-                            let mut carry = 1;
-                            for byte in upper.iter_mut().rev() {
-                                let (new_byte, new_carry) = byte.overflowing_add(carry);
-                                *byte = new_byte;
-                                if !new_carry {
-                                    carry = 0;
-                                    break;
-                                }
-                                carry = 1;
+    
+                let merged_stores: Vec<Arc<SortedRunStore<M>>> =
+                    (0..max_parallel_partitions)
+                        .into_par_iter()
+                        .map(|i| {
+                            let thread_start = Instant::now();
+    
+                            let lower = global_quantiles[i].clone();
+                            let upper = global_quantiles[i + 1].clone();
+    
+                            if verbose {
+                                println!(
+                                    "Thread {} starting - Range: {:?} to {:?} (half-open)",
+                                    i, lower, upper
+                                );
                             }
-                            if carry != 0 {
-                                upper.insert(0, 1);
+    
+                            // Convert each boundary to raw bytes. (They appear to be 9-byte expansions.)
+                            let lower_bytes = lower.clone();
+                            let upper_bytes = upper.clone();
+    
+                            // Every run scans only [lower, upper) - the code in run.scan_range()
+                            // must do "key >= lower_bytes && key < upper_bytes"
+                            let run_segments = runs
+                                .iter()
+                                .map(|run| run.scan_range(&lower_bytes, &upper_bytes))  // half-open
+                                .collect::<Vec<_>>();
+    
+                            // Merge them in ascending order
+                            let merge_iter = MergeIter::new(run_segments);
+                            let partition_key = ContainerKey {
+                                db_id: dest_c_key.db_id,
+                                c_id: dest_c_key.c_id + i as u16,
+                            };
+    
+                            // Build a single sorted run out of them
+                            let merged_store =
+                                SortedRunStore::new(partition_key, mem_pool.clone(), merge_iter);
+    
+                            let record_count = merged_store.len();
+                            let thread_duration = thread_start.elapsed();
+                            if verbose {
+                                println!(
+                                    "Thread {} finished in {:.2}s ({} records)",
+                                    i,
+                                    thread_duration.as_secs_f64(),
+                                    record_count
+                                );
                             }
-                            upper
-                        } else {
-                            global_quantiles[i + 1].clone()
-                        };
     
-                        if verbose {
-                            println!(
-                                "Thread {} starting - Range: {:?} to {:?}",
-                                i, &lower, &upper
-                            );
-                        }
-    
-                        // Get segments that fall within this partition's range
-                        let lower_bytes: Vec<u8> = lower.iter().copied().collect();
-                        let upper_bytes: Vec<u8> = upper.iter().copied().collect();
-                        
-                        let run_segments = runs
-                            .iter()
-                            .map(|r| r.scan_range(&lower_bytes, &upper_bytes))
-                            .collect::<Vec<_>>();
-    
-                        let merge_iter = MergeIter::new(run_segments);
-                        let partition_key = ContainerKey {
-                            db_id: dest_c_key.db_id,
-                            c_id: dest_c_key.c_id + i as u16,
-                        };
-    
-                        let merged_store = SortedRunStore::new(
-                            partition_key,
-                            mem_pool.clone(),
-                            merge_iter
-                        );
-    
-                        let record_count = merged_store.len();
-                        let thread_duration = thread_start.elapsed();
-                        if verbose {
-                            println!(
-                                "Thread {} completed in {:.2}s ({} records)",
-                                i, 
-                                thread_duration.as_secs_f64(),
-                                record_count
-                            );
-                        }
-    
-                        (merged_store, record_count)
-                    })
-                    .collect::<Vec<_>>();
+                            Arc::new(merged_store)
+                        })
+                        .collect();
     
                 if verbose {
                     println!(
@@ -1078,27 +1221,38 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     );
                 }
     
-                // Combine results into final store
+                // 3) Combine those partial merges into one final BigSortedRunStore
                 let mut final_store = BigSortedRunStore::new();
-                let mut total_records = 0;
-                for (store, count) in merged_buffers {
-                    total_records += count;
-                    final_store.add_store(Arc::new(store));
+                let mut total_merged_records = 0;
+                for store in &merged_stores {
+                    total_merged_records += store.len();
+                    final_store.add_store(Arc::clone(store));
                 }
     
                 if verbose {
+                    let overall_sec = overall_start.elapsed().as_secs_f64();
                     println!("\nMerge Statistics:");
-                    println!("  - Total records processed: {}", total_records);
-                    println!(
-                        "  - Overall throughput: {:.2}M records/s",
-                        (total_records as f64) 
-                            / (1_000_000.0 * overall_start.elapsed().as_secs_f64())
+                    println!("  - Total records processed: {}", total_merged_records);
+                    println!("  - Overall throughput: {:.2}M records/s",
+                             (total_merged_records as f64) / (1_000_000.0 * overall_sec));
+    
+                    // Check for mismatch
+                    assert_eq!(
+                        total_records, total_merged_records,
+                        "Record count mismatch! We expected {} but got {}",
+                        total_records, total_merged_records
                     );
                 }
     
+                // Return the merged run as a single BigSortedRunStore
                 Ok(Arc::new(final_store))
             }
-            _ => panic!("Only FixedSizeLimit policy supported")
+    
+            _ => {
+                // If your code doesn't support other policy types,
+                // you can panic or do a simpler fallback
+                panic!("Only FixedSizeLimit policy is implemented for run_merge_kraska.");
+            }
         }
     }
 
@@ -1467,7 +1621,16 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
         // -------------- Run Generation Phase --------------
         let start_generation = Instant::now();
-        let runs = self.run_generation_5(policy, context, mem_pool, dest_c_key)?;
+        let runs = match strategy {
+            MergeStrategy::Kraska => {
+                println!("Using Kraska run generation strategy");
+                self.run_generation_kraska(policy, context, mem_pool, dest_c_key)
+            }
+            MergeStrategy::ParallelBSS => {
+                println!("Using ParallelBSS run generation strategy");
+                self.run_generation_5(policy, context, mem_pool, dest_c_key)
+            }
+        }?;
         let duration_generation = start_generation.elapsed();
         println!("generation duration {:?}", duration_generation);
 
