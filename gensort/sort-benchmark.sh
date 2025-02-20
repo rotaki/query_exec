@@ -53,7 +53,7 @@ echo "Input file size: $(du -h "$input_file" | cut -f1)"
 
 # Time the sort operation
 TIMEFORMAT="Sort completed in %3R seconds"
-time (sort "$input_file" > "$sorted_file")
+time (sort -S200%  -k1,10  "$input_file" > "$sorted_file")
 
 echo "Sorted file size: $(du -h "$sorted_file" | cut -f1)"
 

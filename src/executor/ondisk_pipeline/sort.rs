@@ -1584,7 +1584,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
-        self.execute_with_strategy(context, policy, mem_pool, dest_c_key, MergeStrategy::Kraska)
+        self.execute_with_strategy(context, policy, mem_pool, dest_c_key, MergeStrategy::ParallelBSS)
     }
 
     pub fn execute_with_strategy(
