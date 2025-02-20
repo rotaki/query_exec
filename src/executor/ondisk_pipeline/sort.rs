@@ -1127,13 +1127,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let working_mem = 400;
                 let overall_start = Instant::now();
-    
-                // Sum up the total records in all input runs (for a sanity-check later).
                 let total_records: usize = runs.iter().map(|r| r.len()).sum();
-    
-                // We use the smaller of:
-                //   - the memory-based max fan-in (working_mem)
-                //   - the actual number of threads we want to run
                 let max_parallel_partitions = std::cmp::min(working_mem, num_threads);
     
                 if verbose {
@@ -1143,115 +1137,97 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                     println!("Total runs to merge: {}", runs.len());
                 }
     
-                // 1) Get partition boundaries (quantiles). We want max_parallel_partitions + 1 boundaries:
                 let mut global_quantiles =
                     estimate_quantiles(&runs, max_parallel_partitions + 1, QuantileMethod::TPCH_100_2);
     
-                // If for some reason there's no data, fill in trivial boundaries
                 if global_quantiles.is_empty() {
                     global_quantiles = vec![vec![0; 9]; max_parallel_partitions + 1];
                 }
-    
-                // Force the first boundary to "all zeroes" and the last boundary to "all 255"
-                // so that partition 0 covers [00..0, Q1) ... partition last covers [Q_{last}, FF..F)
                 global_quantiles[0] = vec![0; 9];
                 global_quantiles[max_parallel_partitions] = vec![255; 9];
     
-                // 2) Each partition i handles the half-open interval [Q[i], Q[i+1]).
-                // We spin up parallel tasks for i in 0..max_parallel_partitions
-                let merge_start = Instant::now();
+                let processing_start = Instant::now();
     
-                let merged_stores: Vec<Arc<SortedRunStore<M>>> =
-                    (0..max_parallel_partitions)
-                        .into_par_iter()
-                        .map(|i| {
-                            let thread_start = Instant::now();
+                // Process all partitions in parallel and collect their stores
+                let partition_results: Vec<Vec<Arc<SortedRunStore<M>>>> = (0..max_parallel_partitions)
+                    .into_par_iter()
+                    .map(|i| {
+                        let thread_start = Instant::now();
+                        let lower = global_quantiles[i].clone();
+                        let upper = global_quantiles[i + 1].clone();
     
-                            let lower = global_quantiles[i].clone();
-                            let upper = global_quantiles[i + 1].clone();
+                        if verbose {
+                            println!(
+                                "Partition {} starting - Range: {:?} to {:?} (half-open)",
+                                i, lower, upper
+                            );
+                        }
     
-                            if verbose {
-                                println!(
-                                    "Thread {} starting - Range: {:?} to {:?} (half-open)",
-                                    i, lower, upper
-                                );
-                            }
+                        // Process each run's portion of this partition
+                        let partition_stores: Vec<Arc<SortedRunStore<M>>> = runs.iter()
+                            .enumerate()
+                            .map(|(run_idx, run)| {
+                                let partition_key = ContainerKey {
+                                    db_id: dest_c_key.db_id,
+                                    c_id: dest_c_key.c_id + (i * runs.len() + run_idx) as u16,
+                                };
     
-                            // Convert each boundary to raw bytes. (They appear to be 9-byte expansions.)
-                            let lower_bytes = lower.clone();
-                            let upper_bytes = upper.clone();
+                                Arc::new(SortedRunStore::new(
+                                    partition_key,
+                                    mem_pool.clone(),
+                                    run.scan_range(&lower, &upper)
+                                ))
+                            })
+                            .filter(|store| store.len() > 0)
+                            .collect();
     
-                            // Every run scans only [lower, upper) - the code in run.scan_range()
-                            // must do "key >= lower_bytes && key < upper_bytes"
-                            let run_segments = runs
-                                .iter()
-                                .map(|run| run.scan_range(&lower_bytes, &upper_bytes))  // half-open
-                                .collect::<Vec<_>>();
+                        let partition_records: usize = partition_stores.iter().map(|s| s.len()).sum();
+                        let thread_duration = thread_start.elapsed();
+                        
+                        if verbose {
+                            println!(
+                                "Partition {} finished in {:.2}s ({} records)",
+                                i,
+                                thread_duration.as_secs_f64(),
+                                partition_records
+                            );
+                        }
     
-                            // Merge them in ascending order
-                            let merge_iter = MergeIter::new(run_segments);
-                            let partition_key = ContainerKey {
-                                db_id: dest_c_key.db_id,
-                                c_id: dest_c_key.c_id + i as u16,
-                            };
+                        partition_stores
+                    })
+                    .collect();
     
-                            // Build a single sorted run out of them
-                            let merged_store =
-                                SortedRunStore::new(partition_key, mem_pool.clone(), merge_iter);
-    
-                            let record_count = merged_store.len();
-                            let thread_duration = thread_start.elapsed();
-                            if verbose {
-                                println!(
-                                    "Thread {} finished in {:.2}s ({} records)",
-                                    i,
-                                    thread_duration.as_secs_f64(),
-                                    record_count
-                                );
-                            }
-    
-                            Arc::new(merged_store)
-                        })
-                        .collect();
-    
-                if verbose {
-                    println!(
-                        "Parallel merge completed in {:.2}s",
-                        merge_start.elapsed().as_secs_f64()
-                    );
-                }
-    
-                // 3) Combine those partial merges into one final BigSortedRunStore
+                // Create final store and add all stores in order
                 let mut final_store = BigSortedRunStore::new();
-                let mut total_merged_records = 0;
-                for store in &merged_stores {
-                    total_merged_records += store.len();
-                    final_store.add_store(Arc::clone(store));
+                let mut total_processed = 0;
+    
+                // Add stores from all partitions in order
+                for stores in partition_results {
+                    for store in stores {
+                        total_processed += store.len();
+                        final_store.add_store(store);
+                    }
                 }
     
                 if verbose {
                     let overall_sec = overall_start.elapsed().as_secs_f64();
-                    println!("\nMerge Statistics:");
-                    println!("  - Total records processed: {}", total_merged_records);
+                    println!("\nPartitioning Statistics:");
+                    println!("  - Total records processed: {}", total_processed);
                     println!("  - Overall throughput: {:.2}M records/s",
-                             (total_merged_records as f64) / (1_000_000.0 * overall_sec));
+                             (total_processed as f64) / (1_000_000.0 * overall_sec));
+                    println!("  - Processing time: {:.2}s", processing_start.elapsed().as_secs_f64());
     
-                    // Check for mismatch
                     assert_eq!(
-                        total_records, total_merged_records,
-                        "Record count mismatch! We expected {} but got {}",
-                        total_records, total_merged_records
+                        total_records, total_processed,
+                        "Record count mismatch! Expected {} but got {}",
+                        total_records, total_processed
                     );
                 }
     
-                // Return the merged run as a single BigSortedRunStore
                 Ok(Arc::new(final_store))
             }
-    
             _ => {
-                // If your code doesn't support other policy types,
-                // you can panic or do a simpler fallback
-                panic!("Only FixedSizeLimit policy is implemented for run_merge_kraska.");
+                panic!("Only FixedSizeLimit policy is implemented");
             }
         }
     }
@@ -1608,7 +1584,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
-        self.execute_with_strategy(context, policy, mem_pool, dest_c_key, MergeStrategy::ParallelBSS)
+        self.execute_with_strategy(context, policy, mem_pool, dest_c_key, MergeStrategy::Kraska)
     }
 
     pub fn execute_with_strategy(
