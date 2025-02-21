@@ -886,7 +886,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 let mut global_quantiles = estimate_quantiles(
                     &[big_store], 
                     max_parallel_partitions + 1,
-                    QuantileMethod::TPCH_100_2
+                    QuantileMethod::Actual
                 );
     
                 // Ensure boundary conditions
@@ -1138,7 +1138,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                 }
     
                 let mut global_quantiles =
-                    estimate_quantiles(&runs, max_parallel_partitions + 1, QuantileMethod::TPCH_100_2);
+                    estimate_quantiles(&runs, max_parallel_partitions + 1, QuantileMethod::Actual);
     
                 if global_quantiles.is_empty() {
                     global_quantiles = vec![vec![0; 9]; max_parallel_partitions + 1];
@@ -1396,12 +1396,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         let merge_start = Instant::now();
         let num_quantiles = num_threads + 1;
 
-        let quantile_method = env::var("QUANTILE_METHOD")
-            .map(|s| QuantileMethod::from_string(&s))
-            .unwrap_or(Some(QuantileMethod::TPCH_100))
-            .expect("Invalid QUANTILE_METHOD");
         // (1) Compute global quantiles, etc. exactly as before
-        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, quantile_method);
+        let mut global_quantiles = estimate_quantiles(&runs, num_quantiles, QuantileMethod::Actual);
         global_quantiles[0] = vec![0; 9];
         global_quantiles[num_quantiles - 1] = vec![255; 9];
         let global_quantiles = Arc::new(global_quantiles);
@@ -1682,7 +1678,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             .unwrap_or_else(|_| 6005720.to_string())
             .parse()
             .expect("NUM_TUPLES must be a valid number");
-        let max_num_quantiles = 17;
+        let max_num_quantiles = 50;
         write_quantiles_to_json_file(
             final_run.clone(),
             &data_source,
