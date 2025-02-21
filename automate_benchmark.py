@@ -55,24 +55,24 @@ def get_default_configs():
         "TPCH": {
             "data_source": "TPCH",
             "machine": "Lincoln",
-            "method": "Parallel_BSS",
+            "quantile_method": "Parallel_BSS",
             "memory_type": "tank/local",
             "query_options": [100],
-            "sf_options": [1, 2],
+            "sf_options": [1],
             "working_mem_options": [1420],
-            "bp_sizes": [100000],
-            "num_threads_options": [1, 2, 4, 8, 16]
+            "bp_sizes": [150000],
+            "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
         },
         "GENSORT": {
             "data_source": "GENSORT",
             "machine": "Lincoln",
-            "method": "Parallel_BSS",
+            "quantile_method": "Parallel_BSS",
             "memory_type": "tank/local",
             "query_options": [1],
             "sf_options": [10576511],
             "working_mem_options": [450],
             "bp_sizes": [150000],
-            "num_threads_options": [1, 2, 4, 8, 16]
+            "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
         }
     }
 
@@ -223,6 +223,60 @@ def run_benchmark(config, is_manual=False):
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
         return result
 
+def run_manual_benchmark(config, args):
+    """Run a manual benchmark and save results."""
+    # Run the benchmark
+    result = run_benchmark(config, is_manual=False)  # Change to False to capture output
+    
+    if result.returncode != 0:
+        print("Benchmark failed!")
+        return False
+        
+    # Parse the benchmark output
+    generation_time, merge_duration, stats_after = parse_benchmark_output(result.stdout)
+    
+    if generation_time is None or merge_duration is None or stats_after is None:
+        print("Failed to parse benchmark output")
+        return False
+        
+    # Calculate additional metrics
+    num_merge_steps = math.ceil(calculate_num_tuples(config["data_source"], config["sf"]) / config["working_mem"])
+    new_pages = stats_after[0]
+    pages_read = stats_after[1]
+    pages_written = stats_after[2]
+    
+    # Create output directory and CSV
+    git_hash = get_git_hash()
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_csv = f"benchmark_results/{git_hash}/{config['data_source']}_QID-{config['query']}_SF-{config['sf']}_TIME-{current_time}.csv"
+    
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    
+    # Write results to CSV
+    with open(output_csv, mode="w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
+            "Working mem size", "Num Threads (Run Merge)", 
+            "Generation Time", "Merge Time", "Num Merge steps", 
+            "New pages", "Pages read", "Pages written"
+        ])
+        writer.writerow([
+            args.machine or "Lincoln", config["data_source"], "Parallel_BSS", "tank/local",
+            config["query"], config["sf"], config["bp_size"],
+            config["working_mem"], config["num_threads"],
+            generation_time, merge_duration, num_merge_steps,
+            new_pages, pages_read, pages_written
+        ])
+    
+    print(f"Benchmark results saved to {output_csv}")
+    
+    # Generate plot if requested
+    if args.plot:
+        plot_thread_scaling(output_csv)
+    
+    return True
 def main():
     args = parse_args()
     
@@ -246,37 +300,7 @@ def main():
         print(f"Running benchmark for {config['data_source']} (Query {config['query']}, SF {config['sf']}) "
               f"with BP={config['bp_size']}, Threads={config['num_threads']}, WorkingMem={config['working_mem']}")
         
-        success = run_benchmark(config, is_manual=True)
-        if not success:
-            print("Benchmark failed!")
-            return
-        
-        # If plot flag is set and manual run was successful, create a single plot
-        if args.plot:
-            # Generate output filename for this single run
-            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            git_hash = get_git_hash()
-            output_csv = f"benchmark_results/{git_hash}/{config['data_source']}_QID-{config['query']}_SF-{config['sf']}_TIME-{current_time}.csv"
-            
-            # Write the single result to CSV
-            os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-            with open(output_csv, mode="w", newline="") as file:
-                writer = csv.writer(file)
-                writer.writerow([
-                    "Machine", "Method", "Memory Type", "Query Num", "SF", "Bp_Size",
-                    "Working mem size", "Num Threads (Run Merge)", 
-                    "Generation Time", "Merge Time", "Num Merge steps", 
-                    "New pages", "Pages read", "Pages written", "Data Source"
-                ])
-                writer.writerow([
-                    args.machine or "Lincoln", "Parallel_BSS", "tank/local",
-                    config["query"], config["sf"], config["bp_size"],
-                    config["working_mem"], config["num_threads"],
-                    # TODO: Parse these values from benchmark output
-                    generation_time, merge_duration, num_merge_steps,
-                    new_pages, pages_read, pages_written, config["data_source"]
-                ])
-            plot_thread_scaling(output_csv)
+        run_manual_benchmark(config, args)
         return
 
     # No args provided - run automated benchmarks
@@ -294,13 +318,14 @@ def main():
                 # Generate output filename
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_csv = f"benchmark_results/{git_hash}/{data_source}_QID-{query}_SF-{sf}_TIME-{current_time}.csv"
+                print("writing to ", output_csv)
                 with open(output_csv, mode="w", newline="") as file:
                     writer = csv.writer(file)
                     writer.writerow([
-                        "Machine", "Method", "Memory Type", "Query Num", "SF", "Bp_Size",
+                        "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
                         "Working mem size", "Num Threads (Run Merge)", 
                         "Generation Time", "Merge Time", "Num Merge steps", 
-                        "New pages", "Pages read", "Pages written", "Data Source"
+                        "New pages", "Pages read", "Pages written"
                     ])
 
                     # Iterate through all parameter combinations
@@ -338,12 +363,12 @@ def main():
                                     pages_written = stats_after[2]
 
                                     writer.writerow([
-                                        base_config["machine"], base_config["method"],
+                                        base_config["machine"], data_source, base_config["quantile_method"],
                                         base_config["memory_type"], query,
                                         sf, bp_size,
                                         working_mem, num_threads,
                                         generation_time, merge_duration, num_merge_steps,
-                                        new_pages, pages_read, pages_written, data_source
+                                        new_pages, pages_read, pages_written
                                     ])
                                     file.flush()
 

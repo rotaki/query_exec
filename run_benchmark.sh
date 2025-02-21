@@ -27,10 +27,14 @@ case $DATA_SOURCE in
     "TPCH")
         export NUM_TUPLES=$((6005720 * SF))
         BP_DIR="bp-dir-tpch-sf-${SF}"
+        rm -rf "$BP_DIR/0/??*"
+        cargo run --release --bin sort_run -- -q "$QUERY" -p "$BP_DIR" -n 1 -b "$BUFFER_POOL_SIZE"
         ;;
     "GENSORT")
         export NUM_TUPLES=$SF
         BP_DIR="bp-dir-gensort-sf-${SF}-uniform"
+        rm -rf "$BP_DIR/0/??*"
+        cargo run --release --bin benchmark_queries -- -q "$QUERY" -p "$BP_DIR" -n 1 -b "$BUFFER_POOL_SIZE"
         ;;
     *)
         echo "Unsupported data source: $DATA_SOURCE"
@@ -39,10 +43,8 @@ case $DATA_SOURCE in
 esac
 
 # Clean up previous runs
-rm -rf "$BP_DIR/0/??*"
 
 # Run the benchmark
-cargo run --release --bin sort_run -- -q "$QUERY" -p "$BP_DIR" -n 1 -b "$BUFFER_POOL_SIZE"
 
 # Clean up after the run
 rm -rf "$BP_DIR/0/??*"
