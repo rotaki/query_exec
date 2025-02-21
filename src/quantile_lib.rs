@@ -1457,43 +1457,149 @@ fn byte_wise_distance(a: &[u8], b: &[u8]) -> f64 {
     sum
 }
 
-/// Writes quantiles to JSON, ensuring each quantile sub-array is on one line.
-pub fn write_quantiles_to_json(
-    quantiles: &[Vec<u8>],
-    data_source: &str,
-    query_id: u8,
-    method: QuantileMethod,
-    output_path: &str,
-) -> Result<(), ExecError> {
-    // Format the main fields
-    let mut json_string = format!(
-        "{{\n  \"data_source\": \"{}\",\n  \"query\": \"q{}\",\n  \"method\": \"{}\",\n  \"quantiles\": [\n",
-        data_source,
-        query_id,
-        method.to_string()
-    );
 
-    // Format each quantile as a single line of bytes
-    for (i, quantile) in quantiles.iter().enumerate() {
-        let quantile_str = quantile
-            .iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if i < quantiles.len() - 1 {
-            json_string.push_str(&format!("    [{}],\n", quantile_str));
-        } else {
-            json_string.push_str(&format!("    [{}]\n", quantile_str));
-        }
+/// Calculates multiple sets of quantiles in a single pass and returns them
+pub fn calculate_multiple_quantiles<M: MemPool>(
+    sorted_runs: Arc<BigSortedRunStore<M>>,
+    num_tuples: usize,
+    max_num_quantiles: usize,
+) -> Result<Vec<Vec<Vec<u8>>>, ExecError> {
+    // Validate input parameters
+    if max_num_quantiles < 2 {
+        return Err(ExecError::Conversion("Number of quantiles must be at least 2".to_string()));
     }
 
-    // Close the JSON object
-    json_string.push_str("  ]\n}");
+    let mut all_quantiles: Vec<usize> = Vec::with_capacity(max_num_quantiles - 1);
+    
+    // Calculate all positions we need to sample
+    let mut all_positions = Vec::new();
+    for num_quantiles in 2..=max_num_quantiles {
+        let mut positions = Vec::with_capacity(num_quantiles);
+        
+        // First quantile is always at position 0
+        positions.push(0);
+        
+        // Calculate middle quantile positions
+        for i in 1..num_quantiles-1 {
+            let pos = (i * num_tuples) / (num_quantiles - 1);
+            positions.push(pos);
+        }
+        
+        // Last quantile is always at the last position
+        positions.push(num_tuples - 1);
+        all_positions.push(positions);
+    }
+    
+    // Flatten and deduplicate positions
+    let mut unique_positions: Vec<usize> = all_positions.iter()
+        .flatten()
+        .copied()
+        .collect();
+    unique_positions.sort_unstable();
+    unique_positions.dedup();
+    
+    // Create vectors to store quantiles for each set
+    let mut quantile_sets = vec![Vec::new(); max_num_quantiles - 1];
+    
+    // Single pass through the data
+    let mut current_pos = 0;
+    let mut pos_idx = 0;
+    
+    for (key, _) in sorted_runs.scan() {
+        while pos_idx < unique_positions.len() && current_pos == unique_positions[pos_idx] {
+            // This position is needed for one or more quantile sets
+            for (set_idx, positions) in all_positions.iter().enumerate() {
+                if positions.contains(&current_pos) {
+                    quantile_sets[set_idx].push(key.clone());
+                }
+            }
+            pos_idx += 1;
+        }
+        
+        if pos_idx >= unique_positions.len() {
+            break;  // We've found all positions we need
+        }
+        
+        current_pos += 1;
+    }
+    
+    // Validate results
+    for (i, quantiles) in quantile_sets.iter().enumerate() {
+        let expected_len = i + 2;  // 2 quantiles for first set, 3 for second, etc.
+        if quantiles.len() != expected_len {
+            return Err(ExecError::Conversion(
+                format!("Failed to compute {} quantiles: expected {} values, got {}", 
+                    i + 2, expected_len, quantiles.len())
+            ));
+        }
+    }
+    
+    Ok(quantile_sets)
+}
 
-    std::fs::write(output_path, json_string)
-        .map_err(|e| ExecError::Storage(format!("File create error: {:?}", e)))?;
 
-    println!("Quantiles written to: {}", output_path);
+/// Writes quantiles to JSON, ensuring each quantile sub-array is on one line.
+pub fn write_quantiles_to_json_file<M: MemPool>(
+    sorted_runs: Arc<BigSortedRunStore<M>>,
+    data_source: &str,
+    sf: usize,
+    query: u8,
+    num_tuples: usize,
+    max_num_quantiles: usize,
+) -> Result<(), ExecError> {
+    // Calculate the quantiles
+    let quantiles = calculate_multiple_quantiles(
+        sorted_runs,
+        num_tuples,
+        max_num_quantiles
+    )?;
+
+    // Create the filename
+    let filename = format!("quantile_data/{}/QID-{}_SF-{}_NUMTUPLES-{}.json", data_source, query, sf, num_tuples);
+    println!("filename {}", filename);
+    
+    // Create vectors to store entries
+    let mut json_entries = Vec::new();
+    
+    // Process quantiles in order (2 to max_num_quantiles)
+    for (idx, quantile_set) in quantiles.into_iter().enumerate() {
+        let num_quantiles = idx + 2;
+        
+        // Format this entry's arrays
+        let arrays_str = quantile_set
+            .iter()
+            .map(|q| format!("[{}]", 
+                q.iter()
+                    .map(|&byte| byte.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ))
+            .collect::<Vec<_>>()
+            .join(",\n    ");
+            
+        // Create the full entry string
+        let entry = format!("  \"{}\": [\n    {}\n  ]", num_quantiles, arrays_str);
+        json_entries.push((num_quantiles, entry));
+    }
+    
+    // Sort entries by number of quantiles
+    json_entries.sort_by_key(|(num, _)| *num);
+    
+    // Build the final JSON string
+    let mut output = String::from("{\n");
+    for (i, (_, entry)) in json_entries.iter().enumerate() {
+        output.push_str(entry);
+        if i < json_entries.len() - 1 {
+            output.push_str(",\n");
+        }
+    }
+    output.push_str("\n}");
+    
+    // Write to file
+    std::fs::write(&filename, output)
+        .map_err(|e| ExecError::Storage(format!("File write error: {}", e)))?;
+
+    println!("Wrote quantiles to file: {}", filename);
     Ok(())
 }
 
@@ -1544,4 +1650,67 @@ pub fn check_actual_quantiles_exist(
         }
         Err(_) => Ok(false),
     }
+}
+
+
+/// Writes quantiles to a JSON file
+/// Helper function to format JSON with arrays on single lines
+fn format_json_single_line_arrays(json_str: &str) -> Result<String, ExecError> {
+    let mut formatted = String::new();
+    let mut depth = 0;
+    let mut in_array = false;
+    let mut chars = json_str.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '[' => {
+                formatted.push(c);
+                depth += 1;
+                in_array = true;
+            }
+            ']' => {
+                depth -= 1;
+                in_array = false;
+                formatted.push(c);
+            }
+            '{' => {
+                formatted.push(c);
+                formatted.push('\n');
+                depth += 1;
+                for _ in 0..depth {
+                    formatted.push_str("  ");
+                }
+            }
+            '}' => {
+                depth -= 1;
+                formatted.push('\n');
+                for _ in 0..depth {
+                    formatted.push_str("  ");
+                }
+                formatted.push(c);
+            }
+            ',' => {
+                formatted.push(c);
+                if !in_array {
+                    formatted.push('\n');
+                    for _ in 0..depth {
+                        formatted.push_str("  ");
+                    }
+                }
+            }
+            ':' => {
+                formatted.push(c);
+                formatted.push(' ');
+            }
+            ' ' | '\n' | '\r' | '\t' => {
+                // Skip whitespace unless it's in a string
+                if !in_array {
+                    formatted.push(' ');
+                }
+            }
+            _ => formatted.push(c),
+        }
+    }
+
+    Ok(formatted)
 }
