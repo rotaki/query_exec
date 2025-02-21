@@ -69,7 +69,7 @@ pub fn create_gensort_db(sf: f64, buffer_pool_size: usize, name: &str) {
         &storage,
         db_id,
         &table_sql,
-        ContainerType::AppendOnly,
+        ContainerType::Gensort,
     )
     .expect("Failed to create gensort_data table");
     // 7. Import raw gensort records from data_path using `import_gensort`

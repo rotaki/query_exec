@@ -7,9 +7,7 @@
 // 2 byte: slot count
 // 2 byte: free space offset
 
-use bincode::de;
-use chrono::format::Item;
-use core::{num, panic};
+use core::panic;
 use rayon::{iter, prelude::*, result};
 use std::env;
 use std::time::Instant;
@@ -17,12 +15,7 @@ use std::{
     cmp::{max, min, Reverse},
     collections::{BinaryHeap, HashMap, HashSet},
     sync::Arc,
-    sync::Mutex,
-    thread,
 };
-
-use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
 
 use crate::{
     error::ExecError,
@@ -32,7 +25,6 @@ use crate::{
     ColumnId,
 };
 
-use crossbeam::channel::{bounded, unbounded};
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use crate::quantile_lib::*;
