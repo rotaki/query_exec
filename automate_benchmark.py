@@ -5,6 +5,8 @@ import math
 from datetime import datetime
 import git
 import argparse
+import matplotlib.pyplot as plt
+import pandas as pd
 
 def get_git_hash():
     """Get the current git commit hash."""
@@ -37,9 +39,11 @@ def parse_benchmark_output(output):
 
     for line in output.splitlines():
         if "generation duration" in line:
-            generation_time = line.split("generation duration ")[1].strip().rstrip("s")
+            time_str = line.split("generation duration ")[1].strip().rstrip('s')
+            generation_time = convert_time_to_seconds(time_str)
         elif "merge duration" in line:
-            merge_duration = line.split("merge duration ")[1].strip().rstrip("s")
+            time_str = line.split("merge duration ")[1].strip().rstrip('s')
+            merge_duration = convert_time_to_seconds(time_str)
         elif "stats after" in line:
             stats_after = line.strip("stats after ").strip("()").split(", ")
 
@@ -89,8 +93,67 @@ def parse_args():
                         help='Buffer pool size')
     parser.add_argument('-m', '--machine',
                         help='Machine name')
+    parser.add_argument('--plot', action='store_true',
+                        help='Generate performance plots')
     return parser.parse_args()
 
+def plot_thread_scaling(csv_path):
+    """Generate performance plots from benchmark results."""
+    # Read the CSV file
+    df = pd.read_csv(csv_path)
+    
+    # Create the plot with specific figure size
+    plt.figure(figsize=(12, 8))
+    
+    # Create the plot
+    plt.plot(df['Num Threads (Run Merge)'], df['Merge Time'], 'bo-', linewidth=2, markersize=8)
+    
+    # Customize the plot
+    plt.title(f'Thread Scaling Analysis\n{df["Data Source"].iloc[0]} Query {df["Query Num"].iloc[0]} SF={df["SF"].iloc[0]}',
+              pad=20)
+    
+    # Set x-axis
+    plt.xlabel('Number of Threads')
+    threads = df['Num Threads (Run Merge)'].unique()
+    plt.xticks(threads, threads)  # Just use the actual thread numbers
+    
+    # Set y-axis
+    plt.ylabel('Merge Time (seconds)')
+    ymin = 0
+    ymax = df['Merge Time'].max() * 1.2
+    plt.ylim(ymin, ymax)
+    
+    # Add grid
+    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # Add point labels
+    for x, y in zip(df['Num Threads (Run Merge)'], df['Merge Time']):
+        plt.annotate(f'{y:.2f}s', 
+                    (x, y),
+                    textcoords="offset points",
+                    xytext=(0, 10),
+                    ha='center',
+                    fontsize=10)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_path = csv_path.rsplit('.', 1)[0] + '_thread_scaling.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Plot saved as {plot_path}")
+
+def convert_time_to_seconds(time_str):
+    """Convert time string to seconds, handling both seconds and milliseconds formats."""
+    if isinstance(time_str, (int, float)):
+        return float(time_str)
+    
+    # If string ends with 'm', it's in milliseconds
+    if str(time_str).endswith('m'):
+        return float(time_str.rstrip('m')) / 1000
+    # Otherwise it's already in seconds
+    return float(time_str)
 
 def is_single_config():
     """Check if we're running a single manual configuration."""
@@ -164,7 +227,10 @@ def main():
     args = parse_args()
     
     # Check if any args were provided (manual mode)
-    manual_mode = any(value is not None for value in vars(args).values())
+    manual_mode = any(value is not None for value in [
+        args.data_source, args.scale_factor, args.query,
+        args.threads, args.working_mem, args.buffer_pool, args.machine
+    ])
     
     if manual_mode:
         # Use provided values or defaults for manual run
@@ -183,12 +249,38 @@ def main():
         success = run_benchmark(config, is_manual=True)
         if not success:
             print("Benchmark failed!")
+            return
+        
+        # If plot flag is set and manual run was successful, create a single plot
+        if args.plot:
+            # Generate output filename for this single run
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            git_hash = get_git_hash()
+            output_csv = f"benchmark_results/{git_hash}/{config['data_source']}_QID-{config['query']}_SF-{config['sf']}_TIME-{current_time}.csv"
+            
+            # Write the single result to CSV
+            os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+            with open(output_csv, mode="w", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    "Machine", "Method", "Memory Type", "Query Num", "SF", "Bp_Size",
+                    "Working mem size", "Num Threads (Run Merge)", 
+                    "Generation Time", "Merge Time", "Num Merge steps", 
+                    "New pages", "Pages read", "Pages written", "Data Source"
+                ])
+                writer.writerow([
+                    args.machine or "Lincoln", "Parallel_BSS", "tank/local",
+                    config["query"], config["sf"], config["bp_size"],
+                    config["working_mem"], config["num_threads"],
+                    # TODO: Parse these values from benchmark output
+                    generation_time, merge_duration, num_merge_steps,
+                    new_pages, pages_read, pages_written, config["data_source"]
+                ])
+            plot_thread_scaling(output_csv)
         return
 
     # No args provided - run automated benchmarks
     configs = get_default_configs()
-    
-    # Get git commit hash
     git_hash = get_git_hash()
     
     # Create benchmark_results directory if it doesn't exist
@@ -209,7 +301,7 @@ def main():
                         "Machine", "Method", "Memory Type", "Query Num", "SF", "Bp_Size",
                         "Working mem size", "Num Threads (Run Merge)", 
                         "Generation Time", "Merge Time", "Num Merge steps", 
-                        "New pages", "Pages read", "Pages written"
+                        "New pages", "Pages read", "Pages written", "Data Source"
                     ])
 
                     # Iterate through all parameter combinations
@@ -252,11 +344,15 @@ def main():
                                         sf, bp_size,
                                         working_mem, num_threads,
                                         generation_time, merge_duration, num_merge_steps,
-                                        new_pages, pages_read, pages_written
+                                        new_pages, pages_read, pages_written, data_source
                                     ])
                                     file.flush()
 
                 print(f"Benchmark results saved to {output_csv}")
+                
+                # Generate plot if requested
+                if args.plot:
+                    plot_thread_scaling(output_csv)
 
 if __name__ == "__main__":
     main()
