@@ -850,9 +850,14 @@ pub fn write_quantiles_to_json_file<M: MemPool>(
         max_num_quantiles
     )?;
 
-    // Create the filename
-    let filename = format!("quantile_data/{}/QID-{}_SF-{}_NUMTUPLES-{}.json", data_source, query, sf, num_tuples);
+    // Create the directory path and filename
+    let dir_path = format!("quantile_data/{}", data_source);
+    let filename = format!("{}/QID-{}_SF-{}_NUMTUPLES-{}.json", dir_path, query, sf, num_tuples);
     println!("filename {}", filename);
+    
+    // Create the directory and its parents if they don't exist
+    std::fs::create_dir_all(&dir_path)
+        .map_err(|e| ExecError::Storage(format!("Failed to create directory: {}", e)))?;
     
     // Create vectors to store entries
     let mut json_entries = Vec::new();
