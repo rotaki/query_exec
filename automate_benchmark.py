@@ -294,7 +294,6 @@ def main():
                 # Generate output filename
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_csv = f"benchmark_results/{git_hash}/{data_source}_QID-{query}_SF-{sf}_TIME-{current_time}.csv"
-
                 with open(output_csv, mode="w", newline="") as file:
                     writer = csv.writer(file)
                     writer.writerow([
