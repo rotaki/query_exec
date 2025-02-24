@@ -36,7 +36,7 @@ struct SortOpt {
 }
 
 fn run_sort(memory_size: usize, bp: Arc<BufferPool>, query_id: u32) -> Result<(), String> {
-    let temp_c_id = 100000;
+    let temp_c_id = 100017;
     let exclude_last_pipeline = true;
 
     // Load the on-disk storage from the BufferPool.
