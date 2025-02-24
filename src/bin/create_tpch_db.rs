@@ -1,7 +1,7 @@
 use clap::Parser;
 use query_exec::{
     prelude::{create_db, create_table_from_sql, import_csv, Catalog},
-    BufferPool, ContainerDS, ContainerType, OnDiskStorage,
+    BufferPool, ContainerDS, OnDiskStorage,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 

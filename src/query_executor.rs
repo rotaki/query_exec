@@ -97,7 +97,7 @@ pub fn to_logical(
 }
 
 pub fn to_physical(logical_plan: LogicalRelExpr) -> PhysicalRelExpr {
-    LogicalToPhysicalRelExpr.to_physical(logical_plan)
+    LogicalToPhysicalRelExpr::to_physical(logical_plan)
 }
 
 pub fn execute<T: TxnStorageTrait, E: Executor<T>>(
@@ -333,7 +333,7 @@ pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
 mod tests {
     use fbtree::{
         bp::{get_test_bp, BufferPool},
-        prelude::{ContainerId, ContainerType, InMemStorage, TxnOptions},
+        prelude::{ContainerId, InMemStorage, TxnOptions},
         random::gen_random_pathname,
         txn_storage::OnDiskStorage,
     };

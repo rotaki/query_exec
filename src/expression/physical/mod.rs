@@ -597,7 +597,7 @@ impl PhysicalRelExpr {
 pub struct LogicalToPhysicalRelExpr;
 
 impl LogicalToPhysicalRelExpr {
-    pub fn to_physical(&mut self, expr: LogicalRelExpr) -> PhysicalRelExpr {
+    pub fn to_physical(expr: LogicalRelExpr) -> PhysicalRelExpr {
         match expr {
             LogicalRelExpr::Scan {
                 db_id,
@@ -611,14 +611,14 @@ impl LogicalToPhysicalRelExpr {
                 column_indices: column_names,
             },
             LogicalRelExpr::Select { src, predicates } => PhysicalRelExpr::Select {
-                src: Box::new(self.to_physical(*src)),
+                src: Box::new(LogicalToPhysicalRelExpr::to_physical(*src)),
                 predicates: predicates
                     .iter()
-                    .map(|pred| LogicalToPhysicalExpression.to_physical(pred))
+                    .map(LogicalToPhysicalExpression::to_physical)
                     .collect(),
             },
             LogicalRelExpr::Project { src, cols } => PhysicalRelExpr::Project {
-                src: Box::new(self.to_physical(*src)),
+                src: Box::new(LogicalToPhysicalRelExpr::to_physical(*src)),
                 column_names: cols,
             },
             LogicalRelExpr::Join {
@@ -627,11 +627,11 @@ impl LogicalToPhysicalRelExpr {
                 right,
                 predicates,
             } => {
-                let left = Box::new(self.to_physical(*left));
-                let right = Box::new(self.to_physical(*right));
+                let left = Box::new(LogicalToPhysicalRelExpr::to_physical(*left));
+                let right = Box::new(LogicalToPhysicalRelExpr::to_physical(*right));
                 let predicates = predicates
                     .iter()
-                    .map(|pred| LogicalToPhysicalExpression.to_physical(pred))
+                    .map(LogicalToPhysicalExpression::to_physical)
                     .collect::<BTreeSet<Expression<PhysicalRelExpr>>>();
 
                 // Determine the equality predicates and left, right filter conditions
@@ -722,7 +722,7 @@ impl LogicalToPhysicalRelExpr {
                 }
             }
             LogicalRelExpr::OrderBy { src, cols } => PhysicalRelExpr::Sort {
-                src: Box::new(self.to_physical(*src)),
+                src: Box::new(LogicalToPhysicalRelExpr::to_physical(*src)),
                 column_names: cols,
             },
             LogicalRelExpr::Aggregate {
@@ -730,23 +730,23 @@ impl LogicalToPhysicalRelExpr {
                 group_by,
                 aggrs,
             } => PhysicalRelExpr::HashAggregate {
-                src: Box::new(self.to_physical(*src)),
+                src: Box::new(LogicalToPhysicalRelExpr::to_physical(*src)),
                 group_by,
                 aggrs,
             },
             LogicalRelExpr::Map { input, exprs } => PhysicalRelExpr::Map {
-                input: Box::new(self.to_physical(*input)),
+                input: Box::new(LogicalToPhysicalRelExpr::to_physical(*input)),
                 exprs: exprs
                     .iter()
-                    .map(|(id, expr)| (*id, LogicalToPhysicalExpression.to_physical(expr)))
+                    .map(|(id, expr)| (*id, LogicalToPhysicalExpression::to_physical(expr)))
                     .collect(),
             },
             LogicalRelExpr::FlatMap { input, func } => PhysicalRelExpr::FlatMap {
-                input: Box::new(self.to_physical(*input)),
-                func: Box::new(self.to_physical(*func)),
+                input: Box::new(LogicalToPhysicalRelExpr::to_physical(*input)),
+                func: Box::new(LogicalToPhysicalRelExpr::to_physical(*func)),
             },
             LogicalRelExpr::Rename { src, src_to_dest } => PhysicalRelExpr::Rename {
-                src: Box::new(self.to_physical(*src)),
+                src: Box::new(LogicalToPhysicalRelExpr::to_physical(*src)),
                 src_to_dest,
             },
         }
@@ -756,76 +756,88 @@ impl LogicalToPhysicalRelExpr {
 pub struct LogicalToPhysicalExpression;
 
 impl LogicalToPhysicalExpression {
-    pub fn to_physical(&self, expr: &Expression<LogicalRelExpr>) -> Expression<PhysicalRelExpr> {
+    pub fn to_physical(expr: &Expression<LogicalRelExpr>) -> Expression<PhysicalRelExpr> {
         match expr {
             Expression::ColRef { id } => Expression::ColRef { id: *id },
             Expression::Field { val } => Expression::Field { val: val.clone() },
             Expression::IsNull { expr } => Expression::IsNull {
-                expr: Box::new(self.to_physical(expr)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
             },
             Expression::Binary { op, left, right } => Expression::Binary {
                 op: *op,
-                left: Box::new(self.to_physical(left)),
-                right: Box::new(self.to_physical(right)),
+                left: Box::new(LogicalToPhysicalExpression::to_physical(left)),
+                right: Box::new(LogicalToPhysicalExpression::to_physical(right)),
             },
             Expression::Case {
                 expr,
                 whens,
                 else_expr,
             } => Expression::Case {
-                expr: expr.as_ref().map(|expr| Box::new(self.to_physical(expr))),
+                expr: expr
+                    .as_ref()
+                    .map(|expr| Box::new(LogicalToPhysicalExpression::to_physical(expr))),
                 whens: whens
                     .iter()
-                    .map(|(when, then)| (self.to_physical(when), self.to_physical(then)))
+                    .map(|(when, then)| {
+                        (
+                            LogicalToPhysicalExpression::to_physical(when),
+                            LogicalToPhysicalExpression::to_physical(then),
+                        )
+                    })
                     .collect(),
                 else_expr: else_expr
                     .as_ref()
-                    .map(|expr| Box::new(self.to_physical(expr))),
+                    .map(|expr| Box::new(LogicalToPhysicalExpression::to_physical(expr))),
             },
             Expression::Between { expr, lower, upper } => Expression::Between {
-                expr: Box::new(self.to_physical(expr)),
-                lower: Box::new(self.to_physical(lower)),
-                upper: Box::new(self.to_physical(upper)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
+                lower: Box::new(LogicalToPhysicalExpression::to_physical(lower)),
+                upper: Box::new(LogicalToPhysicalExpression::to_physical(upper)),
             },
             Expression::Extract { field, expr } => Expression::Extract {
                 field: field.clone(),
-                expr: Box::new(self.to_physical(expr)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
             },
             Expression::Like {
                 expr,
                 pattern,
                 escape,
             } => Expression::Like {
-                expr: Box::new(self.to_physical(expr)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
                 pattern: pattern.clone(),
                 escape: escape.clone(),
             },
             Expression::Cast { expr, to_type } => Expression::Cast {
-                expr: Box::new(self.to_physical(expr)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
                 to_type: to_type.clone(),
             },
             Expression::InList { expr, list } => Expression::InList {
-                expr: Box::new(self.to_physical(expr)),
-                list: list.iter().map(|expr| self.to_physical(expr)).collect(),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
+                list: list
+                    .iter()
+                    .map(LogicalToPhysicalExpression::to_physical)
+                    .collect(),
             },
             Expression::Not { expr } => Expression::Not {
-                expr: Box::new(self.to_physical(expr)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
             },
             Expression::Substring { expr, start, len } => Expression::Substring {
-                expr: Box::new(self.to_physical(expr)),
+                expr: Box::new(LogicalToPhysicalExpression::to_physical(expr)),
                 start: *start,
                 len: *len,
             },
             Expression::Subquery { expr } => Expression::Subquery {
-                expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
+                expr: Box::new(LogicalToPhysicalRelExpr::to_physical(expr.as_ref().clone())),
             },
             Expression::UncorrelatedAny { left, comp, right } => Expression::UncorrelatedAny {
-                left: Box::new(self.to_physical(left)),
+                left: Box::new(LogicalToPhysicalExpression::to_physical(left)),
                 comp: *comp,
-                right: Box::new(LogicalToPhysicalRelExpr.to_physical(right.as_ref().clone())),
+                right: Box::new(LogicalToPhysicalRelExpr::to_physical(
+                    right.as_ref().clone(),
+                )),
             },
             Expression::UncorrelatedExists { expr } => Expression::UncorrelatedExists {
-                expr: Box::new(LogicalToPhysicalRelExpr.to_physical(expr.as_ref().clone())),
+                expr: Box::new(LogicalToPhysicalRelExpr::to_physical(expr.as_ref().clone())),
             },
         }
     }

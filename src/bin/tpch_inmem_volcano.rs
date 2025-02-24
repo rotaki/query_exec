@@ -4,7 +4,7 @@ use query_exec::{
         create_db, create_table_from_sql, execute, import_csv, to_logical, to_physical, Catalog,
         Executor, TupleBuffer, VolcanoIterator,
     },
-    ContainerDS, ContainerType, InMemStorage,
+    ContainerDS, InMemStorage,
 };
 use std::{
     collections::{BTreeMap, HashMap},

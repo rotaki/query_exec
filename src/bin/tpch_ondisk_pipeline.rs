@@ -137,7 +137,7 @@ fn main() {
         //         record_header.push(format!("write_count{}", j));
         //     }
         // }
-        for (_, results) in &results {
+        for results in results.values() {
             for i in 0..results.len() {
                 record_header.push(format!("time{}", i));
                 record_header.push(format!("new_page{}", i));

@@ -431,7 +431,7 @@ mod tests {
         }
 
         let fields = vec![1.into()];
-        let mut iter = hash_table.iter_key(&fields);
+        let iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
         for (_, value) in iter {
             result.push(Tuple::from_bytes(&value));
@@ -442,7 +442,7 @@ mod tests {
         assert!(result.contains(&Tuple::from_fields(vec![1.into(), 11.into()])));
 
         let fields = vec![2.into()];
-        let mut iter = hash_table.iter_key(&fields);
+        let iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
         for (_, value) in iter {
             result.push(Tuple::from_bytes(&value));
@@ -453,7 +453,7 @@ mod tests {
         assert!(result.contains(&Tuple::from_fields(vec![2.into(), 13.into()])));
 
         let fields = vec![3.into()];
-        let mut iter = hash_table.iter_key(&fields);
+        let iter = hash_table.iter_key(&fields);
         let mut result = Vec::new();
         for (_, value) in iter {
             result.push(Tuple::from_bytes(&value));

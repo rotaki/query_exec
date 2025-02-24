@@ -18,7 +18,6 @@ use crate::{
 };
 
 use super::{bytecode_expr::ByteCodeExpr, Executor};
-use super::{TupleBuffer, TupleBufferIter};
 use inmem_buffer::{InMemBuffer, InMemBufferIter};
 
 // Pipeline iterators are non-blocking.
