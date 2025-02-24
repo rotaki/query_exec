@@ -35,7 +35,7 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
         println!("Loading data into container: {}", c_id);
         let mut count = 0;
         let num_tuples = 1000000; // Insert 1000 tuples at a time
-        let txn = self.storage.begin_txn(&db_id, TxnOptions::default())?;
+        let txn = self.storage.begin_txn(db_id, TxnOptions::default())?;
         let primary_key_indices = schema_ref.primary_key_indices();
         loop {
             let mut tuples = Vec::new();
@@ -71,7 +71,7 @@ impl<R: std::io::Read, T: TxnStorageTrait> DataLoader for SimpleCsvLoader<R, T> 
             if tuples.is_empty() {
                 break;
             } else {
-                self.storage.insert_values(&txn, &c_id, tuples)?;
+                self.storage.insert_values(&txn, c_id, tuples)?;
                 println!("Inserted {} tuples", count);
             }
         }
@@ -104,12 +104,11 @@ mod tests {
     ) -> (DatabaseId, ContainerId, SchemaRef) {
         let storage = storage.as_ref();
         let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
-        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let c_id = storage
             .create_container(
-                &txn,
-                &db_id,
-                ContainerOptions::new("test_table", ContainerType::BTree),
+                db_id,
+                ContainerOptions::primary("test_table", ContainerDS::BTree),
             )
             .unwrap();
         storage.commit_txn(&txn, false).unwrap();
@@ -140,10 +139,10 @@ mod tests {
         let mut loader = SimpleCsvLoader::new(rdr, storage.clone());
         loader.load_data(schema_ref, db_id, c_id).unwrap();
 
-        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
-        let scan_res = storage.scan_range(&txn, &c_id, ScanOptions::new()).unwrap();
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        let scan_res = storage.scan_range(&txn, c_id, ScanOptions::new()).unwrap();
         let mut count = 0;
-        while let Ok(Some((_k, v))) = storage.iter_next(&scan_res) {
+        while let Ok(Some((_k, v))) = storage.iter_next(&txn, &scan_res) {
             let tuple = Tuple::from_bytes(&v);
             let name = tuple.get(0).as_string().as_ref().unwrap();
             let age = tuple.get(1).as_int().unwrap();

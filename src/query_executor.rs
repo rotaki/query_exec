@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fbtree::prelude::{
-    ContainerId, ContainerOptions, ContainerType, DatabaseId, TxnStorageStatus, TxnStorageTrait,
+    ContainerDS, ContainerId, ContainerOptions, DatabaseId, TxnStorageStatus, TxnStorageTrait,
 };
 use fbtree::txn_storage::{DBOptions, TxnOptions};
 use sqlparser::parser::ParserError;
@@ -110,7 +110,7 @@ pub fn execute<T: TxnStorageTrait, E: Executor<T>>(
         println!("=== Executor ===");
         println!("{}", exec.to_pretty_string());
     }
-    let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+    let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
     let result = exec.execute(&txn).unwrap();
     storage.commit_txn(&txn, false).unwrap();
     result
@@ -123,12 +123,10 @@ fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorErr
         .parse_statements()?;
     let statement = statements.into_iter().next().unwrap();
     match statement {
-        sqlparser::ast::Statement::CreateTable {
-            name,
-            columns,
-            constraints,
-            ..
-        } => {
+        sqlparser::ast::Statement::CreateTable(ct) => {
+            let name = ct.name;
+            let columns = ct.columns;
+            let constraints = ct.constraints;
             // Create a schema
             let col_defs = columns
                 .iter()
@@ -140,7 +138,7 @@ fn parse_create_table(sql: &str) -> Result<(String, SchemaRef), QueryExecutorErr
                         sqlparser::ast::DataType::Text => DataType::String,
                         sqlparser::ast::DataType::Boolean => DataType::Boolean,
                         sqlparser::ast::DataType::Float(_)
-                        | sqlparser::ast::DataType::Double
+                        | sqlparser::ast::DataType::Double(_)
                         | sqlparser::ast::DataType::Decimal(_) => DataType::Float,
                         sqlparser::ast::DataType::Char(_) => DataType::String,
                         sqlparser::ast::DataType::Varchar(_) => DataType::String,
@@ -232,12 +230,11 @@ pub fn create_db<T: TxnStorageTrait>(
 ) -> Result<DatabaseId, QueryExecutorError> {
     let db_id = storage.open_db(DBOptions::new(db_name))?;
     // Create a container for the catalog
-    let txn = storage.begin_txn(&db_id, Default::default())?;
+    let txn = storage.begin_txn(db_id, Default::default())?;
     let c_id = storage
         .create_container(
-            &txn,
-            &db_id,
-            ContainerOptions::new("catalog", ContainerType::BTree),
+            db_id,
+            ContainerOptions::primary("catalog", ContainerDS::BTree),
         )
         .unwrap();
     assert_eq!(c_id, 0);
@@ -254,11 +251,11 @@ pub fn load_db<T: TxnStorageTrait>(
 ) -> Result<(DatabaseId, CatalogRef), QueryExecutorError> {
     let db_id = storage.open_db(DBOptions::new(db_name))?;
     // Scan container_id 0 to load the catalog
-    let txn = storage.begin_txn(&db_id, Default::default())?;
+    let txn = storage.begin_txn(db_id, Default::default())?;
     let catalog = Arc::new(Catalog::new());
     let catalog_c_id = 0; // catalog container_id is 0
-    let iter = storage.scan_range(&txn, &catalog_c_id, Default::default())?;
-    while let Some((k, v)) = storage.iter_next(&iter)? {
+    let iter = storage.scan_range(&txn, catalog_c_id, Default::default())?;
+    while let Some((k, v)) = storage.iter_next(&txn, &iter)? {
         let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
         let table = Table::from_bytes(&v);
         catalog.add_table(c_id, Arc::new(table));
@@ -272,17 +269,10 @@ pub fn create_table_from_sql<T: TxnStorageTrait>(
     storage: &Arc<T>,
     db_id: DatabaseId,
     sql_string: &str,
-    container_type: ContainerType,
+    c_ds: ContainerDS,
 ) -> Result<ContainerId, QueryExecutorError> {
     let (table_name, schema) = parse_create_table(sql_string)?;
-    create_table(
-        catalog_ref,
-        storage,
-        db_id,
-        &table_name,
-        schema,
-        container_type,
-    )
+    create_table(catalog_ref, storage, db_id, &table_name, schema, c_ds)
 }
 
 pub fn create_table<T: TxnStorageTrait>(
@@ -291,20 +281,16 @@ pub fn create_table<T: TxnStorageTrait>(
     db_id: DatabaseId,
     table_name: &str,
     schema: SchemaRef,
-    container_type: ContainerType,
+    c_ds: ContainerDS,
 ) -> Result<ContainerId, QueryExecutorError> {
-    let txn = storage.begin_txn(&db_id, Default::default())?;
-    let c_id = storage.create_container(
-        &txn,
-        &db_id,
-        ContainerOptions::new(table_name, container_type),
-    )?;
+    let c_id = storage.create_container(db_id, ContainerOptions::primary(table_name, c_ds))?;
+    let txn = storage.begin_txn(db_id, Default::default())?;
     // Insert the catalog entry into the catalog container
     let catalog_c_id = 0;
     let table = Table::new(table_name, schema.clone());
     storage.insert_value(
         &txn,
-        &catalog_c_id,
+        catalog_c_id,
         c_id.to_be_bytes().to_vec(),
         table.to_bytes(),
     )?;
@@ -392,11 +378,11 @@ mod tests {
             storage,
             db_id,
             "CREATE TABLE Employees (id INT, name VARCHAR, age INT, department_id INT, PRIMARY KEY (id))",
-            ContainerType::BTree,
+            ContainerDS::BTree,
         ).unwrap();
         let schema = catalog.get_schema(c_id).unwrap();
 
-        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let data = vec![
             Tuple::from_fields(vec![1.into(), "Alice".into(), 30.into(), 1.into()]),
             Tuple::from_fields(vec![2.into(), "Bob".into(), 22.into(), 2.into()]),
@@ -408,7 +394,7 @@ mod tests {
         storage
             .insert_values(
                 &txn,
-                &c_id,
+                c_id,
                 data.into_iter()
                     .map(|t| {
                         (
@@ -438,7 +424,7 @@ mod tests {
             storage,
             db_id,
             "CREATE TABLE Departments (id INT, name VARCHAR, PRIMARY KEY (id))",
-            ContainerType::BTree,
+            ContainerDS::BTree,
         )
         .unwrap();
         let schema = catalog.get_schema(c_id).unwrap();
@@ -450,7 +436,7 @@ mod tests {
         3,Marketing
         */
 
-        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let data = vec![
             Tuple::from_fields(vec![1.into(), "HR".into()]),
             Tuple::from_fields(vec![2.into(), "Engineering".into()]),
@@ -460,7 +446,7 @@ mod tests {
         storage
             .insert_values(
                 &txn,
-                &c_id,
+                c_id,
                 data.into_iter()
                     .map(|t| {
                         (

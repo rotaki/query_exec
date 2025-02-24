@@ -70,8 +70,8 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
                 let db_id = storage.db_id;
                 let c_id = storage.container_id;
                 let txn_options = TxnOptions::default();
-                let txn = storage.storage.begin_txn(&db_id, txn_options).unwrap();
-                let count = storage.storage.num_values(&txn, &c_id).unwrap();
+                let txn = storage.storage.begin_txn(db_id, txn_options).unwrap();
+                let count = storage.storage.num_values(&txn, c_id).unwrap();
                 storage.storage.commit_txn(&txn, false).unwrap();
                 count
             }
@@ -89,11 +89,11 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
                 let db_id = storage.db_id;
                 let c_id = storage.container_id;
                 let txn_options = TxnOptions::default();
-                let txn = storage.storage.begin_txn(&db_id, txn_options).unwrap();
+                let txn = storage.storage.begin_txn(db_id, txn_options).unwrap();
                 let scan_options = ScanOptions::default();
                 let iter = storage
                     .storage
-                    .scan_range(&txn, &c_id, scan_options)
+                    .scan_range(&txn, c_id, scan_options)
                     .unwrap();
                 OnDiskBufferIter::TxnStorage(TxnStorageIter::new(
                     storage.storage.clone(),
@@ -164,7 +164,7 @@ impl<T: TxnStorageTrait> TxnStorageIter<T> {
     }
 
     pub fn next(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>, ExecError> {
-        Ok(self.storage.iter_next(&self.iter)?)
+        Ok(self.storage.iter_next(&self.txn, &self.iter)?)
     }
 }
 

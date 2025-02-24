@@ -334,9 +334,9 @@ impl<T: TxnStorageTrait> InMemBuffer<T> {
         self.shared(); // Shared latch must be released when iterator is dropped.
         match self.as_ref() {
             InMemBuffer::TxnStorage(_, db_id, c_id, storage) => {
-                let txn = storage.begin_txn(db_id, Default::default()).unwrap();
+                let txn = storage.begin_txn(*db_id, Default::default()).unwrap();
                 let iter = storage
-                    .scan_range(&txn, c_id, ScanOptions::default())
+                    .scan_range(&txn, *c_id, ScanOptions::default())
                     .unwrap();
                 InMemBufferIter::scan(storage.clone(), txn, iter)
             }
@@ -467,8 +467,8 @@ impl<T: TxnStorageTrait> InMemBufferIter<T> {
 
     pub fn next(&self) -> Option<Tuple> {
         match self {
-            InMemBufferIter::TxnStorage(storage, _, iter) => storage
-                .iter_next(iter)
+            InMemBufferIter::TxnStorage(storage, txn, iter) => storage
+                .iter_next(txn, iter)
                 .unwrap()
                 .map(|(_, val)| Tuple::from_bytes(&val)),
             InMemBufferIter::TupleVec(_, iter) => iter.lock().unwrap().next().map(|t| t.copy()),

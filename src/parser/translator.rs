@@ -463,20 +463,20 @@ impl Translator {
                         if let LogicalRelExpr::Project { src: _, cols } = &plan {
                             let table_alias = alias.name.value.clone();
                             for (col_alias, col_id) in alias.columns.iter().zip(cols.iter()) {
-                                if !is_valid_alias(&col_alias.value) {
+                                if !is_valid_alias(&format!("{}", col_alias.name)) {
                                     return Err(translation_err!(
                                         InvalidSQL,
                                         "Invalid column alias name: {}",
-                                        col_alias.value
+                                        col_alias.name
                                     ));
                                 }
                                 let names = subquery.env.get_names(*col_id);
                                 for name in &names {
                                     self.env.set(name, *col_id);
                                 }
-                                self.env.set(&col_alias.value, *col_id);
+                                self.env.set(&format!("{}", col_alias.name), *col_id);
                                 self.env
-                                    .set(&format!("{}.{}", table_alias, col_alias.value), *col_id);
+                                    .set(&format!("{}.{}", table_alias, col_alias.name), *col_id);
                             }
                         } else {
                             return Err(translation_err!(
@@ -656,7 +656,7 @@ impl Translator {
         mut plan: LogicalRelExpr,
         projection: &Vec<sqlparser::ast::SelectItem>,
         _from: &[sqlparser::ast::TableWithJoins],
-        order_by: &Vec<sqlparser::ast::OrderByExpr>,
+        order_by: &Option<sqlparser::ast::OrderBy>,
         _limit: &Option<sqlparser::ast::Expr>,
         group_by: &sqlparser::ast::GroupByExpr,
         having: &Option<sqlparser::ast::Expr>,
@@ -726,11 +726,11 @@ impl Translator {
             having_predicates.insert(Expression::col_ref(res.1));
         }
         let group_by = match group_by {
-            sqlparser::ast::GroupByExpr::All => Err(translation_err!(
+            sqlparser::ast::GroupByExpr::All(_) => Err(translation_err!(
                 UnsupportedSQL,
                 "GROUP BY ALL is not supported"
             ))?,
-            sqlparser::ast::GroupByExpr::Expressions(exprs) => {
+            sqlparser::ast::GroupByExpr::Expressions(exprs, ..) => {
                 let mut group_by = Vec::new();
                 for expr in exprs {
                     let expr = self.process_expr(expr, None)?;
@@ -771,28 +771,30 @@ impl Translator {
             );
         }
 
-        let mut order_by_fields = Vec::new();
-        for order_by_expr in order_by {
-            let expr = self.process_expr(&order_by_expr.expr, Some(0))?;
-            let col_id = if let Expression::ColRef { id } = expr {
-                id
-            } else {
-                let col_id = self.col_id_gen.next();
-                plan = plan.map(
-                    true,
-                    &self.enabled_rules,
-                    &self.col_id_gen,
-                    [(col_id, expr)],
-                );
-                col_id
-            };
-            let asc = order_by_expr.asc.unwrap_or(true);
-            let nulls_first = order_by_expr.nulls_first.unwrap_or(false);
-            order_by_fields.push((col_id, asc, nulls_first));
-        }
+        if let Some(order_by) = order_by {
+            let mut order_by_fields = Vec::new();
+            for order_by_expr in order_by.exprs.iter() {
+                let expr = self.process_expr(&order_by_expr.expr, Some(0))?;
+                let col_id = if let Expression::ColRef { id } = expr {
+                    id
+                } else {
+                    let col_id = self.col_id_gen.next();
+                    plan = plan.map(
+                        true,
+                        &self.enabled_rules,
+                        &self.col_id_gen,
+                        [(col_id, expr)],
+                    );
+                    col_id
+                };
+                let asc = order_by_expr.asc.unwrap_or(true);
+                let nulls_first = order_by_expr.nulls_first.unwrap_or(false);
+                order_by_fields.push((col_id, asc, nulls_first));
+            }
 
-        if !order_by_fields.is_empty() {
-            plan = plan.order_by(true, &self.enabled_rules, &self.col_id_gen, order_by_fields);
+            if !order_by_fields.is_empty() {
+                plan = plan.order_by(true, &self.enabled_rules, &self.col_id_gen, order_by_fields);
+            }
         }
 
         plan = plan.o_project(true, &self.enabled_rules, &self.col_id_gen, projected_cols);
@@ -884,6 +886,9 @@ impl Translator {
                 let function_arg_expr = match &args[0] {
                     sqlparser::ast::FunctionArg::Named { arg, .. } => arg,
                     sqlparser::ast::FunctionArg::Unnamed(arg) => arg,
+                    sqlparser::ast::FunctionArg::ExprNamed { .. } => {
+                        unimplemented!("Unsupported aggregation function: {:?}", function);
+                    }
                 };
 
                 let agg_col_id = self.col_id_gen.next();
@@ -1072,6 +1077,7 @@ impl Translator {
                     left: Box::new(*left.clone()),
                     compare_op: sqlparser::ast::BinaryOperator::Eq,
                     right: Box::new(sqlparser::ast::Expr::Subquery(right.clone())),
+                    is_some: false,
                 };
                 let expr = self.process_expr(&any, distance)?;
                 if *negated {
@@ -1084,6 +1090,7 @@ impl Translator {
                 left,
                 compare_op,
                 right,
+                ..
             } => process_any(self, left, compare_op, right, distance),
             sqlparser::ast::Expr::Subquery(query) => {
                 let mut translator = Translator::new_with_outer(
@@ -1196,7 +1203,11 @@ impl Translator {
                     Ok(between)
                 }
             }
-            sqlparser::ast::Expr::Extract { field, expr } => {
+            sqlparser::ast::Expr::Extract {
+                field,
+                syntax,
+                expr,
+            } => {
                 let expr = self.process_expr(expr, distance)?;
                 let field = match field {
                     sqlparser::ast::DateTimeField::Year => DateField::Year,
@@ -1217,6 +1228,7 @@ impl Translator {
                 expr,
                 pattern,
                 escape_char,
+                ..
             } => {
                 let expr = self.process_expr(expr, distance)?;
                 let pattern = self.process_expr(pattern, distance)?;
@@ -1363,7 +1375,9 @@ fn get_type(d_type: &sqlparser::ast::DataType) -> DataType {
         sqlparser::ast::DataType::Int(_)
         | sqlparser::ast::DataType::SmallInt(_)
         | sqlparser::ast::DataType::BigInt(_) => DataType::Int,
-        sqlparser::ast::DataType::Double | sqlparser::ast::DataType::Decimal(_) => DataType::Float,
+        sqlparser::ast::DataType::Double(_) | sqlparser::ast::DataType::Decimal(_) => {
+            DataType::Float
+        }
         sqlparser::ast::DataType::Char(_)
         | sqlparser::ast::DataType::Varchar(_)
         | sqlparser::ast::DataType::Text => DataType::String,

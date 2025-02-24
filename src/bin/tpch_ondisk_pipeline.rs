@@ -104,22 +104,18 @@ fn main() {
                 let start = std::time::Instant::now();
                 let result = execute(db_id, &storage, exec, false);
                 let elapsed = start.elapsed();
-                let (new_page, read_count, write_count) = bp.stats();
+                let stats = bp.stats();
                 println!(
-                    "Query {} took {:?}, num rows: {}, new pages: {}, read count: {}, write count: {}",
+                    "Query {} took {:?}, num rows: {}",
                     query_id,
                     elapsed,
                     result.num_tuples(),
-                    new_page,
-                    read_count,
-                    write_count
                 );
-                results.entry(query_id).or_insert_with(Vec::new).push((
-                    elapsed,
-                    new_page,
-                    read_count,
-                    write_count,
-                ));
+                println!("Stats: \n{}", stats);
+                results
+                    .entry(query_id)
+                    .or_insert_with(Vec::new)
+                    .push((elapsed, stats));
                 bp.clear_dirty_flags().unwrap();
                 // Remove the temporary container using remove file
                 let _ = std::fs::remove_file(format!("{}/0/{}", opt.path, opt.temp_c_id));
@@ -154,11 +150,11 @@ fn main() {
         for (query_id, times) in results {
             let mut record = Vec::with_capacity(1 + times.len());
             record.push(query_id.to_string());
-            for (time, new_page, read_count, write_count) in times {
+            for (time, stats) in times {
                 record.push(time.as_millis().to_string());
-                record.push(new_page.to_string());
-                record.push(read_count.to_string());
-                record.push(write_count.to_string());
+                record.push(stats.bp_new_page.to_string());
+                record.push(stats.bp_read_frame.to_string());
+                record.push(stats.bp_write_frame.to_string());
             }
             writer.write_record(&record).unwrap();
         }
@@ -190,7 +186,7 @@ fn main() {
         let result = execute(db_id, &storage, exe, true);
         println!("Time: {} ms", time.elapsed().as_millis());
 
-        println!("stats: \n{:?}", bp.stats());
+        println!("stats: \n{}", bp.stats());
         println!("Result num rows: {}", result.num_tuples());
     }
 }
