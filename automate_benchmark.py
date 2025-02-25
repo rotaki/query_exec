@@ -22,7 +22,7 @@ def calculate_num_tuples(data_source, sf):
     else:
         raise ValueError(f"Unknown data source: {data_source}")
 
-def get_bp_dir(data_source, sf, distribution="uniform"):
+def get_bp_dir(data_source, sf, distribution="pointers"):
     """Generate buffer pool directory name."""
     if data_source == "TPCH":
         return f"bp-dir-tpch-sf-{sf}"
@@ -58,7 +58,7 @@ def get_default_configs():
             "quantile_method": "Parallel_BSS",
             "memory_type": "tank/local",
             "query_options": [100],
-            "sf_options": [1],
+            "sf_options": [],
             "working_mem_options": [1420],
             "bp_sizes": [150000],
             "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
