@@ -194,12 +194,12 @@ impl<T: TxnStorageTrait> ScanIter<T> {
         if self.iter.is_none() {
             self.iter = Some(
                 self.storage
-                    .scan_range(txn, &self.c_id, ScanOptions::default())
+                    .scan_range(txn, self.c_id, ScanOptions::default())
                     .unwrap(),
             );
         }
         let iter = self.iter.as_ref().unwrap();
-        if let Some((k, v)) = self.storage.iter_next(iter)? {
+        if let Some((k, v)) = self.storage.iter_next(txn, iter)? {
             let tuple = Tuple::from_bytes(&v);
             let tuple = tuple.project(&self.column_indices);
             log_trace!("ScanIter::next: c_id({}), tuple: {:?}", self.c_id, tuple);

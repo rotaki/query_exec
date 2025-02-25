@@ -76,7 +76,7 @@ fn main() {
     let result = execute(db_id, &storage, exe, true);
     println!("Time: {} ms", time.elapsed().as_millis());
 
-    println!("stats: \n{:?}", bp.stats());
+    println!("stats: \n{}", bp.stats());
 
     let iter = result.iter();
     let index = 0;
@@ -106,6 +106,6 @@ fn main() {
     //     }
     // }
 
-    println!("stats: \n{:?}", bp.stats());
+    println!("stats: \n{}", bp.stats());
     println!("Result num rows: {}", result.num_tuples());
 }

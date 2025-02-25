@@ -23,4 +23,7 @@ benchmark_results.csv
 gensort-linux-1.5/data/*
 gensort/data/*
 gensort/uniform
+gensort/grace 
+gensort/pointers 
+#xtx update
 gensort/skewed

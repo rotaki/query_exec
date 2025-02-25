@@ -4,7 +4,7 @@ use query_exec::{
         create_db, create_table_from_sql, execute, import_csv, to_logical, to_physical, Catalog,
         Executor, InMemPipelineGraph, TupleBuffer,
     },
-    ContainerType, InMemStorage,
+    ContainerDS, InMemStorage,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -66,7 +66,7 @@ fn main() {
             &storage,
             db_id,
             sql.as_ref(),
-            ContainerType::AppendOnly,
+            ContainerDS::AppendOnly,
         )
         .unwrap();
         tables.insert(table, c_id);
@@ -131,7 +131,7 @@ fn main() {
         //         record_header.push(format!("write_count{}", j));
         //     }
         // }
-        for (_, results) in &results {
+        for results in results.values() {
             for i in 0..results.len() {
                 record_header.push(format!("time{}", i));
             }

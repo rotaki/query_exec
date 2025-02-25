@@ -98,8 +98,8 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
                 let db_id = storage.db_id;
                 let c_id = storage.container_id;
                 let txn_options = TxnOptions::default();
-                let txn = storage.storage.begin_txn(&db_id, txn_options).unwrap();
-                let count = storage.storage.num_values(&txn, &c_id).unwrap();
+                let txn = storage.storage.begin_txn(db_id, txn_options).unwrap();
+                let count = storage.storage.num_values(&txn, c_id).unwrap();
                 storage.storage.commit_txn(&txn, false).unwrap();
                 count
             }
@@ -118,11 +118,11 @@ impl<T: TxnStorageTrait, M: MemPool> TupleBuffer for OnDiskBuffer<T, M> {
                 let db_id = storage.db_id;
                 let c_id = storage.container_id;
                 let txn_options = TxnOptions::default();
-                let txn = storage.storage.begin_txn(&db_id, txn_options).unwrap();
+                let txn = storage.storage.begin_txn(db_id, txn_options).unwrap();
                 let scan_options = ScanOptions::default();
                 let iter = storage
                     .storage
-                    .scan_range(&txn, &c_id, scan_options)
+                    .scan_range(&txn, c_id, scan_options)
                     .unwrap();
                 OnDiskBufferIter::TxnStorage(TxnStorageIter::new(
                     storage.storage.clone(),
@@ -210,7 +210,7 @@ impl<T: TxnStorageTrait> TxnStorageIter<T> {
     }
 
     pub fn next(&self) -> Result<Option<(Vec<u8>, Vec<u8>)>, ExecError> {
-        Ok(self.storage.iter_next(&self.iter)?)
+        Ok(self.storage.iter_next(&self.txn, &self.iter)?)
     }
 }
 
@@ -280,9 +280,9 @@ impl<T: TxnStorageTrait> TxnStorageRangeIter<T> {
         end_index: usize,
     ) -> Self {
         let txn_options = TxnOptions::default();
-        let txn = storage.begin_txn(&db_id, txn_options).unwrap();
+        let txn = storage.begin_txn(db_id, txn_options).unwrap();
         let scan_options = ScanOptions::default();
-        let iter = storage.scan_range(&txn, &c_id, scan_options).unwrap();
+        let iter = storage.scan_range(&txn, c_id, scan_options).unwrap();
 
         // Skip to start_index
         // for _ in 0..start_index {
@@ -305,7 +305,7 @@ impl<T: TxnStorageTrait> TxnStorageRangeIter<T> {
         if self.current_index >= self.end_index {
             Ok(None)
         } else {
-            match self.storage.iter_next(&self.iter)? {
+            match self.storage.iter_next(&self.txn, &self.iter)? {
                 Some(kv) => {
                     self.current_index += 1;
                     Ok(Some(kv))

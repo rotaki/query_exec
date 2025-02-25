@@ -1,7 +1,7 @@
 use clap::Parser;
 use query_exec::{
     prelude::{
-        create_db, create_table_from_sql, import_gensort, Catalog, ContainerType, OnDiskStorage,
+        create_db, create_table_from_sql, import_gensort, Catalog, ContainerDS, OnDiskStorage,
     },
     BufferPool,
 };
@@ -64,14 +64,8 @@ pub fn create_gensort_db(sf: f64, buffer_pool_size: usize, name: &str) {
     let table_sql =
         std::fs::read_to_string(table_sql_path).expect("Failed to read gensort_data.sql file.");
     // 6. Create the table in "GENSORT" using your existing function
-    let c_id = create_table_from_sql(
-        &catalog,
-        &storage,
-        db_id,
-        &table_sql,
-        ContainerType::Gensort,
-    )
-    .expect("Failed to create gensort_data table");
+    let c_id = create_table_from_sql(&catalog, &storage, db_id, &table_sql, ContainerDS::Gensort)
+        .expect("Failed to create gensort_data table");
     // 7. Import raw gensort records from data_path using `import_gensort`
     import_gensort(&catalog, &storage, db_id, c_id, &data_path)
         .expect("Error importing Gensort data");

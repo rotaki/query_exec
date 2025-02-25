@@ -1,7 +1,7 @@
 use clap::Parser;
 use query_exec::{
     prelude::{create_db, create_table_from_sql, import_csv, Catalog},
-    BufferPool, ContainerType, OnDiskStorage,
+    BufferPool, ContainerDS, OnDiskStorage,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
@@ -67,7 +67,7 @@ fn main() {
             &storage,
             db_id,
             sql.as_ref(),
-            ContainerType::AppendOnly,
+            ContainerDS::AppendOnly,
         )
         .unwrap();
         tables.insert(table, c_id);

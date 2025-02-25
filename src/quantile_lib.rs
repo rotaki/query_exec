@@ -6,7 +6,7 @@ use fbtree::{
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::{collections::HashMap, fs::File, io::Write, sync::Arc, env};
+use std::{collections::HashMap, env, fs::File, io::Write, sync::Arc};
 
 use crate::error::ExecError;
 
@@ -116,8 +116,7 @@ pub fn estimate_quantiles<M: MemPool>(
         QuantileMethod::GKSketch => gk_sketch_quantiles(runs, num_quantiles_per_run, 0.00005),
         QuantileMethod::Actual => {
             // Read environment variables with defaults
-            let data_source = env::var("DATA_SOURCE")
-                .unwrap_or_else(|_| "TPCH".to_string());
+            let data_source = env::var("DATA_SOURCE").unwrap_or_else(|_| "TPCH".to_string());
             let sf = env::var("SF")
                 .unwrap_or_else(|_| "1".to_string())
                 .parse::<usize>()
@@ -140,7 +139,9 @@ pub fn estimate_quantiles<M: MemPool>(
             // Try to read and parse the file
             match std::fs::read_to_string(&filename) {
                 Ok(contents) => {
-                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&contents) {
+                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        &contents,
+                    ) {
                         Ok(map) => {
                             // Look for the key matching num_quantiles_per_run
                             if let Some(value) = map.get(&num_quantiles_per_run.to_string()) {
@@ -156,7 +157,7 @@ pub fn estimate_quantiles<M: MemPool>(
                                             })
                                         })
                                         .collect();
-                                    
+
                                     if !result.is_empty() {
                                         println!("Using actual quantiles from file: {}", filename);
                                         return result;
@@ -165,15 +166,21 @@ pub fn estimate_quantiles<M: MemPool>(
                             }
                             println!("Couldn't find quantiles for size {} in file, falling back to mean-based estimation", num_quantiles_per_run);
                         }
-                        Err(e) => println!("Error parsing JSON file: {}, falling back to mean-based estimation", e),
+                        Err(e) => println!(
+                            "Error parsing JSON file: {}, falling back to mean-based estimation",
+                            e
+                        ),
                     }
                 }
-                Err(e) => println!("Error reading file {}: {}, falling back to mean-based estimation", filename, e),
+                Err(e) => println!(
+                    "Error reading file {}: {}, falling back to mean-based estimation",
+                    filename, e
+                ),
             }
 
             // If we get here, either the file wasn't found or the data wasn't valid
             mean_based_quantiles(runs, num_quantiles_per_run)
-        },
+        }
         // Shouldn't happen in "estimate" phase
         _ => panic!("impelemnted qunatile estimation"),
     }
@@ -753,7 +760,6 @@ fn byte_wise_distance(a: &[u8], b: &[u8]) -> f64 {
     sum
 }
 
-
 /// Calculates multiple sets of quantiles in a single pass and returns them
 pub fn calculate_multiple_quantiles<M: MemPool>(
     sorted_runs: Arc<BigSortedRunStore<M>>,
@@ -762,45 +768,44 @@ pub fn calculate_multiple_quantiles<M: MemPool>(
 ) -> Result<Vec<Vec<Vec<u8>>>, ExecError> {
     // Validate input parameters
     if max_num_quantiles < 2 {
-        return Err(ExecError::Conversion("Number of quantiles must be at least 2".to_string()));
+        return Err(ExecError::Conversion(
+            "Number of quantiles must be at least 2".to_string(),
+        ));
     }
 
     let mut all_quantiles: Vec<usize> = Vec::with_capacity(max_num_quantiles - 1);
-    
+
     // Calculate all positions we need to sample
     let mut all_positions = Vec::new();
     for num_quantiles in 2..=max_num_quantiles {
         let mut positions = Vec::with_capacity(num_quantiles);
-        
+
         // First quantile is always at position 0
         positions.push(0);
-        
+
         // Calculate middle quantile positions
-        for i in 1..num_quantiles-1 {
+        for i in 1..num_quantiles - 1 {
             let pos = (i * num_tuples) / (num_quantiles - 1);
             positions.push(pos);
         }
-        
+
         // Last quantile is always at the last position
         positions.push(num_tuples - 1);
         all_positions.push(positions);
     }
-    
+
     // Flatten and deduplicate positions
-    let mut unique_positions: Vec<usize> = all_positions.iter()
-        .flatten()
-        .copied()
-        .collect();
+    let mut unique_positions: Vec<usize> = all_positions.iter().flatten().copied().collect();
     unique_positions.sort_unstable();
     unique_positions.dedup();
-    
+
     // Create vectors to store quantiles for each set
     let mut quantile_sets = vec![Vec::new(); max_num_quantiles - 1];
-    
+
     // Single pass through the data
     let mut current_pos = 0;
     let mut pos_idx = 0;
-    
+
     for (key, _) in sorted_runs.scan() {
         while pos_idx < unique_positions.len() && current_pos == unique_positions[pos_idx] {
             // This position is needed for one or more quantile sets
@@ -811,28 +816,29 @@ pub fn calculate_multiple_quantiles<M: MemPool>(
             }
             pos_idx += 1;
         }
-        
+
         if pos_idx >= unique_positions.len() {
-            break;  // We've found all positions we need
+            break; // We've found all positions we need
         }
-        
+
         current_pos += 1;
     }
-    
+
     // Validate results
     for (i, quantiles) in quantile_sets.iter().enumerate() {
-        let expected_len = i + 2;  // 2 quantiles for first set, 3 for second, etc.
+        let expected_len = i + 2; // 2 quantiles for first set, 3 for second, etc.
         if quantiles.len() != expected_len {
-            return Err(ExecError::Conversion(
-                format!("Failed to compute {} quantiles: expected {} values, got {}", 
-                    i + 2, expected_len, quantiles.len())
-            ));
+            return Err(ExecError::Conversion(format!(
+                "Failed to compute {} quantiles: expected {} values, got {}",
+                i + 2,
+                expected_len,
+                quantiles.len()
+            )));
         }
     }
-    
+
     Ok(quantile_sets)
 }
-
 
 /// Writes quantiles to JSON, ensuring each quantile sub-array is on one line.
 pub fn write_quantiles_to_json_file<M: MemPool>(
@@ -844,48 +850,50 @@ pub fn write_quantiles_to_json_file<M: MemPool>(
     max_num_quantiles: usize,
 ) -> Result<(), ExecError> {
     // Calculate the quantiles
-    let quantiles = calculate_multiple_quantiles(
-        sorted_runs,
-        num_tuples,
-        max_num_quantiles
-    )?;
+    let quantiles = calculate_multiple_quantiles(sorted_runs, num_tuples, max_num_quantiles)?;
 
     // Create the directory path and filename
     let dir_path = format!("quantile_data/{}", data_source);
-    let filename = format!("{}/QID-{}_SF-{}_NUMTUPLES-{}.json", dir_path, query, sf, num_tuples);
+    let filename = format!(
+        "{}/QID-{}_SF-{}_NUMTUPLES-{}.json",
+        dir_path, query, sf, num_tuples
+    );
     println!("filename {}", filename);
-    
+
     // Create the directory and its parents if they don't exist
     std::fs::create_dir_all(&dir_path)
         .map_err(|e| ExecError::Storage(format!("Failed to create directory: {}", e)))?;
-    
+
     // Create vectors to store entries
     let mut json_entries = Vec::new();
-    
+
     // Process quantiles in order (2 to max_num_quantiles)
     for (idx, quantile_set) in quantiles.into_iter().enumerate() {
         let num_quantiles = idx + 2;
-        
+
         // Format this entry's arrays
         let arrays_str = quantile_set
             .iter()
-            .map(|q| format!("[{}]", 
-                q.iter()
-                    .map(|&byte| byte.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ))
+            .map(|q| {
+                format!(
+                    "[{}]",
+                    q.iter()
+                        .map(|&byte| byte.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
             .collect::<Vec<_>>()
             .join(",\n    ");
-            
+
         // Create the full entry string
         let entry = format!("  \"{}\": [\n    {}\n  ]", num_quantiles, arrays_str);
         json_entries.push((num_quantiles, entry));
     }
-    
+
     // Sort entries by number of quantiles
     json_entries.sort_by_key(|(num, _)| *num);
-    
+
     // Build the final JSON string
     let mut output = String::from("{\n");
     for (i, (_, entry)) in json_entries.iter().enumerate() {
@@ -895,7 +903,7 @@ pub fn write_quantiles_to_json_file<M: MemPool>(
         }
     }
     output.push_str("\n}");
-    
+
     // Write to file
     std::fs::write(&filename, output)
         .map_err(|e| ExecError::Storage(format!("File write error: {}", e)))?;
@@ -952,7 +960,6 @@ pub fn check_actual_quantiles_exist(
         Err(_) => Ok(false),
     }
 }
-
 
 /// Writes quantiles to a JSON file
 /// Helper function to format JSON with arrays on single lines

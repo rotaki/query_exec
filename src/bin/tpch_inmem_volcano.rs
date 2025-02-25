@@ -4,7 +4,7 @@ use query_exec::{
         create_db, create_table_from_sql, execute, import_csv, to_logical, to_physical, Catalog,
         Executor, TupleBuffer, VolcanoIterator,
     },
-    ContainerType, InMemStorage,
+    ContainerDS, InMemStorage,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -61,14 +61,9 @@ fn main() {
     for table in &table_names {
         let path = format!("tpch/tables/{}.sql", table);
         let sql = std::fs::read_to_string(path).unwrap();
-        let c_id = create_table_from_sql(
-            &catalog,
-            &storage,
-            db_id,
-            sql.as_ref(),
-            ContainerType::BTree,
-        )
-        .unwrap();
+        let c_id =
+            create_table_from_sql(&catalog, &storage, db_id, sql.as_ref(), ContainerDS::BTree)
+                .unwrap();
         tables.insert(table, c_id);
     }
 

@@ -31,7 +31,6 @@ use crate::quantile_lib::*;
 
 use fbtree::access_method::sorted_run_store::{BigSortedRunStore, SortedRunStore};
 
-
 #[derive(Clone, Copy)]
 pub enum MergeStrategy {
     Kraska,
@@ -789,17 +788,17 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             .unwrap_or_else(|_| "6005720".to_string())
             .parse()
             .expect("NUM_TUPLES must be a valid number");
-        
+
         match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let max_parallel_partitions = std::cmp::min(*working_mem, 8);
                 println!("Total tuples estimated: {}", total_tuples);
                 println!("Working memory limit (runs): {}", working_mem);
                 println!("Maximum parallel partitions: {}", max_parallel_partitions);
-    
+
                 // First generate initial sorted runs in parallel
                 let target_tuples_per_run = total_tuples / max_parallel_partitions;
-    
+
                 let initial_runs: Vec<Arc<SortedRunStore<M>>> = (0..max_parallel_partitions)
                     .into_par_iter()
                     .map(|run_id| {
@@ -809,22 +808,22 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         } else {
                             std::cmp::min(start + target_tuples_per_run, total_tuples)
                         };
-    
+
                         let mut exec_plan = self.exec_plan.clone_with_range(start, end);
                         let run_container_key = ContainerKey {
                             db_id: dest_c_key.db_id,
                             c_id: dest_c_key.c_id + run_id as u16,
                         };
-    
+
                         let mut sort_buffer = SortBuffer::new(
                             &mem_pool,
                             run_container_key,
                             policy,
-                            self.sort_cols.clone()
+                            self.sort_cols.clone(),
                         );
-    
+
                         let mut runs = Vec::new();
-    
+
                         // Fill buffer with tuples for this range
                         while let Some(tuple) = exec_plan.next(context)? {
                             if !sort_buffer.append(&tuple) {
@@ -839,7 +838,7 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                                 assert!(sort_buffer.append(&tuple));
                             }
                         }
-    
+
                         // Handle remaining tuples
                         if sort_buffer.ptrs.len() > 0 {
                             sort_buffer.sort();
@@ -850,13 +849,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                             ));
                             runs.push(run);
                         }
-    
+
                         // For each range, create a BigSortedRunStore from its runs
                         let mut big_store = BigSortedRunStore::new();
                         for run in runs {
                             big_store.add_store(run);
                         }
-                        
+
                         // Return a single merged run for this range
                         let merge_iter = big_store.scan();
                         Ok(Arc::new(SortedRunStore::new(
@@ -866,73 +865,77 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         )))
                     })
                     .collect::<Result<Vec<_>, ExecError>>()?;
-    
+
                 // Create a BigSortedRunStore from initial runs to get quantiles
                 let mut big_store = BigSortedRunStore::new();
                 for run in initial_runs.iter() {
                     big_store.add_store(run.clone());
                 }
                 let big_store = Arc::new(big_store);
-    
+
                 // Calculate partition boundaries using the BigSortedRunStore
                 let mut global_quantiles = estimate_quantiles(
-                    &[big_store], 
+                    &[big_store],
                     max_parallel_partitions + 1,
-                    QuantileMethod::Actual
+                    QuantileMethod::Actual,
                 );
-    
+
                 // Ensure boundary conditions
                 if global_quantiles.is_empty() {
                     global_quantiles = vec![vec![0; 9]; max_parallel_partitions + 1];
                 }
                 global_quantiles[0] = vec![0; 9];
                 global_quantiles[max_parallel_partitions] = vec![255; 9];
-    
+
                 // Now redistribute records into final partitions
                 let final_runs: Vec<Arc<SortedRunStore<M>>> = (0..max_parallel_partitions)
                     .into_par_iter()
                     .map(|partition_id| {
                         let lower = global_quantiles[partition_id].clone();
                         let upper = global_quantiles[partition_id + 1].clone();
-                        
+
                         let partition_key = ContainerKey {
                             db_id: dest_c_key.db_id,
                             c_id: dest_c_key.c_id + partition_id as u16,
                         };
-    
+
                         // Create merger for this partition's range
                         let run_segments = initial_runs
                             .iter()
                             .map(|run| run.scan_range(&lower, &upper))
                             .collect::<Vec<_>>();
-    
+
                         let merge_iter = MergeIter::new(run_segments);
                         let merged_store = Arc::new(SortedRunStore::new(
                             partition_key,
                             mem_pool.clone(),
-                            merge_iter
+                            merge_iter,
                         ));
-    
-                        println!("Partition {} contains {} records", 
-                            partition_id, merged_store.len());
-    
+
+                        println!(
+                            "Partition {} contains {} records",
+                            partition_id,
+                            merged_store.len()
+                        );
+
                         Ok(merged_store)
                     })
                     .collect::<Result<Vec<_>, ExecError>>()?;
-    
+
                 // Verify total record count
                 let total_records: usize = final_runs.iter().map(|r| r.len()).sum();
                 println!("Total records: {}", total_records);
-                assert_eq!(total_records, total_tuples,
-                    "Record count mismatch! Expected {} but got {}", 
-                    total_tuples, total_records);
-    
+                assert_eq!(
+                    total_records, total_tuples,
+                    "Record count mismatch! Expected {} but got {}",
+                    total_tuples, total_records
+                );
+
                 Ok(final_runs)
-            },
-            _ => panic!("Only FixedSizeLimit policy supported")
+            }
+            _ => panic!("Only FixedSizeLimit policy supported"),
         }
     }
-
 
     // Maybe parallel but not fast
     fn run_merge_2(
@@ -1114,68 +1117,71 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         num_threads: usize,
     ) -> Result<Arc<BigSortedRunStore<M>>, ExecError> {
         let verbose = true;
-    
+
         match policy.as_ref() {
             MemoryPolicy::FixedSizeLimit(working_mem) => {
                 let working_mem = 400;
                 let overall_start = Instant::now();
                 let total_records: usize = runs.iter().map(|r| r.len()).sum();
                 let max_parallel_partitions = std::cmp::min(working_mem, num_threads);
-    
+
                 if verbose {
                     println!("Working memory (max runs): {}", working_mem);
                     println!("Number of threads available: {}", num_threads);
                     println!("Maximum parallel partitions: {}", max_parallel_partitions);
                     println!("Total runs to merge: {}", runs.len());
                 }
-    
+
                 let mut global_quantiles =
                     estimate_quantiles(&runs, max_parallel_partitions + 1, QuantileMethod::Actual);
-    
+
                 if global_quantiles.is_empty() {
                     global_quantiles = vec![vec![0; 9]; max_parallel_partitions + 1];
                 }
                 global_quantiles[0] = vec![0; 9];
                 global_quantiles[max_parallel_partitions] = vec![255; 9];
-    
+
                 let processing_start = Instant::now();
-    
+
                 // Process all partitions in parallel and collect their stores
-                let partition_results: Vec<Vec<Arc<SortedRunStore<M>>>> = (0..max_parallel_partitions)
+                let partition_results: Vec<Vec<Arc<SortedRunStore<M>>>> = (0
+                    ..max_parallel_partitions)
                     .into_par_iter()
                     .map(|i| {
                         let thread_start = Instant::now();
                         let lower = global_quantiles[i].clone();
                         let upper = global_quantiles[i + 1].clone();
-    
+
                         if verbose {
                             println!(
                                 "Partition {} starting - Range: {:?} to {:?} (half-open)",
                                 i, lower, upper
                             );
                         }
-    
+
                         // Process each run's portion of this partition
-                        let partition_stores: Vec<Arc<SortedRunStore<M>>> = runs.iter()
+                        let partition_stores: Vec<Arc<SortedRunStore<M>>> = runs
+                            .iter()
                             .enumerate()
                             .map(|(run_idx, run)| {
                                 let partition_key = ContainerKey {
                                     db_id: dest_c_key.db_id,
                                     c_id: dest_c_key.c_id + (i * runs.len() + run_idx) as u16,
                                 };
-    
+
                                 Arc::new(SortedRunStore::new(
                                     partition_key,
                                     mem_pool.clone(),
-                                    run.scan_range(&lower, &upper)
+                                    run.scan_range(&lower, &upper),
                                 ))
                             })
                             .filter(|store| store.len() > 0)
                             .collect();
-    
-                        let partition_records: usize = partition_stores.iter().map(|s| s.len()).sum();
+
+                        let partition_records: usize =
+                            partition_stores.iter().map(|s| s.len()).sum();
                         let thread_duration = thread_start.elapsed();
-                        
+
                         if verbose {
                             println!(
                                 "Partition {} finished in {:.2}s ({} records)",
@@ -1184,15 +1190,15 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                                 partition_records
                             );
                         }
-    
+
                         partition_stores
                     })
                     .collect();
-    
+
                 // Create final store and add all stores in order
                 let mut final_store = BigSortedRunStore::new();
                 let mut total_processed = 0;
-    
+
                 // Add stores from all partitions in order
                 for stores in partition_results {
                     for store in stores {
@@ -1200,22 +1206,27 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
                         final_store.add_store(store);
                     }
                 }
-    
+
                 if verbose {
                     let overall_sec = overall_start.elapsed().as_secs_f64();
                     println!("\nPartitioning Statistics:");
                     println!("  - Total records processed: {}", total_processed);
-                    println!("  - Overall throughput: {:.2}M records/s",
-                             (total_processed as f64) / (1_000_000.0 * overall_sec));
-                    println!("  - Processing time: {:.2}s", processing_start.elapsed().as_secs_f64());
-    
+                    println!(
+                        "  - Overall throughput: {:.2}M records/s",
+                        (total_processed as f64) / (1_000_000.0 * overall_sec)
+                    );
+                    println!(
+                        "  - Processing time: {:.2}s",
+                        processing_start.elapsed().as_secs_f64()
+                    );
+
                     assert_eq!(
                         total_records, total_processed,
                         "Record count mismatch! Expected {} but got {}",
                         total_records, total_processed
                     );
                 }
-    
+
                 Ok(Arc::new(final_store))
             }
             _ => {
@@ -1572,7 +1583,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         mem_pool: &Arc<M>,
         dest_c_key: ContainerKey,
     ) -> Result<Arc<OnDiskBuffer<T, M>>, ExecError> {
-        self.execute_with_strategy(context, policy, mem_pool, dest_c_key, MergeStrategy::ParallelBSS)
+        self.execute_with_strategy(
+            context,
+            policy,
+            mem_pool,
+            dest_c_key,
+            MergeStrategy::ParallelBSS,
+        )
     }
 
     pub fn execute_with_strategy(
@@ -1626,7 +1643,14 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
             }
             MergeStrategy::ParallelBSS => {
                 println!("Using Parallel BSS merge strategy");
-                self.run_merge_parallel_bss(policy, big_runs, mem_pool, dest_c_key, merge_num_threads, verbose)?
+                self.run_merge_parallel_bss(
+                    policy,
+                    big_runs,
+                    mem_pool,
+                    dest_c_key,
+                    merge_num_threads,
+                    verbose,
+                )?
             }
         };
         let duration_merge = start_merge.elapsed();
@@ -1647,25 +1671,19 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         self.print_efficiency_changes(&pre_merge_stats, &post_merge_stats);
 
         println!("merge duration {:?}", duration_merge);
-        if verbose{
-            verify_sorted_store_full_bss(
-                final_run.clone(),
-                &[(0, true, false)],
-                false,
-                1,
-            );
+        if verbose {
+            verify_sorted_store_full_bss(final_run.clone(), &[(0, true, false)], false, 1);
         }
 
-        let data_source = env::var("DATA_SOURCE")
-            .unwrap_or_else(|_| (&"TPCH").to_string());
+        let data_source = env::var("DATA_SOURCE").unwrap_or_else(|_| (&"TPCH").to_string());
         let sf = env::var("SF")
             .unwrap_or_else(|_| 1.to_string())
             .parse()
             .expect("SF must be a valid number");
         let query_num = env::var("QUERY_NUM")
-        .unwrap_or_else(|_| 100.to_string())
-        .parse()
-        .expect("QUERY_NUM must be a valid number");
+            .unwrap_or_else(|_| 100.to_string())
+            .parse()
+            .expect("QUERY_NUM must be a valid number");
         let num_tuples = env::var("NUM_TUPLES")
             .unwrap_or_else(|_| 6005720.to_string())
             .parse()
@@ -1703,7 +1721,10 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         println!("\n{} storage statistics:", phase);
         println!("  Total pages used: {}", stats.total_pages);
         println!("  Total records: {}", stats.total_records);
-        println!("  Average records per page: {:.2}", stats.avg_records_per_page);
+        println!(
+            "  Average records per page: {:.2}",
+            stats.avg_records_per_page
+        );
     }
 
     fn print_efficiency_changes(&self, pre: &StorageStats, post: &StorageStats) {
@@ -1714,7 +1735,8 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         };
 
         let density_improvement = if pre.avg_records_per_page > 0.0 {
-            (post.avg_records_per_page - pre.avg_records_per_page) / pre.avg_records_per_page * 100.0
+            (post.avg_records_per_page - pre.avg_records_per_page) / pre.avg_records_per_page
+                * 100.0
         } else {
             0.0
         };
@@ -1928,9 +1950,9 @@ fn verify_sorted_store_full<T: MemPool>(
     let mut violations = Vec::new();
     let mut scanner = store.scan();
     let total_tuples: usize = env::var("NUM_TUPLES")
-    .unwrap_or_else(|_| 6005720.to_string())
-    .parse()
-    .expect("NUM_TUPLES must be a valid number");
+        .unwrap_or_else(|_| 6005720.to_string())
+        .parse()
+        .expect("NUM_TUPLES must be a valid number");
 
     // Get first record
     let first = match scanner.next() {
@@ -2009,9 +2031,9 @@ fn verify_sorted_store_full_bss<T: MemPool>(
     let mut violations = Vec::new();
     let mut scanner = store.scan();
     let total_tuples: usize = env::var("NUM_TUPLES")
-    .unwrap_or_else(|_| 6005720.to_string())
-    .parse()
-    .expect("NUM_TUPLES must be a valid number");
+        .unwrap_or_else(|_| 6005720.to_string())
+        .parse()
+        .expect("NUM_TUPLES must be a valid number");
 
     // Get first record
     let first = match scanner.next() {

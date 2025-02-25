@@ -94,7 +94,7 @@ fn run_query(
     // Set memory policy
     let mem_policy = Arc::new(MemoryPolicy::FixedSizeLimit(memory_size));
 
-    println!("stats before {:?}", bp.stats());
+    println!("stats before {}", bp.stats());
     // Create pipeline graph
     let exe = OnDiskPipelineGraph::new(
         db_id,
@@ -121,7 +121,7 @@ fn run_query(
     // Execute the pipeline
     let _result = execute(db_id, &storage, exe, false);
 
-    println!("stats after {:?}", bp.stats());
+    println!("stats after {}", bp.stats());
 
     let duration = start_time.elapsed();
 
