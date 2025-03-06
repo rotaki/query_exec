@@ -632,13 +632,13 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
     ) -> Result<Vec<Arc<SortedRunStore<M>>>, ExecError> {
         // Estimate the total number of tuples
         let total_tuples = env::var("NUM_TUPLES")
-            .unwrap_or_else(|_| 6005720.to_string())
+            .unwrap_or_else(|_| 6005721.to_string())
             .parse()
             .expect("NUM_TUPLES must be a valid number");
         println!("Total tuples estimated: {}", total_tuples);
 
         // Decide on the number of threads
-        let num_threads = 24;
+        let num_threads = 5;
 
         // Calculate chunk size
         let chunk_size = (total_tuples + num_threads - 1) / num_threads;
@@ -1676,27 +1676,27 @@ impl<T: TxnStorageTrait, M: MemPool> OnDiskSort<T, M> {
         }
 
         let data_source = env::var("DATA_SOURCE").unwrap_or_else(|_| (&"TPCH").to_string());
-        let sf = env::var("SF")
-            .unwrap_or_else(|_| 1.to_string())
-            .parse()
-            .expect("SF must be a valid number");
-        let query_num = env::var("QUERY_NUM")
-            .unwrap_or_else(|_| 100.to_string())
-            .parse()
-            .expect("QUERY_NUM must be a valid number");
-        let num_tuples = env::var("NUM_TUPLES")
-            .unwrap_or_else(|_| 6005720.to_string())
-            .parse()
-            .expect("NUM_TUPLES must be a valid number");
-        let max_num_quantiles = 50;
-        write_quantiles_to_json_file(
-            final_run.clone(),
-            &data_source,
-            sf,
-            query_num,
-            num_tuples,
-            max_num_quantiles,
-        )?;
+        // let sf = env::var("SF")
+        //     .unwrap_or_else(|_| 1.to_string())
+        //     .parse()
+        //     .expect("SF must be a valid number");
+        // let query_num = env::var("QUERY_NUM")
+        //     .unwrap_or_else(|_| 100.to_string())
+        //     .parse()
+        //     .expect("QUERY_NUM must be a valid number");
+        // let num_tuples = env::var("NUM_TUPLES")
+        //     .unwrap_or_else(|_| 6005720.to_string())
+        //     .parse()
+        //     .expect("NUM_TUPLES must be a valid number");
+        // let max_num_quantiles = 50;
+        // write_quantiles_to_json_file(
+        //     final_run.clone(),
+        //     &data_source,
+        //     sf,
+        //     query_num,
+        //     num_tuples,
+        //     max_num_quantiles,
+        // )?;
 
         Ok(Arc::new(OnDiskBuffer::BigSortedRunStore(final_run)))
     }

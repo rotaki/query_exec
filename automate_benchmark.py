@@ -2,6 +2,7 @@ import subprocess
 import csv
 import os
 import math
+import sys
 from datetime import datetime
 import git
 import argparse
@@ -32,12 +33,16 @@ def get_bp_dir(data_source, sf, distribution="pointers"):
         raise ValueError(f"Unknown data source: {data_source}")
 
 def parse_benchmark_output(output):
-    """Parse benchmark output for times and stats."""
+    """Parse benchmark output for times and stats, handling both output formats."""
     generation_time = None
     merge_duration = None
     stats_after = None
-
+    merge_steps = None
+    fan_ins = []
+    total_records = None
+    
     for line in output.splitlines():
+        # Common parsing for both formats
         if "generation duration" in line:
             time_str = line.split("generation duration ")[1].strip().rstrip('s')
             generation_time = convert_time_to_seconds(time_str)
@@ -46,8 +51,41 @@ def parse_benchmark_output(output):
             merge_duration = convert_time_to_seconds(time_str)
         elif "stats after" in line:
             stats_after = line.strip("stats after ").strip("()").split(", ")
-
-    return generation_time, merge_duration, stats_after
+        
+        # Parse the hierarchical merge output format
+        elif "total merge steps = " in line:
+            merge_steps = int(line.split("total merge steps = ")[1].strip())
+        elif "Fan-ins per step: " in line:
+            fan_ins_str = line.split("Fan-ins per step: ")[1].strip("[]")
+            if fan_ins_str:
+                fan_ins = [int(x.strip()) for x in fan_ins_str.split(",")]
+        
+        # Look for the total records count in both formats
+        elif "Finished parallel merge in" in line and "total" in line:
+            # Format: "Finished parallel merge in X.XXs (total NNNNNNN records)"
+            total_str = line.split("total ")[1].split(" ")[0]
+            try:
+                total_records = int(total_str.replace(",", ""))
+            except ValueError:
+                pass
+        
+        # For the hierarchical merge stats at end
+        elif "Total records:" in line:
+            try:
+                total_records = int(line.split("Total records:")[1].strip().split(" ")[0])
+            except (ValueError, IndexError):
+                pass
+    
+    # If merge_steps wasn't explicitly found but we have fan_ins, calculate it
+    if merge_steps is None and fan_ins:
+        merge_steps = len(fan_ins)
+    
+    # If stats_after is None and we have records count, create a minimal stats 
+    # record with just the total records
+    if stats_after is None and total_records is not None:
+        stats_after = [str(total_records)]
+    
+    return generation_time, merge_duration, stats_after, merge_steps, fan_ins, total_records
 
 def get_default_configs():
     """Return default configuration settings."""
@@ -56,23 +94,24 @@ def get_default_configs():
             "data_source": "TPCH",
             "machine": "Lincoln",
             "quantile_method": "Parallel_BSS",
-            "memory_type": "tank/local",
+            "memory_type": "mnt/nvme",
             "query_options": [100],
-            "sf_options": [],
-            "working_mem_options": [1420],
+            "sf_options": [1],
+            "working_mem_options": [200, 1135],
             "bp_sizes": [150000],
-            "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
+            # "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
+            "num_threads_options": [8, 16]
         },
         "GENSORT": {
             "data_source": "GENSORT",
-            "machine": "Lincoln",
+            "machine": "Roscoe",
             "quantile_method": "Parallel_BSS",
             "memory_type": "tank/local",
-            "query_options": [1],
+            "query_options": [],
             "sf_options": [10576511],
             "working_mem_options": [450],
             "bp_sizes": [150000],
-            "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
+            "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18]
         }
     }
 
@@ -215,7 +254,7 @@ def run_benchmark(config, is_manual=False):
     ]
 
     if is_manual:
-        # For manual runs, just execute and return success/failure
+        # For manual runs, just execute and let output go to terminal
         result = subprocess.run(cmd, env=env)
         return result.returncode == 0
     else:
@@ -223,27 +262,56 @@ def run_benchmark(config, is_manual=False):
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
         return result
 
+def calculate_throughput(num_records, generation_time, merge_duration, num_threads):
+    """Calculate throughput in GB/s based on record count, time, and threads."""
+    # Assume each record is 100 bytes
+    record_size_bytes = 100
+    total_data_gb = (num_records * record_size_bytes) / (1024 * 1024 * 1024)
+    
+    # Calculate total processing time
+    total_time = generation_time + merge_duration
+    
+    # Calculate throughput metrics
+    if total_time > 0:
+        throughput_gb_s = total_data_gb / total_time
+        throughput_per_thread = throughput_gb_s / num_threads
+    else:
+        throughput_gb_s = 0
+        throughput_per_thread = 0
+        
+    return throughput_gb_s, throughput_per_thread
+
 def run_manual_benchmark(config, args):
     """Run a manual benchmark and save results."""
     # Run the benchmark
-    result = run_benchmark(config, is_manual=False)  # Change to False to capture output
+    result = run_benchmark(config, is_manual=False)  
     
     if result.returncode != 0:
         print("Benchmark failed!")
         return False
         
     # Parse the benchmark output
-    generation_time, merge_duration, stats_after = parse_benchmark_output(result.stdout)
+    generation_time, merge_duration, stats_after, merge_steps, fan_ins, total_records = parse_benchmark_output(result.stdout)
     
-    if generation_time is None or merge_duration is None or stats_after is None:
+    if generation_time is None or merge_duration is None:
         print("Failed to parse benchmark output")
         return False
         
     # Calculate additional metrics
-    num_merge_steps = math.ceil(calculate_num_tuples(config["data_source"], config["sf"]) / config["working_mem"])
-    new_pages = stats_after[0]
-    pages_read = stats_after[1]
-    pages_written = stats_after[2]
+    num_merge_steps = merge_steps if merge_steps is not None else 0
+    
+    # Calculate throughput metrics
+    num_records = total_records if total_records is not None else (
+        calculate_num_tuples(config["data_source"], config["sf"])
+    )
+    throughput_gb_s, throughput_per_thread = calculate_throughput(
+        num_records, generation_time, merge_duration, config["num_threads"]
+    )
+    
+    # Set default values for when stats_after is not available
+    new_pages = stats_after[0] if stats_after and len(stats_after) > 0 else "N/A"
+    pages_read = stats_after[1] if stats_after and len(stats_after) > 1 else "N/A"
+    pages_written = stats_after[2] if stats_after and len(stats_after) > 2 else "N/A"
     
     # Create output directory and CSV
     git_hash = get_git_hash()
@@ -260,14 +328,16 @@ def run_manual_benchmark(config, args):
             "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
             "Working mem size", "Num Threads (Run Merge)", 
             "Generation Time", "Merge Time", "Num Merge steps", 
-            "New pages", "Pages read", "Pages written"
+            "New pages", "Pages read", "Pages written",
+            "Throughput (GB/s)", "Throughput per Thread (GB/s)"
         ])
         writer.writerow([
             args.machine or "Lincoln", config["data_source"], "Parallel_BSS", "tank/local",
             config["query"], config["sf"], config["bp_size"],
             config["working_mem"], config["num_threads"],
             generation_time, merge_duration, num_merge_steps,
-            new_pages, pages_read, pages_written
+            new_pages, pages_read, pages_written,
+            f"{throughput_gb_s:.4f}", f"{throughput_per_thread:.4f}"
         ])
     
     print(f"Benchmark results saved to {output_csv}")
@@ -277,6 +347,7 @@ def run_manual_benchmark(config, args):
         plot_thread_scaling(output_csv)
     
     return True
+
 def main():
     args = parse_args()
     
@@ -300,7 +371,12 @@ def main():
         print(f"Running benchmark for {config['data_source']} (Query {config['query']}, SF {config['sf']}) "
               f"with BP={config['bp_size']}, Threads={config['num_threads']}, WorkingMem={config['working_mem']}")
         
-        run_manual_benchmark(config, args)
+        # Just run the benchmark with output to terminal if only args given
+        if len(sys.argv) == 2 and sys.argv[1].startswith('-'):
+            run_benchmark(config, is_manual=True)
+        else:
+            # Run the full benchmark with data collection
+            run_manual_benchmark(config, args)
         return
 
     # No args provided - run automated benchmarks
@@ -325,7 +401,8 @@ def main():
                         "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
                         "Working mem size", "Num Threads (Run Merge)", 
                         "Generation Time", "Merge Time", "Num Merge steps", 
-                        "New pages", "Pages read", "Pages written"
+                        "New pages", "Pages read", "Pages written",
+                        "Throughput (GB/s)", "Throughput per Thread (GB/s)"
                     ])
 
                     # Iterate through all parameter combinations
@@ -354,21 +431,36 @@ def main():
                                     continue
 
                                 # Parse the output
-                                generation_time, merge_duration, stats_after = parse_benchmark_output(result.stdout)
+                                generation_time, merge_duration, stats_after, merge_steps, fan_ins, total_records = parse_benchmark_output(result.stdout)
 
-                                if generation_time is not None and merge_duration is not None and stats_after is not None:
-                                    num_merge_steps = math.ceil(calculate_num_tuples(data_source, sf) / working_mem)
-                                    new_pages = stats_after[0]
-                                    pages_read = stats_after[1]
-                                    pages_written = stats_after[2]
+                                if generation_time is not None and merge_duration is not None:
+                                    # If we couldn't get merge steps from output, estimate it
+                                    if merge_steps is None:
+                                        merge_steps = math.ceil(calculate_num_tuples(data_source, sf) / working_mem)
+                                    
+                                    # Get record count to calculate throughput
+                                    num_records = total_records if total_records is not None else (
+                                        calculate_num_tuples(data_source, sf)
+                                    )
+                                    
+                                    # Calculate throughput
+                                    throughput_gb_s, throughput_per_thread = calculate_throughput(
+                                        num_records, generation_time, merge_duration, num_threads
+                                    )
+                                    
+                                    # Set default values for when stats_after is not available
+                                    new_pages = stats_after[0] if stats_after and len(stats_after) > 0 else "N/A"
+                                    pages_read = stats_after[1] if stats_after and len(stats_after) > 1 else "N/A"
+                                    pages_written = stats_after[2] if stats_after and len(stats_after) > 2 else "N/A"
 
                                     writer.writerow([
                                         base_config["machine"], data_source, base_config["quantile_method"],
                                         base_config["memory_type"], query,
                                         sf, bp_size,
                                         working_mem, num_threads,
-                                        generation_time, merge_duration, num_merge_steps,
-                                        new_pages, pages_read, pages_written
+                                        generation_time, merge_duration, merge_steps,
+                                        new_pages, pages_read, pages_written,
+                                        f"{throughput_gb_s:.4f}", f"{throughput_per_thread:.4f}"
                                     ])
                                     file.flush()
 

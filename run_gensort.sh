@@ -21,7 +21,7 @@ BP_DIR="bp-dir-gensort-sf-$SF-uniform"
 # Clean up previous runs
 rm -rf "$BP_DIR/0/??*"
 
-cargo run --release --bin sort_run -- -q "$QUERY" -p "$BP_DIR" -n 1 -b "$BUFFER_POOL_SIZE"
+cargo run --release --bin benchmark_queries -- -q "$QUERY" -p "$BP_DIR" -n 1 -b "$BUFFER_POOL_SIZE"
 
 # Clean up after the run
 rm -rf "$BP_DIR/0/??*"
