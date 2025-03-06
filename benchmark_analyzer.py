@@ -109,11 +109,44 @@ def load_benchmark_data(directory, data_source=None, query=None, scale_factor=No
         if col in combined_df.columns:
             combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce')
     
-    return combined_df
+    # Check if "Iteration" column exists
+    if "Iteration" not in combined_df.columns:
+        # Add a default iteration column if it doesn't exist
+        combined_df["Iteration"] = 1
     
-def plot_thread_scaling_by_memory(df, output_dir):
+    return combined_df
+
+def compute_aggregated_metrics(df):
     """
-    Generate thread scaling plots separated by memory size.
+    Compute aggregated metrics (mean, std dev) for multiple iterations of the same configuration.
+    Returns a new DataFrame with averaged metrics and standard deviations.
+    """
+    # Define the columns to group by (all configuration parameters except metrics)
+    group_cols = [
+        "Machine", "Data Source", "Quantile Method", "Memory Type", 
+        "Query Num", "SF", "Bp_Size", "Working mem size", "Num Threads (Run Merge)"
+    ]
+    
+    # Define metrics columns to average
+    metric_cols = [
+        "Generation Time", "Merge Time", "Num Merge steps",
+        "Throughput (GB/s)", "Throughput per Thread (GB/s)"
+    ]
+    
+    # Calculate aggregated statistics
+    aggregated = df.groupby(group_cols)[metric_cols].agg(['mean', 'std', 'count']).reset_index()
+    
+    # Flatten the column hierarchy
+    aggregated.columns = [
+        col[0] if col[1] == '' else f"{col[0]}_{col[1]}" 
+        for col in aggregated.columns
+    ]
+    
+    return aggregated
+
+def plot_thread_scaling_by_memory_with_error_bars(df, output_dir):
+    """
+    Generate thread scaling plots separated by memory size with error bars.
     Each plot shows how merge time varies with thread count for a specific memory size.
     """
     # Create output directory if it doesn't exist
@@ -136,18 +169,27 @@ def plot_thread_scaling_by_memory(df, output_dir):
         # Create plot
         plt.figure(figsize=(12, 8))
         
-        # Plot merge time vs thread count
-        plt.plot(group_df["Num Threads (Run Merge)"], group_df["Merge Time"], 
-                 'bo-', linewidth=2, markersize=8, color=colors[0])
+        # Plot merge time vs thread count with error bars
+        plt.errorbar(
+            group_df["Num Threads (Run Merge)"], 
+            group_df["Merge Time_mean"], 
+            yerr=group_df["Merge Time_std"],
+            fmt='o-', linewidth=2, markersize=8, color=colors[0],
+            capsize=5, elinewidth=1.5, capthick=1.5
+        )
         
-        # Add data points with merge step annotations
+        # Add data points with merge step annotations and iteration counts
         for i, row in group_df.iterrows():
-            plt.annotate(f"{row['Merge Time']:.2f}s ({int(row['Num Merge steps'])} steps)", 
-                         (row["Num Threads (Run Merge)"], row["Merge Time"]),
-                         textcoords="offset points",
-                         xytext=(0, 10),
-                         ha='center',
-                         fontsize=9)
+            annotation_text = f"{row['Merge Time_mean']:.2f}s ± {row['Merge Time_std']:.2f}s\n({int(row['Num Merge steps_mean'])} steps, n={int(row['Merge Time_count'])})"
+            plt.annotate(
+                annotation_text, 
+                (row["Num Threads (Run Merge)"], row["Merge Time_mean"]),
+                textcoords="offset points",
+                xytext=(0, 12),
+                ha='center',
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+            )
         
         # Set plot title and labels
         plt.title(f"Thread Scaling Analysis - Memory Size: {mem_size}\n"
@@ -162,15 +204,17 @@ def plot_thread_scaling_by_memory(df, output_dir):
         plt.xticks(threads, threads)
         
         # Set y-axis range
-        plt.ylim(0, group_df["Merge Time"].max() * 1.2)
+        y_min = max(0, group_df["Merge Time_mean"].min() - 2 * group_df["Merge Time_std"].max())
+        y_max = group_df["Merge Time_mean"].max() + 2 * group_df["Merge Time_std"].max()
+        plt.ylim(y_min, y_max * 1.1)
         
         # Add grid
         plt.grid(True, linestyle='--', alpha=0.7)
         
         # Add text with throughput information
         plt.figtext(0.5, 0.01, 
-                    f"Average Throughput: {group_df['Throughput (GB/s)'].mean():.4f} GB/s | "
-                    f"Per Thread: {group_df['Throughput per Thread (GB/s)'].mean():.4f} GB/s",
+                    f"Average Throughput: {group_df['Throughput (GB/s)_mean'].mean():.4f} GB/s | "
+                    f"Per Thread: {group_df['Throughput per Thread (GB/s)_mean'].mean():.4f} GB/s",
                     ha="center", fontsize=10, bbox={"facecolor":"lightgrey", "alpha":0.5, "pad":5})
         
         plt.tight_layout()
@@ -183,9 +227,9 @@ def plot_thread_scaling_by_memory(df, output_dir):
         
         print(f"Saved plot: {save_path}")
 
-def plot_merge_time_thread_scaling(df, output_dir):
+def plot_merge_time_thread_scaling_with_error_bars(df, output_dir):
     """
-    Generate a plot showing merge time vs. thread count for all memory sizes on one graph.
+    Generate a plot showing merge time vs. thread count for all memory sizes with error bars.
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -206,25 +250,35 @@ def plot_merge_time_thread_scaling(df, output_dir):
         # Create figure
         plt.figure(figsize=(12, 8))
         
-        # Plot merge time vs. thread count for each memory size
+        # Plot merge time vs. thread count for each memory size with error bars
         for i, mem_size in enumerate(mem_sizes):
             mem_data = group_df[group_df["Working mem size"] == mem_size]
             mem_data = mem_data.sort_values("Num Threads (Run Merge)")
             
             if len(mem_data) >= 2:  # Need at least 2 points for a line
                 color = colors[i % len(colors)]
-                plt.plot(mem_data["Num Threads (Run Merge)"], mem_data["Merge Time"], 
-                         'o-', linewidth=2, markersize=8, color=color,
-                         label=f"Memory: {mem_size}")
                 
-                # Add annotations with merge steps and time
+                plt.errorbar(
+                    mem_data["Num Threads (Run Merge)"], 
+                    mem_data["Merge Time_mean"], 
+                    yerr=mem_data["Merge Time_std"],
+                    fmt='o-', linewidth=2, markersize=8, color=color,
+                    capsize=5, elinewidth=1.5, capthick=1.5,
+                    label=f"Memory: {mem_size}"
+                )
+                
+                # Add annotations with merge steps, time, and sample count
                 for _, row in mem_data.iterrows():
-                    plt.annotate(f"{row['Merge Time']:.2f}s ({int(row['Num Merge steps'])} steps)", 
-                               (row["Num Threads (Run Merge)"], row["Merge Time"]),
-                               textcoords="offset points",
-                               xytext=(0, 10),
-                               ha='center',
-                               fontsize=9)
+                    annotation_text = f"{row['Merge Time_mean']:.2f}s ± {row['Merge Time_std']:.2f}s\n({int(row['Num Merge steps_mean'])} steps, n={int(row['Merge Time_count'])})"
+                    plt.annotate(
+                        annotation_text, 
+                        (row["Num Threads (Run Merge)"], row["Merge Time_mean"]),
+                        textcoords="offset points",
+                        xytext=(0, 12),
+                        ha='center',
+                        fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                    )
         
         # Set plot title and labels
         plt.title(f"Merge Time vs. Thread Count\n{data_source} Query {query} SF={sf}",
@@ -247,9 +301,9 @@ def plot_merge_time_thread_scaling(df, output_dir):
         
         print(f"Saved plot: {save_path}")
 
-def plot_throughput_analysis(df, output_dir):
+def plot_throughput_analysis_with_error_bars(df, output_dir):
     """
-    Generate plots analyzing throughput metrics across different configurations.
+    Generate plots analyzing throughput metrics across different configurations with error bars.
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -261,27 +315,36 @@ def plot_throughput_analysis(df, output_dir):
         # Get unique memory sizes
         mem_sizes = sorted(group_df["Working mem size"].unique())
         
-        # Create figure
+        # Create figure for throughput
         plt.figure(figsize=(12, 8))
         
-        # Plot throughput vs thread count for each memory size
+        # Plot throughput vs thread count for each memory size with error bars
         for i, mem_size in enumerate(mem_sizes):
             mem_data = group_df[group_df["Working mem size"] == mem_size]
             mem_data = mem_data.sort_values("Num Threads (Run Merge)")
             
             if len(mem_data) >= 2:  # Need at least 2 points for a line
-                plt.plot(mem_data["Num Threads (Run Merge)"], mem_data["Throughput (GB/s)"], 
-                        'o-', linewidth=2, markersize=8, 
-                        label=f"Memory: {mem_size}")
+                plt.errorbar(
+                    mem_data["Num Threads (Run Merge)"], 
+                    mem_data["Throughput (GB/s)_mean"], 
+                    yerr=mem_data["Throughput (GB/s)_std"],
+                    fmt='o-', linewidth=2, markersize=8,
+                    capsize=5, elinewidth=1.5, capthick=1.5,
+                    label=f"Memory: {mem_size}"
+                )
                 
-                # Add annotations with throughput values
+                # Add annotations with throughput values and sample count
                 for _, row in mem_data.iterrows():
-                    plt.annotate(f"{row['Throughput (GB/s)']:.4f} GB/s", 
-                               (row["Num Threads (Run Merge)"], row["Throughput (GB/s)"]),
-                               textcoords="offset points",
-                               xytext=(0, 10),
-                               ha='center',
-                               fontsize=9)
+                    annotation_text = f"{row['Throughput (GB/s)_mean']:.4f} ± {row['Throughput (GB/s)_std']:.4f} GB/s\n(n={int(row['Throughput (GB/s)_count'])})"
+                    plt.annotate(
+                        annotation_text, 
+                        (row["Num Threads (Run Merge)"], row["Throughput (GB/s)_mean"]),
+                        textcoords="offset points",
+                        xytext=(0, 10),
+                        ha='center',
+                        fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                    )
         
         # Set plot title and labels
         plt.title(f"Throughput Analysis\n{data_source} Query {query} SF={sf}",
@@ -304,7 +367,7 @@ def plot_throughput_analysis(df, output_dir):
         
         print(f"Saved plot: {save_path}")
 
-        # Also plot per-thread throughput
+        # Also plot per-thread throughput with error bars
         plt.figure(figsize=(12, 8))
         
         for i, mem_size in enumerate(mem_sizes):
@@ -312,18 +375,27 @@ def plot_throughput_analysis(df, output_dir):
             mem_data = mem_data.sort_values("Num Threads (Run Merge)")
             
             if len(mem_data) >= 2:
-                plt.plot(mem_data["Num Threads (Run Merge)"], mem_data["Throughput per Thread (GB/s)"], 
-                        'o-', linewidth=2, markersize=8, 
-                        label=f"Memory: {mem_size}")
+                plt.errorbar(
+                    mem_data["Num Threads (Run Merge)"], 
+                    mem_data["Throughput per Thread (GB/s)_mean"], 
+                    yerr=mem_data["Throughput per Thread (GB/s)_std"],
+                    fmt='o-', linewidth=2, markersize=8,
+                    capsize=5, elinewidth=1.5, capthick=1.5,
+                    label=f"Memory: {mem_size}"
+                )
                 
-                # Add annotations with throughput values
+                # Add annotations with throughput values and sample count
                 for _, row in mem_data.iterrows():
-                    plt.annotate(f"{row['Throughput per Thread (GB/s)']:.4f} GB/s", 
-                               (row["Num Threads (Run Merge)"], row["Throughput per Thread (GB/s)"]),
-                               textcoords="offset points",
-                               xytext=(0, 10),
-                               ha='center',
-                               fontsize=9)
+                    annotation_text = f"{row['Throughput per Thread (GB/s)_mean']:.4f} ± {row['Throughput per Thread (GB/s)_std']:.4f} GB/s\n(n={int(row['Throughput per Thread (GB/s)_count'])})"
+                    plt.annotate(
+                        annotation_text, 
+                        (row["Num Threads (Run Merge)"], row["Throughput per Thread (GB/s)_mean"]),
+                        textcoords="offset points",
+                        xytext=(0, 10),
+                        ha='center',
+                        fontsize=9,
+                        bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
+                    )
         
         plt.title(f"Per-Thread Throughput Analysis\n{data_source} Query {query} SF={sf}",
                 fontsize=14, pad=20)
@@ -368,30 +440,34 @@ def main():
     try:
         # Load benchmark data
         print(f"Loading benchmark data from {results_dir}...")
-        df = load_benchmark_data(
+        raw_df = load_benchmark_data(
             results_dir, 
             data_source=args.data_source,
             query=args.query,
             scale_factor=args.scale_factor
         )
         
+        # Compute aggregated metrics (means, std devs) for multiple iterations
+        print("Computing aggregated metrics for multiple iterations...")
+        df = compute_aggregated_metrics(raw_df)
+        
         # Print summary information
-        print(f"\nLoaded {len(df)} benchmark results")
+        print(f"\nLoaded and processed {len(raw_df)} benchmark results")
         print(f"Data sources: {df['Data Source'].unique()}")
         print(f"Queries: {df['Query Num'].unique()}")
         print(f"Scale factors: {df['SF'].unique()}")
         print(f"Memory sizes: {sorted(df['Working mem size'].unique())}")
         print(f"Thread counts: {sorted(df['Num Threads (Run Merge)'].unique())}")
         
-        # Generate plots
-        print("\nGenerating thread scaling plots by memory size...")
-        plot_thread_scaling_by_memory(df, output_dir)
+        # Generate plots with error bars
+        print("\nGenerating thread scaling plots by memory size with error bars...")
+        plot_thread_scaling_by_memory_with_error_bars(df, output_dir)
         
-        print("\nGenerating merge time vs. thread count plot...")
-        plot_merge_time_thread_scaling(df, output_dir)
+        print("\nGenerating merge time vs. thread count plot with error bars...")
+        plot_merge_time_thread_scaling_with_error_bars(df, output_dir)
         
-        print("\nGenerating throughput analysis plots...")
-        plot_throughput_analysis(df, output_dir)
+        print("\nGenerating throughput analysis plots with error bars...")
+        plot_throughput_analysis_with_error_bars(df, output_dir)
         
         # Get relative path to results_dir for cleaner output message
         try:

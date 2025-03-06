@@ -97,10 +97,11 @@ def get_default_configs():
             "memory_type": "mnt/nvme",
             "query_options": [100],
             "sf_options": [1],
-            "working_mem_options": [200, 600, 1135],
+            "working_mem_options": [20, 50, 100, 200, 600, 1135],
             "bp_sizes": [150000],
-            # "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
-            "num_threads_options": [2, 4, 10, 12, 16]
+            "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16],
+            # "num_threads_options": [2, 4, 10, 12, 16]
+            "num_threads_options": [8, 16]
         },
         "GENSORT": {
             "data_source": "GENSORT",
@@ -132,8 +133,12 @@ def parse_args():
                         help='Buffer pool size')
     parser.add_argument('-m', '--machine',
                         help='Machine name')
+    parser.add_argument('-i', '--iterations', type=int, default=1,
+                        help='Number of iterations to run each benchmark configuration')
     parser.add_argument('--plot', action='store_true',
                         help='Generate performance plots')
+    parser.add_argument('--auto', action='store_true',
+                        help='Run in automated mode with default configurations')
     return parser.parse_args()
 
 def plot_thread_scaling(csv_path):
@@ -277,20 +282,20 @@ def calculate_throughput(num_records, generation_time, merge_duration, num_threa
         
     return throughput_gb_s, throughput_per_thread
 
-def run_manual_benchmark(config, args):
-    """Run a manual benchmark and save results."""
+def run_single_benchmark_iteration(config, output_file, iteration, machine):
+    """Run a single benchmark iteration and append the results to the output file."""
     # Run the benchmark
-    result = run_benchmark(config, is_manual=False)  
+    result = run_benchmark(config, is_manual=False)
     
     if result.returncode != 0:
-        print("Benchmark failed!")
+        print(f"Benchmark failed in iteration {iteration}!")
         return False
         
     # Parse the benchmark output
     generation_time, merge_duration, stats_after, merge_steps, fan_ins, total_records = parse_benchmark_output(result.stdout)
     
     if generation_time is None or merge_duration is None:
-        print("Failed to parse benchmark output")
+        print(f"Failed to parse benchmark output in iteration {iteration}")
         return False
         
     # Calculate additional metrics
@@ -309,6 +314,25 @@ def run_manual_benchmark(config, args):
     pages_read = stats_after[1] if stats_after and len(stats_after) > 1 else "N/A"
     pages_written = stats_after[2] if stats_after and len(stats_after) > 2 else "N/A"
     
+    # Append results to CSV
+    with open(output_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow([
+            machine, config["data_source"], "Parallel_BSS", "tank/local",
+            config["query"], config["sf"], config["bp_size"],
+            config["working_mem"], config["num_threads"], iteration,
+            generation_time, merge_duration, num_merge_steps,
+            new_pages, pages_read, pages_written,
+            f"{throughput_gb_s:.4f}", f"{throughput_per_thread:.4f}"
+        ])
+    
+    return True
+
+def run_manual_benchmark(config, args):
+    """Run a manual benchmark for a specific configuration."""
+    # Get the number of iterations
+    iterations = args.iterations if args.iterations > 0 else 1
+    
     # Create output directory and CSV
     git_hash = get_git_hash()
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -317,24 +341,22 @@ def run_manual_benchmark(config, args):
     # Ensure directory exists
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
     
-    # Write results to CSV
+    # Create CSV and write header
     with open(output_csv, mode="w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow([
             "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
-            "Working mem size", "Num Threads (Run Merge)", 
+            "Working mem size", "Num Threads (Run Merge)", "Iteration",
             "Generation Time", "Merge Time", "Num Merge steps", 
             "New pages", "Pages read", "Pages written",
             "Throughput (GB/s)", "Throughput per Thread (GB/s)"
         ])
-        writer.writerow([
-            args.machine or "Lincoln", config["data_source"], "Parallel_BSS", "tank/local",
-            config["query"], config["sf"], config["bp_size"],
-            config["working_mem"], config["num_threads"],
-            generation_time, merge_duration, num_merge_steps,
-            new_pages, pages_read, pages_written,
-            f"{throughput_gb_s:.4f}", f"{throughput_per_thread:.4f}"
-        ])
+    
+    # Run the benchmark for the specified number of iterations
+    print(f"Running benchmark with {iterations} iterations...")
+    for iteration in range(1, iterations + 1):
+        print(f"\nIteration {iteration}/{iterations}:")
+        run_single_benchmark_iteration(config, output_csv, iteration, args.machine or "Lincoln")
     
     print(f"Benchmark results saved to {output_csv}")
     
@@ -344,31 +366,8 @@ def run_manual_benchmark(config, args):
     
     return True
 
-def main():
-    args = parse_args()
-    
-    # Check if any arguments are provided
-    if len(sys.argv) > 1:
-        # Always run in simple manual mode with output to terminal
-        # Use provided values or defaults for manual run
-        config = {
-            "data_source": args.data_source or "TPCH",
-            "bp_size": args.buffer_pool or 100000,
-            "num_threads": args.threads or 16,
-            "working_mem": args.working_mem or 1420,
-            "query": args.query or 100,
-            "sf": args.scale_factor or 1
-        }
-        
-        print(f"Running benchmark for {config['data_source']} (Query {config['query']}, SF {config['sf']}) "
-              f"with BP={config['bp_size']}, Threads={config['num_threads']}, WorkingMem={config['working_mem']}")
-        
-        # Always run with direct terminal output
-        run_benchmark(config, is_manual=True)
-        return
-
-    # No args provided - run automated benchmarks
-    configs = get_default_configs()
+def run_automated_benchmarks(configs, iterations=1, plot=False):
+    """Run automated benchmarks for all configurations with multiple iterations."""
     git_hash = get_git_hash()
     
     # Create benchmark_results directory if it doesn't exist
@@ -383,23 +382,102 @@ def main():
                 current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
                 output_csv = f"benchmark_results/{git_hash}/{data_source}_QID-{query}_SF-{sf}_TIME-{current_time}.csv"
                 print("writing to ", output_csv)
+                
+                # Create CSV and write header
                 with open(output_csv, mode="w", newline="") as file:
                     writer = csv.writer(file)
                     writer.writerow([
                         "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
-                        "Working mem size", "Num Threads (Run Merge)", 
+                        "Working mem size", "Num Threads (Run Merge)", "Iteration",
                         "Generation Time", "Merge Time", "Num Merge steps", 
                         "New pages", "Pages read", "Pages written",
                         "Throughput (GB/s)", "Throughput per Thread (GB/s)"
                     ])
 
-                    # Iterate through all parameter combinations
+                # Iterate through all parameter combinations
+                for working_mem in base_config["working_mem_options"]:
+                    for bp_size in base_config["bp_sizes"]:
+                        for num_threads in base_config["num_threads_options"]:
+                            print(f"Running benchmark for {data_source} (Query {query}, SF {sf}) "
+                                  f"with BP={bp_size}, Threads={num_threads}, WorkingMem={working_mem}")
+
+                            # Create run configuration
+                            run_config = {
+                                "bp_size": bp_size,
+                                "num_threads": num_threads,
+                                "working_mem": working_mem,
+                                "data_source": data_source,
+                                "query": query,
+                                "sf": sf
+                            }
+
+                            # Run benchmark for each iteration
+                            for iteration in range(1, iterations + 1):
+                                print(f"  Iteration {iteration}/{iterations}")
+                                success = run_single_benchmark_iteration(
+                                    run_config, output_csv, iteration, base_config["machine"]
+                                )
+                                if not success:
+                                    print(f"  Failed to run iteration {iteration}")
+
+                print(f"Benchmark results saved to {output_csv}")
+                
+                # Generate plot if requested
+                if plot:
+                    plot_thread_scaling(output_csv)
+
+def main():
+    args = parse_args()
+    
+    # Determine the number of iterations
+    iterations = max(1, args.iterations)
+    
+    # Check if we should run in automated mode with default configurations
+    if args.auto or len(sys.argv) == 1:
+        print("Running in automated mode with default configurations")
+        configs = get_default_configs()
+        run_automated_benchmarks(configs, iterations=iterations, plot=args.plot)
+        return
+    
+    # If specific arguments are provided but not --auto, run in manual mode
+    if len(sys.argv) > 1:
+        # If data source is provided, run with configurations from that data source
+        if args.data_source:
+            # Get the configurations for the specified data source
+            configs = create_run_configs(args)
+            data_source = args.data_source
+            base_config = configs[data_source]
+            
+            # Create output directory
+            git_hash = get_git_hash()
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_csv = f"benchmark_results/{git_hash}/{data_source}_autorun_TIME-{current_time}.csv"
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+            
+            # Create CSV and write header
+            with open(output_csv, mode="w", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([
+                    "Machine", "Data Source", "Quantile Method", "Memory Type", "Query Num", "SF", "Bp_Size",
+                    "Working mem size", "Num Threads (Run Merge)", "Iteration",
+                    "Generation Time", "Merge Time", "Num Merge steps", 
+                    "New pages", "Pages read", "Pages written",
+                    "Throughput (GB/s)", "Throughput per Thread (GB/s)"
+                ])
+            
+            print(f"Running benchmarks for {data_source} with multiple configurations")
+            
+            # Iterate through all parameter combinations for the data source
+            for query in base_config["query_options"]:
+                for sf in base_config["sf_options"]:
                     for working_mem in base_config["working_mem_options"]:
                         for bp_size in base_config["bp_sizes"]:
                             for num_threads in base_config["num_threads_options"]:
                                 print(f"Running benchmark for {data_source} (Query {query}, SF {sf}) "
                                       f"with BP={bp_size}, Threads={num_threads}, WorkingMem={working_mem}")
-
+                                
                                 # Create run configuration
                                 run_config = {
                                     "bp_size": bp_size,
@@ -409,54 +487,42 @@ def main():
                                     "query": query,
                                     "sf": sf
                                 }
-
-                                # Run benchmark
-                                result = run_benchmark(run_config, is_manual=False)
-
-                                # Process results
-                                if result.returncode != 0:
-                                    print(f"Benchmark failed with error code {result.returncode}")
-                                    continue
-
-                                # Parse the output
-                                generation_time, merge_duration, stats_after, merge_steps, fan_ins, total_records = parse_benchmark_output(result.stdout)
-
-                                if generation_time is not None and merge_duration is not None:
-                                    # If we couldn't get merge steps from output, estimate it
-                                    if merge_steps is None:
-                                        merge_steps = math.ceil(calculate_num_tuples(data_source, sf) / working_mem)
-                                    
-                                    # Get record count to calculate throughput
-                                    num_records = total_records if total_records is not None else (
-                                        calculate_num_tuples(data_source, sf)
+                                
+                                # Run benchmark for each iteration
+                                for iteration in range(1, iterations + 1):
+                                    print(f"  Iteration {iteration}/{iterations}")
+                                    success = run_single_benchmark_iteration(
+                                        run_config, output_csv, iteration, args.machine or base_config["machine"]
                                     )
-                                    
-                                    # Calculate throughput
-                                    throughput_gb_s, throughput_per_thread = calculate_throughput(
-                                        num_records, generation_time, merge_duration, num_threads
-                                    )
-                                    
-                                    # Set default values for when stats_after is not available
-                                    new_pages = stats_after[0] if stats_after and len(stats_after) > 0 else "N/A"
-                                    pages_read = stats_after[1] if stats_after and len(stats_after) > 1 else "N/A"
-                                    pages_written = stats_after[2] if stats_after and len(stats_after) > 2 else "N/A"
-
-                                    writer.writerow([
-                                        base_config["machine"], data_source, base_config["quantile_method"],
-                                        base_config["memory_type"], query,
-                                        sf, bp_size,
-                                        working_mem, num_threads,
-                                        generation_time, merge_duration, merge_steps,
-                                        new_pages, pages_read, pages_written,
-                                        f"{throughput_gb_s:.4f}", f"{throughput_per_thread:.4f}"
-                                    ])
-                                    file.flush()
-
-                print(f"Benchmark results saved to {output_csv}")
-                
-                # Generate plot if requested
-                if args.plot:
-                    plot_thread_scaling(output_csv)
+                                    if not success:
+                                        print(f"  Failed to run iteration {iteration}")
+            
+            print(f"Benchmark results saved to {output_csv}")
+            
+            # Generate plot if requested
+            if args.plot:
+                plot_thread_scaling(output_csv)
+        
+        else:
+            # Just run a single configuration with all parameters explicitly specified
+            config = {
+                "data_source": args.data_source or "TPCH",
+                "bp_size": args.buffer_pool or 100000,
+                "num_threads": args.threads or 16,
+                "working_mem": args.working_mem or 1420,
+                "query": args.query or 100,
+                "sf": args.scale_factor or 1
+            }
+            
+            print(f"Running benchmark for {config['data_source']} (Query {config['query']}, SF {config['sf']}) "
+                  f"with BP={config['bp_size']}, Threads={config['num_threads']}, WorkingMem={config['working_mem']}")
+            
+            # If iterations parameter is provided, run with data collection
+            if args.iterations > 1:
+                run_manual_benchmark(config, args)
+            else:
+                # Otherwise just run with terminal output
+                run_benchmark(config, is_manual=True)
 
 if __name__ == "__main__":
     main()
