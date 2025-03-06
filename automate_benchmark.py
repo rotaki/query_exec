@@ -92,15 +92,15 @@ def get_default_configs():
     return {
         "TPCH": {
             "data_source": "TPCH",
-            "machine": "Lincoln",
+            "machine": "Roscoe",
             "quantile_method": "Parallel_BSS",
             "memory_type": "mnt/nvme",
             "query_options": [100],
             "sf_options": [1],
-            "working_mem_options": [200, 1135],
+            "working_mem_options": [200, 600, 1135],
             "bp_sizes": [150000],
             # "num_threads_options": [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
-            "num_threads_options": [8, 16]
+            "num_threads_options": [2, 4, 10, 12, 16]
         },
         "GENSORT": {
             "data_source": "GENSORT",
@@ -194,11 +194,6 @@ def convert_time_to_seconds(time_str):
     # Otherwise it's already in seconds
     return float(time_str)
 
-def is_single_config():
-    """Check if we're running a single manual configuration."""
-    args = parse_args()
-    return args.data_source is not None
-
 def create_run_configs(args):
     """Create run configurations based on args and defaults."""
     default_configs = get_default_configs()
@@ -255,6 +250,7 @@ def run_benchmark(config, is_manual=False):
 
     if is_manual:
         # For manual runs, just execute and let output go to terminal
+        print("Running command:", " ".join(cmd))
         result = subprocess.run(cmd, env=env)
         return result.returncode == 0
     else:
@@ -351,13 +347,9 @@ def run_manual_benchmark(config, args):
 def main():
     args = parse_args()
     
-    # Check if any args were provided (manual mode)
-    manual_mode = any(value is not None for value in [
-        args.data_source, args.scale_factor, args.query,
-        args.threads, args.working_mem, args.buffer_pool, args.machine
-    ])
-    
-    if manual_mode:
+    # Check if any arguments are provided
+    if len(sys.argv) > 1:
+        # Always run in simple manual mode with output to terminal
         # Use provided values or defaults for manual run
         config = {
             "data_source": args.data_source or "TPCH",
@@ -371,12 +363,8 @@ def main():
         print(f"Running benchmark for {config['data_source']} (Query {config['query']}, SF {config['sf']}) "
               f"with BP={config['bp_size']}, Threads={config['num_threads']}, WorkingMem={config['working_mem']}")
         
-        # Just run the benchmark with output to terminal if only args given
-        if len(sys.argv) == 2 and sys.argv[1].startswith('-'):
-            run_benchmark(config, is_manual=True)
-        else:
-            # Run the full benchmark with data collection
-            run_manual_benchmark(config, args)
+        # Always run with direct terminal output
+        run_benchmark(config, is_manual=True)
         return
 
     # No args provided - run automated benchmarks
