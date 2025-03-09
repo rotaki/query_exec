@@ -10,3 +10,20 @@
 # /tpch/data/sf-8
 # /tpch/data/sf-9
 # /tpch/data/sf-10
+/test_bp_*
+/tpch/*
+/bp-dir-tpch-sf-*
+/venv
+/bp-*
+/benchmark_results
+.bench./*
+/yellow/*
+/quantile_data/*
+benchmark_results.csv
+gensort-linux-1.5/data/*
+gensort/data/*
+gensort/uniform
+gensort/grace 
+gensort/pointers 
+#xtx update
+gensort/skewed

@@ -6,6 +6,7 @@ mod loader;
 mod logger;
 mod optimizer;
 mod parser;
+pub mod quantile_lib;
 mod query_executor;
 mod rwlatch;
 mod tuple;

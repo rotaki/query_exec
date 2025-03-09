@@ -181,6 +181,7 @@ pub enum DataType {
     Date,
     Months,
     Days,
+    Timestamp,
     Unknown,
 }
 
@@ -209,6 +210,7 @@ impl std::fmt::Display for DataType {
             DataType::Date => write!(f, "Date"),
             DataType::Months => write!(f, "Months"),
             DataType::Days => write!(f, "Days"),
+            DataType::Timestamp => write!(f, "Timestamp"),
             DataType::Unknown => write!(f, "Unknown"),
         }
     }

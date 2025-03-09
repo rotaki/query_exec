@@ -2,6 +2,7 @@ use clap::Parser;
 use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
+        TupleBufferIter,
     },
     BufferPool, ContainerId, MemPool, OnDiskStorage,
 };
@@ -74,6 +75,36 @@ fn main() {
     let time = std::time::Instant::now();
     let result = execute(db_id, &storage, exe, true);
     println!("Time: {} ms", time.elapsed().as_millis());
+
+    println!("stats: \n{}", bp.stats());
+
+    let iter = result.iter();
+    let index = 0;
+
+    match iter.next() {
+        Ok(Some(tuple)) => {
+            println!("{:?}", tuple);
+        }
+        Ok(None) => {
+            println!("No tuples found.");
+        }
+        Err(e) => {
+            eprintln!("Error occurred: {:?}", e);
+        }
+    }
+
+    // loop {
+    //     match iter.next() {
+    //         Ok(Some(tuple)) => {
+    //             println!("{:?}", tuple);
+    //         }
+    //         Ok(None) => break, // End of iterator
+    //         Err(e) => {
+    //             eprintln!("Error occurred: {:?}", e);
+    //             break;
+    //         }
+    //     }
+    // }
 
     println!("stats: \n{}", bp.stats());
     println!("Result num rows: {}", result.num_tuples());
