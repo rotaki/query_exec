@@ -1,4 +1,5 @@
 use clap::Parser;
+use fbtree::container::ContainerManager;
 use query_exec::{
     prelude::{
         execute, load_db, to_logical, to_physical, MemoryPolicy, OnDiskPipelineGraph, TupleBuffer,
@@ -53,7 +54,8 @@ fn main() {
         memory_size_per_operator
     );
 
-    let bp = Arc::new(BufferPool::new(&opt.path, opt.buffer_pool_size, false).unwrap());
+    let cm = Arc::new(ContainerManager::new(&opt.path, true, false).unwrap());
+    let bp = Arc::new(BufferPool::new(opt.buffer_pool_size, cm).unwrap());
     let storage = Arc::new(OnDiskStorage::load(&bp));
     let (db_id, catalog) = load_db(&storage, "TPCH").unwrap();
 

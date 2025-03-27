@@ -1,4 +1,5 @@
 use clap::Parser;
+use fbtree::container::ContainerManager;
 use query_exec::{
     prelude::{create_db, create_table_from_sql, import_csv, Catalog},
     BufferPool, ContainerDS, OnDiskStorage,
@@ -19,10 +20,6 @@ pub struct TpchOpt {
 
 fn get_catalog() -> Arc<Catalog> {
     Arc::new(Catalog::new())
-}
-
-fn get_bp(dir: &str, num_frames: usize) -> Arc<BufferPool> {
-    Arc::new(BufferPool::new(dir, num_frames, false).unwrap())
 }
 
 fn main() {
@@ -46,7 +43,9 @@ fn main() {
         panic!("Buffer pool directory {} already exists.", bp_name);
     }
 
-    let bp = get_bp(&bp_name, opt.buffer_pool_size);
+    let cm = Arc::new(ContainerManager::new(&bp_name, true, false).unwrap());
+    let bp = Arc::new(BufferPool::new(opt.buffer_pool_size, cm).unwrap());
+
     let storage = Arc::new(OnDiskStorage::new(&bp));
     let db_id = create_db(&storage, "TPCH").unwrap();
 
