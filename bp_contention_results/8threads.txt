@@ -1,0 +1,40 @@
+Iteration 1
+Using ParallelBSS run generation strategy
+Total tuples estimated: 15015352
+generation duration 3.550915595s
+
+Pre-merge storage statistics:
+  Total pages used: 289655
+  Total records: 15015352
+  Average records per page: 51.84
+Using Parallel BSS merge strategy
+
+Starting hierarchical parallel merge operation...
+
+Merging 2856 runs (out of 2856 total).
+Using actual quantiles from file: quantile_data/TPCH/QID-100_SF-5_NUMTUPLES-15015352.json
+Thread 4 finished in 2.43s (1876704 records)
+Thread 7 finished in 2.46s (1877207 records)
+Thread 6 finished in 2.46s (1876798 records)
+Thread 0 finished in 2.46s (1876749 records)
+Thread 3 finished in 2.47s (1877160 records)
+Thread 5 finished in 2.47s (1876967 records)
+Thread 1 finished in 2.48s (1876944 records)
+Thread 2 finished in 2.49s (1876823 records)
+Finished parallel merge in 2.50s (total 15015352 records)
+
+Done: total merge steps = 1
+Fan-ins per step: [2856]
+
+Post-merge storage statistics:
+  Total pages used: 289041
+  Total records: 15015352
+  Average records per page: 51.95
+
+Storage efficiency changes:
+  Page reduction: 0.2%
+  Record density improvement: 0.2%
+merge duration 2.526508677s
+filename quantile_data/TPCH/QID-100_SF-5_NUMTUPLES-15015352.json
+Wrote quantiles to file: quantile_data/TPCH/QID-100_SF-5_NUMTUPLES-15015352.json
+Sort execution completed successfully.
