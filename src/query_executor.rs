@@ -482,6 +482,7 @@ pub fn import_csv<P: AsRef<Path>, T: TxnStorageTrait>(
 mod tests {
     use fbtree::{
         bp::{get_test_bp, BufferPool},
+        container::ContainerManager,
         prelude::{ContainerId, InMemStorage, TxnOptions},
         random::gen_random_pathname,
         txn_storage::OnDiskStorage,
@@ -618,7 +619,8 @@ mod tests {
         let db_name = gen_random_pathname(Some("test_db"));
 
         let (db_id, emp_id, dep_id, original_catalog) = {
-            let bp = Arc::new(BufferPool::new(&tempdir, 10, false).unwrap());
+            let cm = Arc::new(ContainerManager::new(&tempdir, false, false).unwrap());
+            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
             let storage = Arc::new(OnDiskStorage::new(&bp));
             let db_id = create_db(&storage, &db_name).unwrap();
 
@@ -629,7 +631,8 @@ mod tests {
             (db_id, c_id, d_id, catalog_ref)
         };
 
-        let bp = Arc::new(BufferPool::new(&tempdir, 10, false).unwrap());
+        let cm = Arc::new(ContainerManager::new(&tempdir, false, false).unwrap());
+        let bp = Arc::new(BufferPool::new(10, cm).unwrap());
         let storage = Arc::new(OnDiskStorage::load(&bp));
         let (new_db_id, new_catalog) = load_db(&storage, &db_name).unwrap();
         assert_eq!(db_id, new_db_id);
